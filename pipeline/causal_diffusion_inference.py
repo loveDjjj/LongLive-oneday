@@ -20,6 +20,7 @@ from wan_5b.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from utils.wan_5b_wrapper import WanDiffusionWrapper, WanTextEncoder, build_vae_5b
 from utils.dataset import DEFAULT_SCENE_CUT_PREFIX
 from utils.config import section_get, wan_default_config
+from utils.device import empty_cache, is_cuda, synchronize
 from utils.i2v_conditioning import (
     _overwrite_i2v_context,
     _zero_i2v_context_timestep,
@@ -445,7 +446,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         self._dit_model.rope_temporal_offset = 0.0
         streaming_decode = self.streaming_vae and not return_latents
         pipeline_vae = streaming_decode and self.vae_device is not None
-        async_vae = streaming_decode and self.async_vae and not pipeline_vae
+        cuda_runtime = is_cuda()
+        async_vae = streaming_decode and self.async_vae and not pipeline_vae and cuda_runtime
         if streaming_decode:
             vae_dev = self.vae_device if pipeline_vae else noise.device
             vae_scale = [
@@ -490,7 +492,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                                     device="cpu", pin_memory=True,
                                 )
                                 pinned.copy_(decoded, non_blocking=True)
-                                torch.cuda.synchronize(decoded.device)
+                                synchronize(decoded.device)
                                 vae_thread_chunks.append(pinned)
                     except Exception as exc:
                         vae_thread_error.append(exc)
@@ -505,7 +507,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         _LLV2_PROFILE_CALL_COUNTER += 1
         _prof = None
         _prof_trace_path = None
-        if _LLV2_PROFILE_SPEC and _LLV2_PROFILE_OUTPUT_DIR:
+        if cuda_runtime and _LLV2_PROFILE_SPEC and _LLV2_PROFILE_OUTPUT_DIR:
             _parts = _LLV2_PROFILE_SPEC.split(":")
             _target_call = int(_parts[0]) if len(_parts) > 0 else 0
             _wait_n = int(_parts[1]) if len(_parts) > 1 else 20
@@ -533,7 +535,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     flush=True,
                 )
         for chunk_index, current_num_frames in enumerate(all_num_frames):
-            if _LLV2_TIME:
+            if _LLV2_TIME and cuda_runtime:
                 _ev_s = torch.cuda.Event(enable_timing=True)
                 _ev_e = torch.cuda.Event(enable_timing=True)
                 _ev_s.record()
@@ -695,13 +697,13 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     ).float().clamp_(-1, 1)
                     video_chunks.append(decoded_chunk.cpu())
                     del decoded_chunk, chunk_bcthw
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
             # Step 3.4: update the start and end frame indices
             current_start_frame += current_num_frames
             cache_start_frame += current_num_frames
 
-            if _LLV2_TIME:
+            if _LLV2_TIME and cuda_runtime:
                 _ev_e.record()
                 _block_events.append((_ev_s, _ev_e))
             if _prof is not None:
@@ -713,7 +715,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             print(f"[LLV2_PROFILE] saved trace -> {_prof_trace_path}", flush=True)
 
         if _LLV2_TIME and _block_events:
-            torch.cuda.synchronize()
+            synchronize()
             _times = [_s.elapsed_time(_e) for _s, _e in _block_events]
             _sorted = sorted(_times)
             _n = len(_sorted)

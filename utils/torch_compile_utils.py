@@ -9,6 +9,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.distributed as dist
+from utils.device import is_cuda
 
 
 def _is_main_process() -> bool:
@@ -94,8 +95,8 @@ def configure_module_call_torch_compile(
     options: dict | None = None,
     suppress_errors: bool = True,
 ):
-    if not torch.cuda.is_available():
-        _log_once(f"[torch.compile] Skipping {name}: CUDA is not available")
+    if not is_cuda():
+        _log_once(f"[torch.compile] Skipping {name}: CUDA is not the active accelerator")
         return None
 
     try:

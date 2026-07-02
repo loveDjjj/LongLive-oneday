@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import timedelta
 from functools import partial
 import os
@@ -6,6 +8,7 @@ import torch.distributed as dist
 from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy, StateDictType
 from torch.distributed.fsdp.api import CPUOffload
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from utils.device import current_device, distributed_backend, set_device
 
 
 def fsdp_state_dict(model):
@@ -44,7 +47,8 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")
 
-    os.environ["NCCL_CROSS_NIC"] = "1"
+    if distributed_backend() == "nccl":
+        os.environ["NCCL_CROSS_NIC"] = "1"
 
     sharding_strategy = {
         "full": ShardingStrategy.FULL_SHARD,
@@ -58,7 +62,7 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         auto_wrap_policy=auto_wrap_policy,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
-        device_id=torch.cuda.current_device(),
+        device_id=current_device(),
         limit_all_gathers=True,
         use_orig_params=True,
         cpu_offload=CPUOffload(offload_params=cpu_offload),
@@ -72,7 +76,7 @@ def barrier():
         dist.barrier()
 
 
-def launch_distributed_job(backend: str = "nccl"):
+def launch_distributed_job(backend: str | None = None):
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
@@ -87,9 +91,10 @@ def launch_distributed_job(backend: str = "nccl"):
     # (e.g. FSDP.optim_state_dict all-gather + rank0-only disk write for a
     # multi-GB full optimizer state) do not trip the NCCL watchdog on other
     # ranks while they wait at the post-save barrier.
+    backend = distributed_backend() if backend is None else backend
     dist.init_process_group(rank=rank, world_size=world_size, backend=backend,
                             init_method=init_method, timeout=timedelta(minutes=60))
-    torch.cuda.set_device(local_rank)
+    set_device(local_rank)
 
 
 class EMA_FSDP:

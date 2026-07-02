@@ -475,12 +475,12 @@ class SelfForcingModel(BaseModel):
         if exit_step == num_denoising_steps - 1:
             denoised_timestep_to = 0
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_step].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_step].to(noise.device)).abs(), dim=0).item()
         else:
             denoised_timestep_to = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_step + 1].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_step + 1].to(noise.device)).abs(), dim=0).item()
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_step].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_step].to(noise.device)).abs(), dim=0).item()
 
         return denoised_pred, denoised_timestep_from, denoised_timestep_to
 

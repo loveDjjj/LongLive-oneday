@@ -7,6 +7,7 @@ import wandb
 
 from trainer import ScoreDistillationTrainer, DiffusionTrainer
 from utils.config import normalize_config
+from utils.device import is_npu
 
 
 def main():
@@ -23,6 +24,14 @@ def main():
     args = parser.parse_args()
 
     config = normalize_config(OmegaConf.load(args.config_path))
+    if is_npu() and any(
+        bool(getattr(config, key, False))
+        for key in ("model_quant", "generator_quant", "real_score_quant", "fake_score_quant", "kv_quant")
+    ):
+        raise NotImplementedError(
+            "Ascend NPU BF16 reproduction does not support the NVIDIA NVFP4/FP4 quantization path. "
+            "Use BF16 configs with all *_quant flags disabled."
+        )
     config.no_save = args.no_save
     config.no_visualize = args.no_visualize
 

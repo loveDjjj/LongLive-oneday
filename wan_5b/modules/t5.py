@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.device import default_device
 from .tokenizers import HuggingfaceTokenizer
 
 __all__ = [
@@ -481,7 +482,7 @@ class T5EncoderModel:
         self.text_len = text_len
         self.dtype = dtype
         if device is None:
-            device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu")
+            device = default_device()
         self.device = device
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path

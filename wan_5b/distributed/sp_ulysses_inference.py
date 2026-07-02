@@ -9,6 +9,7 @@ import time
 
 import torch
 import torch.distributed as dist
+from utils.device import default_device, synchronize
 
 
 _SP_GROUP: Optional[dist.ProcessGroup] = None
@@ -98,11 +99,11 @@ def sp_all_gather(tensor: torch.Tensor, dim: int = 1) -> torch.Tensor:
     world_size = get_sp_world_size()
     tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         start_time = time.perf_counter()
     dist.all_gather(tensor_list, tensor, group=get_sp_group())
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         elapsed = time.perf_counter() - start_time
         _SP_COMM_STATS["all_gather_time"] += elapsed
         _SP_COMM_STATS["all_gather_count"] += 1
@@ -125,7 +126,7 @@ def sp_all_to_all(tensor: torch.Tensor, scatter_dim: int, gather_dim: int) -> to
     global _SP_COMM_STATS, _SP_PROFILING_ENABLED
     world_size = get_sp_world_size()
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         start_time = time.perf_counter()
     scatter_chunks = [
         chunk.contiguous() for chunk in torch.chunk(tensor, world_size, dim=scatter_dim)
@@ -134,7 +135,7 @@ def sp_all_to_all(tensor: torch.Tensor, scatter_dim: int, gather_dim: int) -> to
     dist.all_to_all(recv_chunks, scatter_chunks, group=get_sp_group())
     output = torch.cat(recv_chunks, dim=gather_dim)
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         elapsed = time.perf_counter() - start_time
         _SP_COMM_STATS["all_to_all_time"] += elapsed
         _SP_COMM_STATS["all_to_all_count"] += 1
@@ -159,11 +160,11 @@ def sp_barrier():
         return
     global _SP_COMM_STATS, _SP_PROFILING_ENABLED
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         start_time = time.perf_counter()
     dist.barrier(group=get_sp_group())
     if _SP_PROFILING_ENABLED:
-        torch.cuda.synchronize()
+        synchronize()
         elapsed = time.perf_counter() - start_time
         _SP_COMM_STATS["barrier_time"] += elapsed
         _SP_COMM_STATS["barrier_count"] += 1
@@ -180,20 +181,20 @@ def profile_sp_communication():
     rank = get_sp_rank()
     world_size = get_sp_world_size()
     test_size = (1, 880, 24, 128)
-    test_tensor = torch.randn(test_size, device="cuda", dtype=torch.bfloat16)
+    test_tensor = torch.randn(test_size, device=default_device(), dtype=torch.bfloat16)
     for _ in range(3):
         _ = sp_all_gather(test_tensor, dim=1)
         _ = ulysses_seq_to_head(test_tensor)
-    torch.cuda.synchronize()
+    synchronize()
     start = time.perf_counter()
     for _ in range(10):
         _ = sp_all_gather(test_tensor, dim=1)
-        torch.cuda.synchronize()
+        synchronize()
     all_gather_time = (time.perf_counter() - start) / 10 * 1000
     start = time.perf_counter()
     for _ in range(10):
         _ = ulysses_seq_to_head(test_tensor)
-        torch.cuda.synchronize()
+        synchronize()
     all_to_all_time = (time.perf_counter() - start) / 10 * 1000
     if rank == 0:
         all_gather_bw = (

@@ -46,6 +46,7 @@ from pipeline import CausalDiffusionInferencePipeline
 from utils.dataset import MultiTextConcatDataset, MultiVideoConcatDataset, eval_collate_fn, multi_video_collate_fn
 from utils.misc import set_seed
 from utils.config import normalize_config, section_get, wan_default_config
+from utils.device import distributed_backend, is_npu, set_device
 from utils.nvfp4_checkpoint import (
     clean_fsdp_state_dict_keys,
     drop_fouroversix_master_weights,
@@ -106,6 +107,12 @@ args = parser.parse_args()
 config = normalize_config(OmegaConf.load(args.config_path))
 if args.use_te_quant is not None:
     config.model_quant_use_transformer_engine = args.use_te_quant
+
+if is_npu() and getattr(config, "model_quant", False):
+    raise NotImplementedError(
+        "Ascend NPU BF16 reproduction does not support the NVIDIA NVFP4 path. "
+        "Use configs/inference.yaml with model_quant=false and kv_quant=false."
+    )
 
 if not hasattr(config, "sampling_steps") or config.sampling_steps is None:
     raise ValueError("sampling_steps must be defined in the inference config")
@@ -255,15 +262,14 @@ def configure_generator_torch_compile(pipeline, config):
 
 # Initialize distributed inference
 if "LOCAL_RANK" in os.environ:
-    dist.init_process_group(backend='nccl')
+    dist.init_process_group(backend=distributed_backend())
     local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    device = set_device(local_rank)
     set_seed(config.seed + local_rank)
     config.distributed = True  # Mark as distributed for pipeline
 else:
     local_rank = 0
-    device = torch.device("cuda")
+    device = set_device(local_rank)
     set_seed(config.seed)
     config.distributed = False  # Mark as non-distributed
 

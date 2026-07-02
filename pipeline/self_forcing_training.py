@@ -270,14 +270,14 @@ class SelfForcingTrainingPipeline:
         elif exit_flags[0] == len(self.denoising_step_list) - 1:
             denoised_timestep_to = 0
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0]].cuda()).abs(), dim=0
+                (self.scheduler.timesteps.to(noise.device) - self.denoising_step_list[exit_flags[0]].to(noise.device)).abs(), dim=0
             ).item()
         else:
             denoised_timestep_to = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0] + 1].cuda()).abs(), dim=0
+                (self.scheduler.timesteps.to(noise.device) - self.denoising_step_list[exit_flags[0] + 1].to(noise.device)).abs(), dim=0
             ).item()
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0]].cuda()).abs(), dim=0
+                (self.scheduler.timesteps.to(noise.device) - self.denoising_step_list[exit_flags[0]].to(noise.device)).abs(), dim=0
             ).item()
         
         if return_sim_step:
@@ -662,12 +662,12 @@ class SelfForcingTrainingPipeline:
         elif exit_flags[0] == num_denoising_steps - 1:
             denoised_timestep_to = 0
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_flags[0]].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_flags[0]].to(noise.device)).abs(), dim=0).item()
         else:
             denoised_timestep_to = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_flags[0] + 1].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_flags[0] + 1].to(noise.device)).abs(), dim=0).item()
             denoised_timestep_from = 1000 - torch.argmin(
-                (self.scheduler.timesteps.cuda() - unipc_timesteps[exit_flags[0]].cuda()).abs(), dim=0).item()
+                (self.scheduler.timesteps.to(noise.device) - unipc_timesteps[exit_flags[0]].to(noise.device)).abs(), dim=0).item()
 
         if return_sim_step:
             return output, denoised_timestep_from, denoised_timestep_to, exit_flags[0] + 1

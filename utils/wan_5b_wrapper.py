@@ -4,6 +4,7 @@ import os
 import torch
 from torch import nn
 
+from utils.device import current_device, default_device, empty_cache
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
 
 from wan_5b.modules.tokenizers import HuggingfaceTokenizer
@@ -28,17 +29,16 @@ class WanTextEncoder(torch.nn.Module):
                        map_location='cpu', weights_only=False)
         )
         
-        # Move text encoder to GPU if available
-        if torch.cuda.is_available():
-            self.text_encoder = self.text_encoder.cuda()
+        device = default_device()
+        if device.type != "cpu":
+            self.text_encoder = self.text_encoder.to(device)
 
         self.tokenizer = HuggingfaceTokenizer(
             name="wan_models/Wan2.2-TI2V-5B/google/umt5-xxl/", seq_len=512, clean='whitespace')
 
     @property
     def device(self):
-        # Assume we are always on GPU
-        return torch.cuda.current_device()
+        return current_device()
 
     def forward(self, text_prompts: List[str]) -> dict:
         ids, mask = self.tokenizer(
@@ -262,7 +262,7 @@ class WanVAEWrapper(torch.nn.Module):
                     decoded_chunks.append(decoded_chunk.cpu())
 
                     del decoded_chunk
-                    torch.cuda.empty_cache()
+                    empty_cache()
                 decoded = torch.cat(decoded_chunks, dim=1)
                 if use_cache:
                     # Clear the cache after the full segment.

@@ -11,6 +11,7 @@ from utils.misc import (
     set_seed,
     merge_dict_list
 )
+from utils.device import current_device, default_device, empty_cache
 import torch.distributed as dist
 from omegaconf import OmegaConf
 from model import DMD
@@ -39,15 +40,16 @@ class Trainer:
         self.step = 0
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
-        self.device = torch.cuda.current_device()
+        self.device = current_device()
         self.is_main_process = global_rank == 0
         self.causal = getattr(config, "causal", getattr(config, "all_causal", True))
         self.disable_wandb = config.disable_wandb
@@ -804,7 +806,7 @@ class Trainer:
         from utils.quant import _materialize_quantized_weights_for_inference
 
         current_rank = dist.get_rank()
-        target_device = torch.device("cuda", torch.cuda.current_device())
+        target_device = default_device()
         if self.is_main_process:
             print(f"[NVFP4] Materializing {model_label} sequentially before FSDP")
 
@@ -987,7 +989,7 @@ class Trainer:
         if dist.is_initialized():
             dist.barrier()
 
-        torch.cuda.empty_cache()
+        empty_cache()
         import gc
         gc.collect()
 
@@ -995,7 +997,7 @@ class Trainer:
         self.model.eval()  # prevent any randomness (e.g. dropout)
 
         if self.step % 5 == 0:
-            torch.cuda.empty_cache()
+            empty_cache()
 
         # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
@@ -1210,9 +1212,9 @@ class Trainer:
 
                 # Save the model
                 if (not self.config.no_save) and (self.step - start_step) > 0 and self.step % self.config.log_iters == 0:
-                    torch.cuda.empty_cache()
+                    empty_cache()
                     self.save()
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 # Logging
                 if self.is_main_process:
@@ -1240,7 +1242,7 @@ class Trainer:
                     if dist.get_rank() == 0:
                         logging.info("DistGarbageCollector: Running GC.")
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 if self.is_main_process:
                     current_time = time.time()
@@ -1456,7 +1458,7 @@ class Trainer:
                     write_video(out_path, torch.as_tensor(samples[idx]).to(torch.uint8), fps=24)
 
             del samples
-            torch.cuda.empty_cache()
+            empty_cache()
 
         # Save prompts for reference
         prompt_path = os.path.join(
@@ -1472,7 +1474,7 @@ class Trainer:
         if hasattr(self.vis_pipeline, 'clear_cache'):
             self.vis_pipeline.clear_cache()
 
-        torch.cuda.empty_cache()
+        empty_cache()
         import gc
         gc.collect()
 

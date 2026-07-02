@@ -111,7 +111,7 @@ def flash_attention(
     """
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
-    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    assert q.device.type in {'cuda', 'npu'} and q.size(-1) <= 256
 
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
@@ -272,7 +272,7 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
-    if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
+    if q.device.type == "cuda" and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE):
         return flash_attention(
             q=q,
             k=k,

@@ -17,6 +17,7 @@ from tqdm import tqdm
 from pipeline.causal_diffusion_inference_sp import CausalDiffusionInferencePipelineSP
 from utils.config import normalize_config, section_get
 from utils.dataset import MultiTextConcatDataset, eval_collate_fn
+from utils.device import distributed_backend, is_npu, set_device
 from utils.lora_utils import configure_lora_for_model
 from utils.memory import DynamicSwapInstaller, get_cuda_free_memory_gb
 from utils.misc import set_seed
@@ -206,6 +207,11 @@ args = parser.parse_args()
 config = normalize_config(OmegaConf.load(args.config_path))
 if args.use_te_quant is not None:
     config.model_quant_use_transformer_engine = args.use_te_quant
+if is_npu() and getattr(config, "model_quant", False):
+    raise NotImplementedError(
+        "Ascend NPU BF16 reproduction does not support the NVIDIA NVFP4 path. "
+        "Use BF16 configs with model_quant=false and kv_quant=false."
+    )
 if not hasattr(config, "sampling_steps") or config.sampling_steps is None:
     raise ValueError("sampling_steps must be defined in the SP inference config")
 if not hasattr(config, "guidance_scale") or config.guidance_scale is None:
@@ -238,13 +244,13 @@ if "LOCAL_RANK" in os.environ:
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", str(local_rank)))
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    os.environ.setdefault("NCCL_CROSS_NIC", "1")
-    os.environ.setdefault("NCCL_DEBUG", "WARN")
-    os.environ.setdefault("NCCL_TIMEOUT", "1800")
+    device = set_device(local_rank)
+    if distributed_backend() == "nccl":
+        os.environ.setdefault("NCCL_CROSS_NIC", "1")
+        os.environ.setdefault("NCCL_DEBUG", "WARN")
+        os.environ.setdefault("NCCL_TIMEOUT", "1800")
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        dist.init_process_group(backend=distributed_backend(), rank=rank, world_size=world_size)
     set_seed(config.seed + rank)
     config.distributed = True
 
@@ -279,7 +285,7 @@ if "LOCAL_RANK" in os.environ:
 else:
     local_rank = 0
     rank = 0
-    device = torch.device("cuda")
+    device = set_device(local_rank)
     set_seed(config.seed)
     config.distributed = False
     effective_sp_size = 1

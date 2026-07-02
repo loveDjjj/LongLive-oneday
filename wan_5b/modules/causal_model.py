@@ -23,10 +23,12 @@ import torch.nn as nn
 import torch
 import math
 import torch.distributed as dist
+from utils.device import is_cuda
 
 # wan 5b model compilation for flexattention
-flex_attention = torch.compile(
-    flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+if is_cuda():
+    flex_attention = torch.compile(
+        flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
 from utils.position_embedding_utils import (
@@ -59,7 +61,7 @@ _FREQS_I_CACHE_ENABLED = os.environ.get("LLV2_FREQS_I_CACHE", "1") == "1"
 # Set LLV2_TRITON_ROPE=0 to revert to the fp64 path.
 # When enabled, _FREQS_I_CACHE stores (freqs_i_complex, cos_f32, sin_f32);
 # when disabled, stores (freqs_i_complex, None, None).
-_TRITON_ROPE_ENABLED = os.environ.get("LLV2_TRITON_ROPE", "1") == "1"
+_TRITON_ROPE_ENABLED = is_cuda() and os.environ.get("LLV2_TRITON_ROPE", "1") == "1"
 
 # Cudagraph experiment only. Default OFF because the out-of-place temp-KV
 # construction removes mutated-input skips but is materially slower than the
@@ -74,7 +76,7 @@ _CGRAPH_OUTPLACE_KV_ENABLED = os.environ.get("LLV2_CGRAPH_OUTPLACE_KV", "0") == 
 # vs iter-42, quality in run-to-run noise floor (mean|Δ|=0.68 vs noise=0.69).
 # Unit test agent/adaln_unit_test.py: max|Δ|=3.1e-2 (1 bf16 ULP), mean=1.1e-3.
 # Set LLV2_TRITON_ADALN=0 to fall back to eager nn.LayerNorm + Python modulate.
-_TRITON_ADALN_ENABLED = os.environ.get("LLV2_TRITON_ADALN", "1") == "1"
+_TRITON_ADALN_ENABLED = is_cuda() and os.environ.get("LLV2_TRITON_ADALN", "1") == "1"
 
 # iter-31: per-chunk Python-int metadata published by CausalWanModel.forward
 # so attention forwards can read Python ints without `.item()` graph breaks.

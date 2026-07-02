@@ -20,6 +20,7 @@ import math
 
 import torch
 import torch.distributed as dist
+from utils.device import default_device, is_cuda
 try:
     from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 except ModuleNotFoundError:
@@ -68,8 +69,11 @@ def _get_compiled_flex_attention():
             "training. Install a PyTorch build that provides FlexAttention."
         )
     if _compiled_flex_attention is None:
-        _compiled_flex_attention = torch.compile(
-            _flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+        _compiled_flex_attention = (
+            torch.compile(_flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+            if is_cuda()
+            else _flex_attention
+        )
     return _compiled_flex_attention
 
 
@@ -489,7 +493,7 @@ class SequenceParallelHelper:
 
         global_rank = dist.get_rank()
         root_global_rank = self.sp_root_global_rank()
-        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        device = default_device()
 
         if "frames" in batch:
             frames_for_scatter = batch["frames"]

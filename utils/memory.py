@@ -3,10 +3,11 @@
 # By lllyasviel
 
 import torch
+from utils.device import default_device, empty_cache, free_memory_gb, total_memory_gb
 
 
 cpu = torch.device('cpu')
-gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+gpu = default_device()
 gpu_complete_modules = []
 
 
@@ -70,23 +71,14 @@ def fake_diffusers_current_device(model: torch.nn.Module, target_device: torch.d
 
 
 def get_cuda_free_memory_gb(device=None):
-    if device is None:
-        device = gpu
-
-    memory_stats = torch.cuda.memory_stats(device)
-    bytes_active = memory_stats['active_bytes.all.current']
-    bytes_reserved = memory_stats['reserved_bytes.all.current']
-    bytes_free_cuda, _ = torch.cuda.mem_get_info(device)
-    bytes_inactive_reserved = bytes_reserved - bytes_active
-    bytes_total_available = bytes_free_cuda + bytes_inactive_reserved
-    return bytes_total_available / (1024 ** 3)
+    return free_memory_gb(gpu if device is None else device)
 
 
 
 def log_gpu_memory(stage: str, device=None, rank=0):
     """Log GPU memory usage at a given training stage."""
     free_gb = get_cuda_free_memory_gb(device)
-    total_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+    total_gb = total_memory_gb(device)
     used_gb = total_gb - free_gb
     print(f"[rank {rank}] [GPU Memory][{stage}] Used: {used_gb:.2f} GB | Free: {free_gb:.2f} GB | Total: {total_gb:.2f} GB")
 
@@ -98,14 +90,14 @@ def move_model_to_device_with_memory_preservation(model, target_device, preserve
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) <= preserved_memory_gb:
-            torch.cuda.empty_cache()
+            empty_cache()
             return
 
         if hasattr(m, 'weight'):
             m.to(device=target_device)
 
     model.to(device=target_device)
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 
@@ -114,14 +106,14 @@ def offload_model_from_device_for_memory_preservation(model, target_device, pres
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) >= preserved_memory_gb:
-            torch.cuda.empty_cache()
+            empty_cache()
             return
 
         if hasattr(m, 'weight'):
             m.to(device=cpu)
 
     model.to(device=cpu)
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 
@@ -131,7 +123,7 @@ def unload_complete_models(*args):
         print(f'Unloaded {m.__class__.__name__} as complete.')
 
     gpu_complete_modules.clear()
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 

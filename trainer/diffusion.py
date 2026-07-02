@@ -10,6 +10,7 @@ from wan_5b.distributed.sp_training import SequenceParallelHelper
 from utils.dataset import MultiVideoConcatDataset, MultiTextConcatDataset, cycle, multi_video_collate_fn, eval_collate_fn
 from utils.config import section_get, wan_default_config
 from utils.misc import set_seed
+from utils.device import current_device, empty_cache, ipc_collect
 import torch.distributed as dist
 from omegaconf import OmegaConf
 import torch
@@ -58,14 +59,15 @@ class Trainer:
         self.step = 0
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         launch_distributed_job()
         global_rank = dist.get_rank()
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
-        self.device = torch.cuda.current_device()
+        self.device = current_device()
         self.is_main_process = global_rank == 0
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb
@@ -648,7 +650,7 @@ class Trainer:
             # Drop the inference pipeline reference so GC / empty_cache can
             # reclaim memory.
             self.model.inference_pipeline = None
-            torch.cuda.empty_cache()
+            empty_cache()
         
         with FSDP.state_dict_type(
             self.model.generator,
@@ -723,7 +725,7 @@ class Trainer:
         if dist.is_initialized():
             dist.barrier()
 
-        torch.cuda.empty_cache()
+        empty_cache()
         import gc
         gc.collect()
 
@@ -732,7 +734,7 @@ class Trainer:
         self.log_iters = 1
 
         if self.step % 20 == 0:
-            torch.cuda.empty_cache()
+            empty_cache()
         # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
         batch_size = len(text_prompts)
@@ -910,8 +912,8 @@ class Trainer:
 
     def _run_evaluation_inference(self):
         gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+        empty_cache()
+        ipc_collect()
 
         if self.model.inference_pipeline is None:
             self.model._initialize_inference_pipeline()
@@ -1010,7 +1012,7 @@ class Trainer:
             clear_fn = getattr(self.model.inference_pipeline, "clear_cache", None)
             if clear_fn is not None:
                 clear_fn()
-        torch.cuda.empty_cache()
+        empty_cache()
 
     @torch.no_grad()
     def generate_video(self, pipeline, prompts, image=None, use_ema=False):
@@ -1032,12 +1034,12 @@ class Trainer:
                 noise_shape[0] = inference_num_frames
             initial_latent = None
             if image is not None:
-                image = image.to(device="cuda", dtype=self.dtype)
+                image = image.to(device=self.device, dtype=self.dtype)
                 if image.ndim == 4:
                     image = image.unsqueeze(2)
                 elif image.ndim != 5:
                     raise ValueError(f"Expected i2v image with shape [B,C,H,W] or [B,C,T,H,W], got {tuple(image.shape)}")
-                initial_latent = pipeline.vae.encode_to_latent(image).to(device="cuda", dtype=self.dtype)
+                initial_latent = pipeline.vae.encode_to_latent(image).to(device=self.device, dtype=self.dtype)
                 if initial_latent.shape[0] != batch_size:
                     initial_latent = initial_latent.repeat(batch_size, 1, 1, 1, 1)
                 if noise_shape[0] <= initial_latent.shape[1]:
@@ -1046,7 +1048,7 @@ class Trainer:
                         f"got {inference_num_frames} and {initial_latent.shape[1]}"
                     )
             sampled_noise = torch.randn(
-                [batch_size] + noise_shape, device="cuda", dtype=self.dtype
+                [batch_size] + noise_shape, device=self.device, dtype=self.dtype
             )
 
             save_latents_only = section_get(
@@ -1098,9 +1100,9 @@ class Trainer:
 
                 self.train_one_step(batch, accumulation_step=acc, accumulation_steps=acc_steps)
             if (not self.config.no_save) and self.step % self.config.log_iters == 0:
-                torch.cuda.empty_cache()
+                empty_cache()
                 self.save()
-                torch.cuda.empty_cache()
+                empty_cache()
 
             evaluation_interval = section_get(self.config, "evaluation", "interval", getattr(self.config, "generate_interval", 0))
             if evaluation_interval > 0 and self.step % evaluation_interval == 0:

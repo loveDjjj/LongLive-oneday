@@ -9,6 +9,7 @@ paths intact for the rest of the codebase.
 """
 
 import torch.distributed as dist
+from utils.device import distributed_backend
 
 from .sp_training import (
     all_gather,
@@ -26,7 +27,7 @@ from .sp_training import (
 def init_distributed_group():
     """Initialize the default distributed group when it is not yet ready."""
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend=distributed_backend())
 
 
 def get_rank():
