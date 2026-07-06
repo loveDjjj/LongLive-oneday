@@ -14,9 +14,7 @@ from wan_5b.modules.model import (
     WanCrossAttention,
     flash_attention
 )
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from torch.nn.attention.flex_attention import BlockMask
 from diffusers.models.modeling_utils import ModelMixin
 import os
 import torch.nn as nn
@@ -24,6 +22,15 @@ import torch
 import math
 import torch.distributed as dist
 from utils.device import is_cuda
+
+try:
+    from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "LongLive 5B requires torch.nn.attention.flex_attention. "
+        "Use a PyTorch/torch_npu version that provides FlexAttention, or run "
+        "with a newer Ascend PyTorch stack."
+    ) from exc
 
 # wan 5b model compilation for flexattention
 if is_cuda():

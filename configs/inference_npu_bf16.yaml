@@ -1,11 +1,12 @@
-# Ascend NPU BF16 inference template.
-# Launch with:
+# 昇腾 NPU BF16 推理配置模板。
+# 启动方式：
 #   LLV2_DEVICE=npu python inference.py --config_path configs/inference_npu_bf16.yaml
-# or distributed:
+# 多卡：
 #   LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=4 inference.py --config_path configs/inference_npu_bf16.yaml
 
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
+  model_root: /mnt/share/weight/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   num_frame_per_block: 8
   local_attn_size: 32
@@ -18,7 +19,7 @@ save_with_index: true
 inference_iter: -1
 
 data:
-  data_path: /path/to/longlive2/inference_prompts
+  data_path: example/long_example.txt
   image_or_video_shape:
   - 1
   - 128
@@ -39,13 +40,13 @@ inference:
   vae_device: null
 
 checkpoints:
-  generator_ckpt: /path/to/longlive2/generator_checkpoint.pt
-  lora_ckpt: null
+  generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive_5b/generator.pt
+  lora_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive_5b/lora.pt
 
 model_quant: false
 torch_compile: false
 
-# Remove this section if the generator checkpoint is already merged.
+# 如果 generator_ckpt 已经是合并后的完整权重，可以删除 adapter 段。
 adapter:
   type: lora
   rank: 128
