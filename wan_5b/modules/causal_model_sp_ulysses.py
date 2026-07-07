@@ -42,7 +42,7 @@ QK_QUANT_RATIO = float(os.environ.get("QK_QUANT_RATIO", "0.28125"))
 
 try:
     import torch.cuda.nvtx as nvtx
-    NVTX_ENABLED = True
+    NVTX_ENABLED = os.environ.get("LLV2_DEVICE", "").lower() != "npu"
 except Exception:
     nvtx = None
     NVTX_ENABLED = False
@@ -53,12 +53,20 @@ class NVTXRange:
         self.name = name
 
     def __enter__(self):
+        global NVTX_ENABLED
         if NVTX_ENABLED:
-            nvtx.range_push(self.name)
+            try:
+                nvtx.range_push(self.name)
+            except Exception:
+                NVTX_ENABLED = False
 
     def __exit__(self, exc_type, exc, tb):
+        global NVTX_ENABLED
         if NVTX_ENABLED:
-            nvtx.range_pop()
+            try:
+                nvtx.range_pop()
+            except Exception:
+                NVTX_ENABLED = False
 
 
 def _get_d_quant(head_dim: int, ratio: float = QK_QUANT_RATIO) -> int:
