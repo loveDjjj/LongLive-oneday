@@ -40,11 +40,16 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         # Step 1: Initialize all models
         model_name = getattr(args.model_kwargs, "model_name", "Wan2.2-TI2V-5B")
         model_root = getattr(args.model_kwargs, "model_root", None)
+        text_encoder_device = section_get(args, "inference", "text_encoder_device", None)
         if "5B" not in model_name:
             raise ValueError(f"Only Wan2.2-TI2V-5B is supported in this release, got {model_name}")
         self.generator = WanDiffusionWrapper(
             **getattr(args, "model_kwargs", {}), is_causal=True) if generator is None else generator
-        self.text_encoder = WanTextEncoder(model_name=model_name, model_root=model_root) if text_encoder is None else text_encoder
+        self.text_encoder = WanTextEncoder(
+            model_name=model_name,
+            model_root=model_root,
+            device=text_encoder_device,
+        ) if text_encoder is None else text_encoder
         self.vae = build_vae_5b(args) if vae is None else vae
 
         # iter-33: optionally compile the VAE decoder (cuda:2). The Python
@@ -213,6 +218,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         conditional_dict = self.text_encoder(
             text_prompts=text_prompts[0]
         )
+        conditional_dict["prompt_embeds"] = conditional_dict["prompt_embeds"].to(
+            device=noise.device,
+            dtype=noise.dtype,
+        )
         conditional_dict_list = [
             {"prompt_embeds": conditional_dict["prompt_embeds"][i:i+1]}
             for i in range(conditional_dict["prompt_embeds"].shape[0])
@@ -221,6 +230,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         if use_cfg:
             unconditional_dict = self.text_encoder(
                 text_prompts=[self.negative_prompt] * batch_size
+            )
+            unconditional_dict["prompt_embeds"] = unconditional_dict["prompt_embeds"].to(
+                device=noise.device,
+                dtype=noise.dtype,
             )
         else:
             unconditional_dict = None

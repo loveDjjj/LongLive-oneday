@@ -19,7 +19,7 @@ def _resolve_wan_model_root(model_name="Wan2.2-TI2V-5B", model_root=None):
 
 
 class WanTextEncoder(torch.nn.Module):
-    def __init__(self, model_name="Wan2.2-TI2V-5B", model_root=None) -> None:
+    def __init__(self, model_name="Wan2.2-TI2V-5B", model_root=None, device=None) -> None:
         super().__init__()
         self.model_root = _resolve_wan_model_root(model_name, model_root)
 
@@ -34,16 +34,17 @@ class WanTextEncoder(torch.nn.Module):
                        map_location='cpu', weights_only=False)
         )
         
-        device = default_device()
+        device = torch.device(device) if device is not None else default_device()
         if device.type != "cpu":
             self.text_encoder = self.text_encoder.to(device)
+        self._device = device
 
         self.tokenizer = HuggingfaceTokenizer(
             name=os.path.join(self.model_root, "google", "umt5-xxl"), seq_len=512, clean='whitespace')
 
     @property
     def device(self):
-        return current_device()
+        return self._device
 
     def forward(self, text_prompts: List[str]) -> dict:
         ids, mask = self.tokenizer(

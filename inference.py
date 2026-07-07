@@ -465,6 +465,12 @@ elif loaded_prequantized_generator and local_rank == 0:
 pipeline.generator.model.eval().requires_grad_(False)
 configure_generator_torch_compile(pipeline, config)
 
+text_encoder_device_str = getattr(config, "text_encoder_device", None)
+if text_encoder_device_str:
+    pipeline.text_encoder.to(device=torch.device(text_encoder_device_str))
+    if local_rank == 0:
+        print(f"[inference] Text encoder on {text_encoder_device_str}")
+
 vae_device_str = getattr(config, "vae_device", None)
 use_dedicated_vae_device = bool(getattr(config, "streaming_vae", False)) and bool(vae_device_str)
 if use_dedicated_vae_device:
