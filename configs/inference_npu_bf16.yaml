@@ -40,7 +40,7 @@ inference:
   vae_device: null
 
 checkpoints:
-  generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive_5b/longlive2_merged_generator.pt
+  generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   lora_ckpt: null
 
 model_quant: false
