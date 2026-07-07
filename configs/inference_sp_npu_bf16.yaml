@@ -1,16 +1,16 @@
 # 昇腾 NPU BF16 Ulysses 序列并行推理配置。
-# 推荐 4 卡启动：
-#   LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=4 inference_sp.py --config_path configs/inference_sp_npu_bf16.yaml
+# 推荐 8 卡启动：
+#   LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=8 inference_sp.py --config_path configs/inference_sp_npu_bf16.yaml
 
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
   timestep_shift: 5.0
-  # sp_size=4 时，num_frame_per_block 需要能让 gcd(model_num_heads, num_frame_per_block) 被 4 整除。
-  num_frame_per_block: 4
+  # sp_size=8 时，num_frame_per_block 需要能让 gcd(model_num_heads, num_frame_per_block) 被 8 整除。
+  num_frame_per_block: 8
   local_attn_size: 32
 
-sp_size: 4
+sp_size: 8
 dp_size: 1
 auto_sp_remainder: false
 model_num_heads: 24

@@ -102,37 +102,30 @@ videos/longlive2_npu_bf16/
 
 ## 4. 多卡推理：优先使用 SP/Ulysses
 
-注意：普通 `inference.py` 的多卡启动主要是数据并行，每张卡仍会加载完整模型，并不会自动把同一条视频的模型显存切到 4 张卡上。因此如果单卡爆显存，直接用 4 卡 `inference.py` 通常仍会爆。
+注意：普通 `inference.py` 的多卡启动主要是数据并行，每张卡仍会加载完整模型，并不会自动把同一条视频的模型显存切到多张卡上。因此如果单卡爆显存，直接用多卡 `inference.py` 通常仍会爆。
 
 要降低单条视频的单卡显存，应该使用 Ulysses 序列并行入口：
 
-4 卡：
-
-```bash
-LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=4 inference_sp.py \
-  --config_path configs/inference_sp_npu_bf16.yaml
-```
-
-`configs/inference_sp_npu_bf16.yaml` 中：
-
-```yaml
-sp_size: 4
-dp_size: 1
-model_num_heads: 24
-model_kwargs:
-  num_frame_per_block: 4
-```
-
-`num_frame_per_block` 不能随便设成 1。SP 分组要求 `sp_size` 能整除 `gcd(model_num_heads, num_frame_per_block)`；4 卡 SP 下用 4 或 8 更合适。
-
-如果要 8 卡，需要先确认当前 SP 实现和 `num_frame_per_block` 组合支持 8 卡，再改：
+8 卡：
 
 ```bash
 LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=8 inference_sp.py \
   --config_path configs/inference_sp_npu_bf16.yaml
 ```
 
-并把配置里的 `sp_size` 改成 8，`num_frame_per_block` 改成 8。
+`configs/inference_sp_npu_bf16.yaml` 中：
+
+```yaml
+sp_size: 8
+dp_size: 1
+model_num_heads: 24
+model_kwargs:
+  num_frame_per_block: 8
+```
+
+`dp_size: 1` 表示不做数据并行，8 卡都用于同一条样本的序列并行切分，更适合解决 5B 推理单样本显存压力。
+
+`num_frame_per_block` 不能随便设成 1。SP 分组要求 `sp_size` 能整除 `gcd(model_num_heads, num_frame_per_block)`；当前 Wan2.2-TI2V-5B 配置的 `model_num_heads: 24`，所以 8 卡 SP 下使用 `num_frame_per_block: 8`。
 
 ## 5. Prompt 输入
 
