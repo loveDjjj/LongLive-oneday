@@ -7,7 +7,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from einops import repeat
 import torch.distributed as dist
-from .attention import attention
+from .attention import attention, flash_attention
 
 __all__ = ['WanModel']
 
