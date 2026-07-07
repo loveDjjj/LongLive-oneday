@@ -248,7 +248,7 @@ class MultiShotT2VCrossAttention(WanCrossAttention):
             v = self.v(context).view(b_eff, -1, n, d)
 
             # compute attention
-            x_attn = flash_attention(q, k, v, k_lens=context_lens)
+            x_attn = attention(q, k, v, k_lens=context_lens)
 
             # output projection
             x_attn = x_attn.flatten(2)
