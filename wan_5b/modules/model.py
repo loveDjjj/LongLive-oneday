@@ -46,9 +46,13 @@ from utils.position_embedding_utils import (
 def rope_apply(x, grid_sizes, freqs, t_scale=1.0, method="linear", original_seq_len=None,
                temporal_offset=0.0):
     n, c = x.size(2), x.size(3) // 2
+    rope_float_dtype = torch.float32 if x.device.type == "npu" else torch.float64
+    rope_complex_dtype = torch.complex64 if x.device.type == "npu" else None
 
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    if rope_complex_dtype is not None:
+        freqs = tuple(freq.to(rope_complex_dtype) for freq in freqs)
 
     # loop over samples
     output = []
@@ -56,7 +60,7 @@ def rope_apply(x, grid_sizes, freqs, t_scale=1.0, method="linear", original_seq_
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+        x_i = torch.view_as_complex(x[i, :seq_len].to(rope_float_dtype).reshape(
             seq_len, n, -1, 2))
         temporal_offset_i = select_temporal_offset_for_sample(
             temporal_offset, i, f, start_frame=0)
