@@ -1,6 +1,9 @@
 # 昇腾 NPU BF16 Ulysses 序列并行推理配置。
-# 推荐 8 卡启动：
-#   LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=8 inference_sp.py --config_path configs/inference_sp_npu_bf16.yaml
+# 推荐 16 卡启动：
+#   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+#   LLV2_DEVICE=npu torchrun --nnodes=1 --nproc_per_node=16 --master_addr=127.0.0.1 --master_port=29501 inference_sp.py --config_path configs/inference_sp_npu_bf16.yaml
+# 注意：Wan2.2-TI2V-5B 的 model_num_heads=24，当前 Ulysses 实现不能使用 sp_size=16。
+# 16 卡配置使用 2 个 8 卡 SP 组，即 sp_size=8、dp_size=2。
 
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
@@ -11,7 +14,7 @@ model_kwargs:
   local_attn_size: 32
 
 sp_size: 8
-dp_size: 1
+dp_size: 2
 auto_sp_remainder: false
 model_num_heads: 24
 

@@ -104,26 +104,58 @@ videos/longlive2_npu_bf16/
 
 注意：普通 `inference.py` 的多卡启动主要是数据并行，每张卡仍会加载完整模型，并不会自动把同一条视频的模型显存切到多张卡上。因此如果单卡爆显存，直接用多卡 `inference.py` 通常仍会爆。
 
-要降低单条视频的单卡显存，应该使用 Ulysses 序列并行入口：
+要降低单条视频的单卡显存，应该使用 Ulysses 序列并行入口。
 
-8 卡：
+16 卡推荐命令如下。这里显式设置 `master_addr` 和 `master_port`，避免 `torchrun --standalone` 自动选择主机名后出现 TCPStore 连接超时。
 
 ```bash
-LLV2_DEVICE=npu torchrun --standalone --nproc_per_node=8 inference_sp.py \
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+LLV2_DEVICE=npu torchrun \
+  --nnodes=1 \
+  --nproc_per_node=16 \
+  --master_addr=127.0.0.1 \
+  --master_port=29501 \
+  inference_sp.py \
   --config_path configs/inference_sp_npu_bf16.yaml
 ```
+
+如果端口被占用，把 `29501` 换成其他空闲端口，例如 `29511` 或 `29601`。
 
 `configs/inference_sp_npu_bf16.yaml` 中：
 
 ```yaml
 sp_size: 8
-dp_size: 1
+dp_size: 2
 model_num_heads: 24
 model_kwargs:
   num_frame_per_block: 8
 ```
 
-`dp_size: 1` 表示不做数据并行，8 卡都用于同一条样本的序列并行切分，更适合解决 5B 推理单样本显存压力。
+注意：当前 Wan2.2-TI2V-5B 配置的 `model_num_heads: 24`，`inference_sp.py` 要求 `sp_size` 能整除 `gcd(model_num_heads, num_frame_per_block)`。因此 16 卡不能直接设置成 `sp_size: 16`；当前 16 卡配置使用 `sp_size: 8, dp_size: 2`，也就是两组 8 卡 SP 组并行跑样本。
+
+16 卡的 `dp_size: 2` 会把 prompt 按两个 DP 组分配，建议 `data.data_path` 至少提供 2 条 prompt。如果只有 1 条 prompt，优先使用下面的 8 卡配置，或者在 prompt 文件中补充第二条任务。
+
+如果只想使用 8 卡，改成：
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+LLV2_DEVICE=npu torchrun \
+  --nnodes=1 \
+  --nproc_per_node=8 \
+  --master_addr=127.0.0.1 \
+  --master_port=29501 \
+  inference_sp.py \
+  --config_path configs/inference_sp_npu_bf16.yaml
+```
+
+并把配置改回：
+
+```yaml
+sp_size: 8
+dp_size: 1
+```
 
 `num_frame_per_block` 不能随便设成 1。SP 分组要求 `sp_size` 能整除 `gcd(model_num_heads, num_frame_per_block)`；当前 Wan2.2-TI2V-5B 配置的 `model_num_heads: 24`，所以 8 卡 SP 下使用 `num_frame_per_block: 8`。
 
