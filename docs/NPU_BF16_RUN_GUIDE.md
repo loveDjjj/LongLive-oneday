@@ -159,7 +159,26 @@ dp_size: 1
 
 `num_frame_per_block` 不能随便设成 1。SP 分组要求 `sp_size` 能整除 `gcd(model_num_heads, num_frame_per_block)`；当前 Wan2.2-TI2V-5B 配置的 `model_num_heads: 24`，所以 8 卡 SP 下使用 `num_frame_per_block: 8`。
 
-## 5. Prompt 输入
+## 5. 服务器同步最新 npu 分支
+
+如果服务器上仓库有临时修改，但现在希望全部丢弃，直接使用 GitHub 上 `npu` 分支的最新版本，可以执行：
+
+```bash
+cd /mnt/share/r50063443/LongLive-oneday
+
+export https_proxy=http://127.0.0.1:7897
+export http_proxy=http://127.0.0.1:7897
+export all_proxy=socks5://127.0.0.1:7897
+
+git fetch origin
+git switch npu
+git reset --hard origin/npu
+git clean -fd
+```
+
+注意：`git reset --hard` 和 `git clean -fd` 会丢弃服务器仓库里的未提交修改和未跟踪文件。确认没有需要保留的本地改动后再执行。
+
+## 6. Prompt 输入
 
 当前配置使用仓库里的示例 prompt：
 
@@ -183,7 +202,7 @@ data:
   data_path: data/my_prompts.txt
 ```
 
-## 6. 是否需要训练
+## 7. 是否需要训练
 
 如果目标只是“在昇腾上跑起来并复现推理效果”，不需要训练，直接使用已经下载好的 LongLive 5B 权重即可。
 
@@ -205,7 +224,7 @@ data:
   eval_data_path: /path/to/eval_prompts
 ```
 
-## 7. 注意事项
+## 8. 注意事项
 
 - 当前使用的是 `Wan2.2-TI2V-5B`，不是 Wan2.1。
 - 昇腾上只走 BF16：`model_quant: false`、`kv_quant: false`、`torch_compile: false`。
