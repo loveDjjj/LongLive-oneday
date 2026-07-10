@@ -27,6 +27,14 @@ from utils.i2v_conditioning import (
 )
 
 
+def _decode_vae_chunk(vae_model, latent_bcthw, vae_scale, prefer_cached=True):
+    """Decode one latent chunk, using cached_decode only when the VAE supports it."""
+    decode_fn = getattr(vae_model, "cached_decode", None) if prefer_cached else None
+    if decode_fn is None:
+        decode_fn = vae_model.decode
+    return decode_fn(latent_bcthw, vae_scale)
+
+
 class CausalDiffusionInferencePipeline(torch.nn.Module):
     def __init__(
             self,
@@ -494,7 +502,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                                 if item is None:
                                     vae_all_done.set()
                                     return
-                                decoded = self.vae.model.cached_decode(
+                                decoded = _decode_vae_chunk(
+                                    self.vae.model,
                                     item,
                                     vae_scale,
                                 ).float().clamp_(-1, 1)
@@ -691,7 +700,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     with torch.cuda.stream(vae_stream):
                         vae_stream.wait_event(diffusion_done)
                         chunk_bcthw = latents.permute(0, 2, 1, 3, 4).contiguous()
-                        decoded_chunk = self.vae.model.cached_decode(
+                        decoded_chunk = _decode_vae_chunk(
+                            self.vae.model,
                             chunk_bcthw,
                             vae_scale,
                         ).float().clamp_(-1, 1)
@@ -705,7 +715,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     vae_work_ready.set()
                 else:
                     chunk_bcthw = latents.permute(0, 2, 1, 3, 4).contiguous()
-                    decoded_chunk = self.vae.model.cached_decode(
+                    decoded_chunk = _decode_vae_chunk(
+                        self.vae.model,
                         chunk_bcthw,
                         vae_scale,
                     ).float().clamp_(-1, 1)
