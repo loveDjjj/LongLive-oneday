@@ -8,23 +8,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export LONGLIVE_VBENCH_DATA_PATH="${LONGLIVE_VBENCH_DATA_PATH:-${REPO_ROOT}/videos/benchmarks/vbench_mini_5s_vbench}"
 export LONGLIVE_VBENCH_FULL_INFO="${LONGLIVE_VBENCH_FULL_INFO:-${REPO_ROOT}/data/benchmarks/vbench_mini/VBench_full_info.json}"
-export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-${HOME}/.cache/vbench}"
+export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
 
 # Restore CANN/HCCL paths before changing the C++ runtime search order.
-CANN_ENV_CANDIDATES=(
-  "${CANN_ENV_SCRIPT:-}"
-  "/usr/local/Ascend/ascend-toolkit/set_env.sh"
-  "/usr/local/Ascend/ascend-toolkit/latest/set_env.sh"
-)
-for candidate in "${CANN_ENV_CANDIDATES[@]}"; do
-  if [[ -n "${candidate}" && -f "${candidate}" ]]; then
-    set +u
-    # shellcheck disable=SC1090
-    source "${candidate}"
-    set -u
-    break
-  fi
-done
+CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+if [[ ! -f "${CANN_ENV_SCRIPT}" ]]; then
+  echo "[error] CANN environment script not found: ${CANN_ENV_SCRIPT}" >&2
+  echo "        Override it with CANN_ENV_SCRIPT=/actual/path/set_env.sh" >&2
+  exit 1
+fi
+set +u
+# shellcheck disable=SC1090
+source "${CANN_ENV_SCRIPT}"
+set -u
 
 # Prefer the Conda C++ runtime over an older /usr/lib64/libstdc++.so.6.
 if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
@@ -65,6 +61,11 @@ fi
 
 if [[ ! -f "${LONGLIVE_VBENCH_FULL_INFO}" ]]; then
   echo "[error] VBench metadata not found: ${LONGLIVE_VBENCH_FULL_INFO}" >&2
+  exit 1
+fi
+
+if [[ ! -d "${VBENCH_CACHE_DIR}" ]]; then
+  echo "[error] VBench cache directory not found: ${VBENCH_CACHE_DIR}" >&2
   exit 1
 fi
 

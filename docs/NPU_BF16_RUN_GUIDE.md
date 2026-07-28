@@ -140,6 +140,7 @@ model_kwargs:
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+mkdir -p logs
 
 LLV2_DEVICE=npu torchrun \
   --nnodes=1 \
@@ -299,10 +300,10 @@ third_party/aisbench_adapter/
 ```
 
 服务器继续使用已经部署的 AISBench。适配脚本不会下载模型权重；默认从
-`$VBENCH_CACHE_DIR`（未设置时为 `~/.cache/vbench`）读取 AISBench 已有缓存。执行：
+`/mnt/weight/vbench_models/` 读取 AISBench 已有缓存。执行：
 
 ```bash
-export VBENCH_CACHE_DIR=/path/to/existing/vbench_cache
+export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
 bash third_party/aisbench_adapter/run_vbench_16npu.sh
 ```
 
@@ -333,7 +334,7 @@ AISBENCH_MAX_WORKERS = 16
 
 ```python
 DATA_PATH = "/mnt/share/r50063443/LongLive-oneday/videos/benchmarks/vbench_mini_5s_vbench"
-VBENCH_CACHE_DIR = "/path/to/existing/vbench_cache"
+VBENCH_CACHE_DIR = "/mnt/weight/vbench_models/"
 
 vbench_eval_cfg = dict(
     load_ckpt_from_local=True,
@@ -430,6 +431,18 @@ prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评
 显著增加显存。缺少这些重复样本时，所得结果只能标记为 single-sample diagnostic，不能
 报告为完整 VBench Standard 分数。
 
+当前 VBench-mini 单 seed 结果与论文只能做方向性观察：
+
+| 设置 | Total | Quality | Semantic | 说明 |
+| --- | ---: | ---: | ---: | --- |
+| 当前昇腾 mini | 81.50 | 83.10 | 75.10 | 43 条 prompt，每条 1 个 seed，约 1280×704 |
+| LongLive-2.0 BF16 4 步 | 85.06 | 86.67 | 78.63 | 论文 Table 4，完整 VBench，prompt augmentation，1280×720 |
+| 原始 LongLive 1.3B | 84.87 | 86.97 | 76.47 | 论文 Table 1，完整 VBench，832×480 |
+
+当前相对 LongLive-2.0 BF16 行分别低 3.56、3.57、3.53 分，但不能把该差值解释成昇腾精度
+损失，原因包括数据子集、seed 数、prompt augmentation 和输出高度均不一致。正式对比必须用
+`vbench_standard_5s_npu_bf16.yaml` 生成完整 prompt，并为每条 prompt 准备 5 个 seed。
+
 ### 7.5 完整 VBench 和 VBench-Long
 
 完整 5 秒 prompt 生成命令：
@@ -451,7 +464,7 @@ python third_party/aisbench_adapter/prepare_vbench_videos.py \
 
 export LONGLIVE_VBENCH_DATA_PATH="$PWD/videos/benchmarks/vbench_standard_5s_vbench"
 export LONGLIVE_VBENCH_FULL_INFO="$PWD/data/benchmarks/vbench_standard/VBench_full_info.json"
-export VBENCH_CACHE_DIR=/path/to/existing/vbench_cache
+export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
 bash third_party/aisbench_adapter/run_vbench_16npu.sh
 ```
 
@@ -497,9 +510,82 @@ python vbench2_beta_long/eval_long.py \
 把配置改为 `dp_size=2`，并用 `--nproc_per_node=16` 启动。16 卡是两个 8 卡 SP 组，不会
 降低单条视频延迟。
 
-每档至少记录：端到端延迟、diffusion 时间、VAE 时间、最终像素帧数、端到端 FPS、RTF、
-每卡峰值 HBM，以及 16 卡时的视频/小时。性能测试建议预热 2 次，再测 5 次；64 秒至少测
-3 次。AISBench 的 VBench 运行时间是评测器性能，不是 LongLive 生成性能，应分别记录。
+`inference_sp.py` 会为每条视频输出：
+
+```text
+[benchmark] rank=0 prompt_index=2 generation_seconds=... save_seconds=...
+pixel_frames=... video_seconds=... generation_fps=... rtf=... peak_memory_gb=...
+```
+
+- `generation_seconds`：`pipeline.inference` 时间，包含文本编码、4 步生成和 VAE 解码，排除 MP4 写盘。
+- `save_seconds`：CPU 搬运和 MP4 编码写盘时间，应与论文生成延迟分开。
+- `generation_fps = pixel_frames / generation_seconds`。
+- `rtf = generation_seconds / video_seconds`；小于 1 才是快于实时。
+- `peak_memory_gb`：当前进程在该样本期间的峰值 HBM；报告所有 rank 中最大值。
+
+8 卡单视频延迟示例：
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+LLV2_DEVICE=npu torchrun \
+  --nnodes=1 --nproc_per_node=8 \
+  --master_addr=127.0.0.1 --master_port=29511 \
+  inference_sp.py \
+  --config_path configs/benchmarks/perf_16s_npu_bf16.yaml \
+  2>&1 | tee logs/perf_16s_sp8_bf16.log
+
+rg '^\[benchmark\]' logs/perf_16s_sp8_bf16.log
+
+python scripts/summarize_npu_benchmark.py \
+  logs/perf_16s_sp8_bf16.log \
+  --warmup-per-rank 1
+```
+
+16 卡吞吐测试先创建临时 DP2 配置，不修改仓库基线：
+
+```bash
+cp configs/benchmarks/perf_16s_npu_bf16.yaml /tmp/perf_16s_npu_bf16_dp2.yaml
+sed -i 's/^dp_size: 1$/dp_size: 2/' /tmp/perf_16s_npu_bf16_dp2.yaml
+mkdir -p logs
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+
+LLV2_DEVICE=npu torchrun \
+  --nnodes=1 --nproc_per_node=16 \
+  --master_addr=127.0.0.1 --master_port=29512 \
+  inference_sp.py \
+  --config_path /tmp/perf_16s_npu_bf16_dp2.yaml \
+  2>&1 | tee logs/perf_16s_sp8_dp2_bf16.log
+
+python scripts/summarize_npu_benchmark.py \
+  logs/perf_16s_sp8_dp2_bf16.log \
+  --warmup-per-rank 1
+```
+
+性能 prompt 文件有 10 条。每个 SP 组的第 1 条用于算子和缓存预热，统计其余样本的均值、
+P50 和 P95。DP2 吞吐应按两个组完成有效样本的共同墙钟时间计算，并报告视频/小时；不能把
+两个组各自的 FPS 直接相加当作单视频 FPS。
+
+论文可作为两个不同硬件参照：
+
+| 论文设置 | 16 秒 E2E | 32 秒 E2E | 64 秒 E2E | 备注 |
+| --- | ---: | ---: | ---: | --- |
+| GB200 BF16 4 步 | 26.6 s | 53.2 s | 112.9 s | Table 3，36.4 GB，FPS 24.8 |
+| H100 SP=2 BF16 | 19.3 s | 38.1 s | 62.5 s | Table 6 |
+| H100 SP=4 BF16 | 26.2 s | 38.6 s | 65.4 s | Table 6，通信开销更高 |
+
+当前昇腾设置是 910B、SP=8、BF16、无 KV 量化、无异步 VAE，不能直接要求达到 GB200 的
+24.8 FPS。应同时报告 HCCL 通信占比；如果 SP=8 比较慢，需要分别测 SP=4/SP=8，判断收益
+是否被 All-to-All 通信抵消。
+
+最终建议形成三张表：
+
+1. **质量**：VBench 完整 16 维、5 seed；60 秒再报告 VBench-Long 六维。
+2. **延迟与吞吐**：16/32/64 秒的平均、P50、P95、FPS、RTF、视频/小时。
+3. **资源与稳定性**：每 rank 峰值 HBM、NPU 利用率、HCCL 时间、失败率、实际输出帧数。
+
+AISBench 自身的评测运行时间只代表评测器性能，不是 LongLive 生成性能，必须单独记录。
 
 ## 8. 是否需要训练
 

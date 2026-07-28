@@ -16,12 +16,12 @@ Required environment variables can override the defaults:
 ```bash
 export LONGLIVE_VBENCH_DATA_PATH=/path/to/prepared/videos
 export LONGLIVE_VBENCH_FULL_INFO=/path/to/VBench_full_info.json
-export VBENCH_CACHE_DIR=/path/to/existing/vbench/cache
+export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
 export AISBENCH_MAX_WORKERS=16
 ```
 
 See `docs/NPU_BF16_RUN_GUIDE.md` for the complete Chinese workflow.
 
-The launcher restores common CANN/HCCL paths, prepends `$CONDA_PREFIX/lib` to
+The launcher sources `/usr/local/Ascend/ascend-toolkit/set_env.sh`, prepends `$CONDA_PREFIX/lib` to
 `LD_LIBRARY_PATH`, and verifies both `torch_npu` and `decord` before starting
 AISBench. This avoids missing `libhccl.so` or loading an old system C++ runtime.

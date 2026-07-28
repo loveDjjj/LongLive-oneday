@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import os
+import time
 from math import gcd
 
 import peft
@@ -28,6 +29,34 @@ from utils.nvfp4_checkpoint import (
     quantize_model_for_fouroversix_nvfp4,
     unwrap_generator_state_dict,
 )
+
+
+def synchronize_accelerator(device):
+    accelerator = getattr(torch, device.type, None)
+    synchronize = getattr(accelerator, "synchronize", None)
+    if synchronize is not None:
+        synchronize()
+
+
+def reset_peak_memory(device):
+    accelerator = getattr(torch, device.type, None)
+    reset = getattr(accelerator, "reset_peak_memory_stats", None)
+    if reset is not None:
+        try:
+            reset()
+        except (RuntimeError, TypeError):
+            pass
+
+
+def peak_memory_gb(device):
+    accelerator = getattr(torch, device.type, None)
+    max_memory = getattr(accelerator, "max_memory_allocated", None)
+    if max_memory is None:
+        return None
+    try:
+        return max_memory() / (1024 ** 3)
+    except (RuntimeError, TypeError):
+        return None
 
 
 def save_prompts_to_txt(prompts_for_sample, prompt_txt_path: str, is_main_process: bool):
@@ -526,14 +555,21 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
 
     if is_main_process:
         print(f"\n[SP] Generating video {idx}: {prompt[:60]}...")
+    reset_peak_memory(device)
+    synchronize_accelerator(device)
+    generation_started = time.perf_counter()
     generated = pipeline.inference(
         noise=sampled_noise,
         text_prompts=prompts,
         return_latents=save_latents_only,
     )
+    synchronize_accelerator(device)
+    generation_seconds = time.perf_counter() - generation_started
+    generation_peak_memory_gb = peak_memory_gb(device)
 
     should_save = (sp_rank == 0) if use_effective_sp else True
     if idx < num_prompts and should_save:
+        save_started = time.perf_counter()
         if getattr(pipeline, "is_lora_merged", False):
             model_type = "merged_lora"
         elif getattr(pipeline, "is_lora_enabled", False):
@@ -569,6 +605,31 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
                 os.path.join(config.output_folder, f"{base_name}_prompts.txt"),
                 is_main_process=is_main_process,
             )
+
+        save_seconds = time.perf_counter() - save_started
+        if save_latents_only:
+            frame_count = 0
+            video_seconds = 0.0
+            generation_fps = 0.0
+            real_time_factor = 0.0
+        else:
+            frame_count = int(generated.shape[1])
+            output_fps = 24 if "5B" in config.model_kwargs.model_name else 16
+            video_seconds = frame_count / output_fps
+            generation_fps = frame_count / generation_seconds
+            real_time_factor = generation_seconds / video_seconds
+        peak_memory_text = (
+            f"{generation_peak_memory_gb:.2f}"
+            if generation_peak_memory_gb is not None
+            else "n/a"
+        )
+        print(
+            f"[benchmark] rank={rank} prompt_index={idx} "
+            f"generation_seconds={generation_seconds:.3f} "
+            f"save_seconds={save_seconds:.3f} pixel_frames={frame_count} "
+            f"video_seconds={video_seconds:.3f} generation_fps={generation_fps:.3f} "
+            f"rtf={real_time_factor:.3f} peak_memory_gb={peak_memory_text}"
+        )
 
     if config.inference_iter != -1 and i >= config.inference_iter:
         break
