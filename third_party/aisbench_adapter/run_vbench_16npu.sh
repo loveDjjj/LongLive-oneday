@@ -10,6 +10,22 @@ export LONGLIVE_VBENCH_DATA_PATH="${LONGLIVE_VBENCH_DATA_PATH:-${REPO_ROOT}/vide
 export LONGLIVE_VBENCH_FULL_INFO="${LONGLIVE_VBENCH_FULL_INFO:-${REPO_ROOT}/data/benchmarks/vbench_mini/VBench_full_info.json}"
 export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-${HOME}/.cache/vbench}"
 
+# Restore CANN/HCCL paths before changing the C++ runtime search order.
+CANN_ENV_CANDIDATES=(
+  "${CANN_ENV_SCRIPT:-}"
+  "/usr/local/Ascend/ascend-toolkit/set_env.sh"
+  "/usr/local/Ascend/ascend-toolkit/latest/set_env.sh"
+)
+for candidate in "${CANN_ENV_CANDIDATES[@]}"; do
+  if [[ -n "${candidate}" && -f "${candidate}" ]]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "${candidate}"
+    set -u
+    break
+  fi
+done
+
 # Prefer the Conda C++ runtime over an older /usr/lib64/libstdc++.so.6.
 if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -18,6 +34,16 @@ fi
 if ! command -v ais_bench >/dev/null 2>&1; then
   echo "[error] ais_bench is not available in the current environment." >&2
   echo "        Activate the AISBench environment or install the repository first." >&2
+  exit 1
+fi
+
+if ! NPU_IMPORT_ERROR="$(python -c 'import torch; import torch_npu; print(torch_npu.npu.device_count())' 2>&1)"; then
+  echo "[error] torch_npu cannot load the Ascend runtime:" >&2
+  echo "${NPU_IMPORT_ERROR}" >&2
+  echo >&2
+  echo "Source the CANN environment before running this launcher, for example:" >&2
+  echo "  source /usr/local/Ascend/ascend-toolkit/set_env.sh" >&2
+  echo "Do not concatenate LD_LIBRARY_PATH entries without a separating colon." >&2
   exit 1
 fi
 
@@ -42,6 +68,29 @@ if [[ ! -f "${LONGLIVE_VBENCH_FULL_INFO}" ]]; then
   exit 1
 fi
 
-ais_bench "${SCRIPT_DIR}/eval_longlive_vbench.py" \
+RENDERED_CONFIG="$(mktemp "${TMPDIR:-/tmp}/longlive_aisbench.XXXXXX.py")"
+trap 'rm -f "${RENDERED_CONFIG}"' EXIT
+
+python - "${SCRIPT_DIR}/eval_longlive_vbench.py" "${RENDERED_CONFIG}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+template_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+config = template_path.read_text(encoding="utf-8")
+replacements = {
+    '"__LONGLIVE_VBENCH_DATA_PATH__"': repr(os.environ["LONGLIVE_VBENCH_DATA_PATH"]),
+    '"__LONGLIVE_VBENCH_FULL_INFO__"': repr(os.environ["LONGLIVE_VBENCH_FULL_INFO"]),
+    '"__VBENCH_CACHE_DIR__"': repr(os.environ["VBENCH_CACHE_DIR"]),
+}
+for placeholder, value in replacements.items():
+    if placeholder not in config:
+        raise RuntimeError(f"missing config placeholder: {placeholder}")
+    config = config.replace(placeholder, value)
+output_path.write_text(config, encoding="utf-8")
+PY
+
+ais_bench "${RENDERED_CONFIG}" \
   --mode eval \
   --max-num-workers "${AISBENCH_MAX_WORKERS:-16}"

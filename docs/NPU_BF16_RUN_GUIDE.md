@@ -381,6 +381,27 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 python -c "import decord; print(decord.__version__)"
 ```
 
+注意 `LD_LIBRARY_PATH` 的 Conda 路径与原路径之间必须有冒号。下面这种写法是错误的，会把
+两个目录直接拼接，并可能进一步导致 `libhccl.so` 找不到：
+
+```bash
+# 错误：展开原变量前缺少冒号
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH}"
+```
+
+如果已经执行过错误命令，重新加载 CANN 环境并恢复路径：
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+python -c "import torch; import torch_npu; print(torch_npu.npu.device_count())"
+python -c "import decord; print(decord.__version__)"
+```
+
+仓库的 `run_vbench_16npu.sh` 会自动尝试加载上述 CANN 环境脚本，并在启动 AISBench 前分别
+检查 `torch_npu` 和 `decord`。
+
 如果 Conda 的 `libstdc++.so.6` 也没有该符号，使用清华 conda-forge 镜像安装 GCC 13 运行
 库，不要替换系统 `/usr/lib64/libstdc++.so.6`：
 

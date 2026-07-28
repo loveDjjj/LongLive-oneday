@@ -1,11 +1,9 @@
 """AISBench VBench 1.0 config for LongLive-generated videos.
 
-Run this file through the ``ais_bench`` command. Environment variables can
-override all machine-specific paths without editing the AISBench repository.
+The launcher renders the placeholder paths below before passing this config to
+``ais_bench``. Keeping this file free of runtime calls is required by
+MMEngine's lazy config parser.
 """
-
-import os
-from pathlib import Path
 
 from ais_bench.benchmark.datasets import VBenchDataset
 from ais_bench.benchmark.partitioners import NaivePartitioner
@@ -14,19 +12,9 @@ from ais_bench.benchmark.summarizers import VBenchSummarizer
 from ais_bench.benchmark.tasks import VBenchEvalTask
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = os.environ.get(
-    "LONGLIVE_VBENCH_DATA_PATH",
-    str(REPO_ROOT / "videos/benchmarks/vbench_mini_5s_vbench"),
-)
-FULL_JSON_PATH = os.environ.get(
-    "LONGLIVE_VBENCH_FULL_INFO",
-    str(REPO_ROOT / "data/benchmarks/vbench_mini/VBench_full_info.json"),
-)
-VBENCH_CACHE_DIR = os.environ.get(
-    "VBENCH_CACHE_DIR",
-    str(Path.home() / ".cache/vbench"),
-)
+DATA_PATH = "__LONGLIVE_VBENCH_DATA_PATH__"
+FULL_JSON_PATH = "__LONGLIVE_VBENCH_FULL_INFO__"
+VBENCH_CACHE_DIR = "__VBENCH_CACHE_DIR__"
 
 VBENCH_DEFAULT_DIMENSIONS = [
     "subject_consistency",
