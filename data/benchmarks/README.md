@@ -9,6 +9,10 @@ videos or VBench evaluator checkpoints.
 - `vbench_standard/`: Official VBench 1.0 Standard prompts, metadata, and
   `VBench_full_info.json` from the Vchitect/VBench repository. The metadata
   contains 946 records and 944 unique English prompts.
+- `vbench_standard_augmented_wan21_qwen25_seed42/`: the same 944 prompts after
+  the public Wan2.1 `QwenPromptExpander` augmentation with
+  `Qwen/Qwen2.5-3B-Instruct` and seed 42. Original prompts are retained for
+  VBench file names and labels.
 - `vbench_long/`: Official VBench-Long metadata and clip-splitting configs.
 - `performance/`: A small fixed prompt set for Ascend latency and throughput
   measurements. It is not a quality benchmark dataset.
