@@ -215,6 +215,10 @@ data/benchmarks/
 ├── vbench_standard/   # VBench 1.0 Standard，946 条记录/944 条去重 prompt + 16 维元数据
 ├── vbench_standard_augmented_wan21_qwen25_seed42/
 │                       # Wan2.1 + Qwen2.5-3B + seed 42 的 944 条公开增强 prompt
+├── vbench_standard_20pct/
+│                       # AISBench K-Means 20% 固定子集，187 条记录/186 条去重 prompt
+├── vbench_standard_20pct_augmented_wan21_qwen25_seed42/
+│                       # 同一 186 条子集对应的公开增强 prompt
 ├── vbench_long/       # VBench-Long 元数据和 slow-fast 切分配置
 └── performance/       # 固定的昇腾性能测试 prompt
 ```
@@ -241,8 +245,8 @@ Wan2.2 VAE 的时间压缩率是 4，正确的整段解码关系为：
 | 配置 | latent 帧 | 24 FPS 时长 | 用途 |
 | --- | ---: | ---: | --- |
 | `vbench_mini_5s_npu_bf16.yaml` | 32 | 5.21 秒 | mini 冒烟 |
-| `vbench_standard_5s_npu_bf16.yaml` | 32 | 5.21 秒 | VBench Standard |
-| `vbench_standard_augmented_5s_npu_bf16.yaml` | 32 | 5.21 秒 | 公开增强 prompt 对照组 |
+| `vbench_standard_20pct_5s_npu_bf16.yaml` | 32 | 5.21 秒 | VBench Standard 20% 回归集 |
+| `vbench_standard_20pct_augmented_5s_npu_bf16.yaml` | 32 | 5.21 秒 | 20% 公开增强 prompt 对照组 |
 | `vbench_long_60s_npu_bf16.yaml` | 360 | 59.88 秒 | VBench-Long |
 | `perf_16s_npu_bf16.yaml` | 96 | 15.88 秒 | 性能档位 |
 | `perf_32s_npu_bf16.yaml` | 192 | 31.88 秒 | 性能档位 |
@@ -444,9 +448,11 @@ prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评
 
 当前相对 LongLive-2.0 BF16 行分别低 3.56、3.57、3.53 分，但不能把该差值解释成昇腾精度
 损失，原因包括数据子集、seed 数、prompt augmentation 和输出高度均不一致。正式对比必须用
-`vbench_standard_5s_npu_bf16.yaml` 生成完整 prompt，并为每条 prompt 准备 5 个 seed。
+`data/benchmarks/vbench_standard/` 的完整944条 prompt，并为每条 prompt 准备5个 seed。当前
+默认流水线改为20%子集，所得分数只能标记为 VBench-20%-KMeans，不能作为论文 Full VBench
+分数。
 
-### 7.5 完整 VBench Standard 五 seed 流水线
+### 7.5 VBench Standard 20% 五 seed 流水线
 
 正式质量配置使用空间 latent 高宽 `44 × 80`，经过 Wan VAE 空间 16 倍上采样后为
 `704 × 1280`。Wan DiT 的空间 patch size 是 `(2, 2)`，latent 高宽必须都是偶数；直接将高度
@@ -456,7 +462,7 @@ prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评
 生成，保持单次 batch 显存不变，并整理为 `{原始 prompt}-0.mp4` 到
 `{原始 prompt}-4.mp4`。
 
-Standard 原始 prompt 一键执行：
+20% Standard 原始 prompt 一键执行：
 
 ```bash
 cd /mnt/share/r50063443/LongLive-oneday
@@ -473,10 +479,10 @@ BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
 
 1. 加载 `/usr/local/Ascend/ascend-toolkit/set_env.sh`。
 2. 每轮生成自动使用 `/mnt/share/r50063443/conda_envs/longlive` 环境，不受外层当前 Conda 环境影响。
-3. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成全部 944 条 prompt。
+3. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成 K-Means 选出的186条 prompt。
 4. 依次生成五个 seed，不把五个样本放入同一 batch。
 5. 终端显示每个 seed 和五轮总进度，并给出累计耗时、动态 ETA 与平均秒/视频；详细生成日志写入 `logs/npu_quality/`。
-6. 用原始 prompt 文件名整理 4720 个视频。
+6. 用原始 prompt 文件名整理930个视频。
 7. 切换到 `${AISBENCH_ENV}` 并调用 AISBench 的 16 维 VBench 质量评测。
 
 默认服务器路径如下，可用同名环境变量覆盖：
@@ -496,15 +502,16 @@ videos/benchmarks/quality_runs/<run_id>/   # 原始视频和 VBench 命名视频
 outputs/default/<AISBench_timestamp>/      # AISBench 指标汇总
 ```
 
-完整 944 × 5 会生成 4720 个视频，耗时和存储成本都较高。先确认 mini 链路、权重路径及单个
-`704 × 1280` 视频显存正常，再启动全量流水线。
+默认 `186 × 5` 会生成930个视频，约为 Full 4720个视频的19.7%。它覆盖全部16个指标，适合
+昇腾适配和模型版本间的固定回归比较，但不是 Full VBench。先确认 mini 链路、权重路径及单个
+`704 × 1280` 视频显存正常，再启动20%流水线。
 
 ### 7.6 公开增强 prompt 对照组
 
 公开 VBench 仓库确实提供了一份 Wan2.1 的增强产物和生成说明：使用 Wan2.1
 `QwenPromptExpander`、`Qwen/Qwen2.5-3B-Instruct`、seed 42。该文件的 946 行可无冲突映射到
-当前 944 条去重 Standard prompt，本仓库已经完成映射，无需在生成服务器上再次下载 Qwen
-权重。
+944 条去重 Standard prompt；默认增强流水线从中选取与20% K-Means子集完全对应的186条，
+无需在生成服务器上再次下载 Qwen 权重。
 
 一键生成并评测增强版：
 

@@ -21,16 +21,18 @@ VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
 
 case "${BENCHMARK}" in
   standard)
-    CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_5s_npu_bf16.yaml}"
-    GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard/prompts.txt}"
+    RUN_TAG="standard_20pct"
+    CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_20pct_5s_npu_bf16.yaml}"
+    GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard_20pct/prompts.txt}"
     NAMING_PROMPTS="${NAMING_PROMPTS:-${GENERATION_PROMPTS}}"
-    FULL_INFO="${FULL_INFO:-data/benchmarks/vbench_standard/VBench_full_info.json}"
+    FULL_INFO="${FULL_INFO:-data/benchmarks/vbench_standard_20pct/VBench_full_info.json}"
     ;;
   augmented)
-    CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_augmented_5s_npu_bf16.yaml}"
-    GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard_augmented_wan21_qwen25_seed42/prompts.txt}"
-    NAMING_PROMPTS="${NAMING_PROMPTS:-data/benchmarks/vbench_standard_augmented_wan21_qwen25_seed42/original_prompts.txt}"
-    FULL_INFO="${FULL_INFO:-data/benchmarks/vbench_standard/VBench_full_info.json}"
+    RUN_TAG="augmented_20pct"
+    CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_20pct_augmented_5s_npu_bf16.yaml}"
+    GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard_20pct_augmented_wan21_qwen25_seed42/prompts.txt}"
+    NAMING_PROMPTS="${NAMING_PROMPTS:-data/benchmarks/vbench_standard_20pct_augmented_wan21_qwen25_seed42/original_prompts.txt}"
+    FULL_INFO="${FULL_INFO:-data/benchmarks/vbench_standard_20pct/VBench_full_info.json}"
     ;;
   *)
     echo "[error] BENCHMARK must be standard or augmented, got: ${BENCHMARK}" >&2
@@ -115,7 +117,7 @@ if [[ "${#seed_array[@]}" -ne 5 ]]; then
   exit 1
 fi
 
-run_id="$(date +%Y%m%d_%H%M%S)_vbench_${BENCHMARK}_5seed_sp${sp_size}_dp${DP_SIZE}"
+run_id="$(date +%Y%m%d_%H%M%S)_vbench_${RUN_TAG}_5seed_sp${sp_size}_dp${DP_SIZE}"
 run_dir="logs/npu_quality/${run_id}"
 raw_root="videos/benchmarks/quality_runs/${run_id}/raw"
 prepared_dir="videos/benchmarks/quality_runs/${run_id}/vbench"

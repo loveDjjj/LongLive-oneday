@@ -1,5 +1,4 @@
-# VBench Standard with public Wan2.1/Qwen2.5-3B seed-42 prompt augmentation.
-# 16 NPU: SP8 x DP2, 32 latent frames -> 5.21 s at 24 FPS, 1280x704.
+# 16-NPU VBench 1.0 Standard 20% K-Means subset: 186 prompts, SP8 x DP2, 1280x704.
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -12,7 +11,7 @@ dp_size: 2
 auto_sp_remainder: false
 model_num_heads: 24
 use_ema: false
-output_folder: videos/benchmarks/vbench_standard_augmented_5s
+output_folder: videos/benchmarks/vbench_standard_20pct_5s
 num_samples: 1
 save_latents_only: false
 save_with_index: true
@@ -20,7 +19,7 @@ inference_iter: -1
 num_output_frames: 32
 
 data:
-  data_path: data/benchmarks/vbench_standard_augmented_wan21_qwen25_seed42/prompts.txt
+  data_path: data/benchmarks/vbench_standard_20pct/prompts.txt
   image_or_video_shape: [1, 32, 48, 44, 80]
 
 inference:
