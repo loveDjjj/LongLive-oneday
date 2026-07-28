@@ -106,7 +106,9 @@ trap 'exit 130' INT TERM
 
 draw_progress() {
   local completed="$1" total="$2" label="$3" width=36
-  local filled=$((completed * width / total)) empty=$((width - filled))
+  local filled empty
+  filled=$((completed * width / total))
+  empty=$((width - filled))
   local done_bar pending_bar
   printf -v done_bar '%*s' "${filled}" ''
   printf -v pending_bar '%*s' "${empty}" ''
