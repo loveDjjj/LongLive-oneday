@@ -523,7 +523,25 @@ pixel_frames=... video_seconds=... generation_fps=... rtf=... peak_memory_gb=...
 - `rtf = generation_seconds / video_seconds`；小于 1 才是快于实时。
 - `peak_memory_gb`：当前进程在该样本期间的峰值 HBM；报告所有 rank 中最大值。
 
-8 卡单视频延迟示例：
+推荐直接运行单次生成性能流水线：
+
+```bash
+bash scripts/run_npu_generation_benchmark.sh
+```
+
+脚本默认使用 `configs/benchmarks/perf_16s_npu_bf16.yaml` 和 16 卡 `SP8×DP2`。它只执行所
+指定配置的一次生成测试，不会自动循环 16/32/64 秒。测试其他时长可以修改脚本顶部的
+`CONFIG_PATH`，也可以在命令行临时指定：
+
+```bash
+CONFIG_PATH=configs/benchmarks/perf_32s_npu_bf16.yaml \
+  bash scripts/run_npu_generation_benchmark.sh
+```
+
+流水线会把 torchrun 完整输出保存到日志，控制台只显示全局 MP4 完成进度条、失败日志尾部
+和最终汇总。生成视频、原始日志与汇总分别保存在带时间戳的独立目录，避免覆盖已有结果。
+
+需要手工测试时，8 卡单视频延迟示例如下：
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
