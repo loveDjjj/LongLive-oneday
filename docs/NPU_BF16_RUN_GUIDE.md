@@ -448,8 +448,11 @@ prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评
 
 ### 7.5 完整 VBench Standard 五 seed 流水线
 
-正式质量配置使用空间 latent 高宽 `45 × 80`，经过 Wan VAE 空间 16 倍上采样后约为
-`720 × 1280`。不要把 `num_samples` 改成 5；流水线会依次使用 seed 0、1、2、3、4 启动五次
+正式质量配置使用空间 latent 高宽 `44 × 80`，经过 Wan VAE 空间 16 倍上采样后为
+`704 × 1280`。Wan DiT 的空间 patch size 是 `(2, 2)`，latent 高宽必须都是偶数；直接将高度
+改成 45 会在 patch embedding 中被截断回 44，并导致 diffusion state 与模型输出尺寸不一致。
+精确 `720 × 1280` 需要实现 latent padding 和解码后裁剪，当前流水线不宣称已对齐论文的
+720 高度。不要把 `num_samples` 改成 5；流水线会依次使用 seed 0、1、2、3、4 启动五次
 生成，保持单次 batch 显存不变，并整理为 `{原始 prompt}-0.mp4` 到
 `{原始 prompt}-4.mp4`。
 
@@ -469,15 +472,17 @@ BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
 流水线自动完成：
 
 1. 加载 `/usr/local/Ascend/ascend-toolkit/set_env.sh`。
-2. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成全部 944 条 prompt。
-3. 依次生成五个 seed，不把五个样本放入同一 batch。
-4. 终端只显示每个 seed 的视频完成进度，详细生成日志写入 `logs/npu_quality/`。
-5. 用原始 prompt 文件名整理 4720 个视频。
-6. 切换到 `${AISBENCH_ENV}` 并调用 AISBench 的 16 维 VBench 质量评测。
+2. 每轮生成自动使用 `/mnt/share/r50063443/conda_envs/longlive` 环境，不受外层当前 Conda 环境影响。
+3. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成全部 944 条 prompt。
+4. 依次生成五个 seed，不把五个样本放入同一 batch。
+5. 终端只显示每个 seed 的视频完成进度，详细生成日志写入 `logs/npu_quality/`。
+6. 用原始 prompt 文件名整理 4720 个视频。
+7. 切换到 `${AISBENCH_ENV}` 并调用 AISBench 的 16 维 VBench 质量评测。
 
 默认服务器路径如下，可用同名环境变量覆盖：
 
 ```bash
+export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
 export AISBENCH_ENV=/mnt/share/r50063443/conda_envs/aisbench_npu
 export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
@@ -492,7 +497,7 @@ outputs/default/<AISBench_timestamp>/      # AISBench 指标汇总
 ```
 
 完整 944 × 5 会生成 4720 个视频，耗时和存储成本都较高。先确认 mini 链路、权重路径及单个
-`720 × 1280` 视频显存正常，再启动全量流水线。
+`704 × 1280` 视频显存正常，再启动全量流水线。
 
 ### 7.6 公开增强 prompt 对照组
 

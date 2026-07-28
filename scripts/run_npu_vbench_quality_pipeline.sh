@@ -15,6 +15,7 @@ DP_SIZE="${DP_SIZE:-2}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29530}"
 CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
 VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
 
@@ -43,6 +44,12 @@ for required_file in "${CONFIG_PATH}" "${GENERATION_PROMPTS}" "${NAMING_PROMPTS}
     exit 1
   fi
 done
+if [[ ! -x "${GENERATION_ENV}/bin/torchrun" || ! -x "${GENERATION_ENV}/bin/python" ]]; then
+  echo "[error] LongLive generation environment is incomplete: ${GENERATION_ENV}" >&2
+  echo "        Expected executable bin/torchrun and bin/python." >&2
+  echo "        Override GENERATION_ENV with the deployed LongLive Conda environment." >&2
+  exit 1
+fi
 if [[ ! -x "${AISBENCH_ENV}/bin/ais_bench" ]]; then
   echo "[error] AISBench executable not found: ${AISBENCH_ENV}/bin/ais_bench" >&2
   echo "        Override AISBENCH_ENV with the deployed AISBench Conda environment." >&2
@@ -72,6 +79,27 @@ fi
 sp_size="$(awk '/^sp_size:/ {print $2; exit}' "${CONFIG_PATH}")"
 if [[ -z "${sp_size}" || $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
   echo "[error] parallel layout mismatch: sp=${sp_size:-missing}, dp=${DP_SIZE}, nproc=${NPROC_PER_NODE}" >&2
+  exit 1
+fi
+
+# Wan2.2-TI2V-5B uses a (1, 2, 2) DiT patch. Odd latent H/W values are
+# truncated by patch embedding and cannot be subtracted from the original
+# diffusion state. Reject them before loading the model.
+shape_values="$(sed -n 's/.*image_or_video_shape: *\[\([^]]*\)\].*/\1/p' "${CONFIG_PATH}" | head -n 1)"
+if [[ -z "${shape_values}" ]]; then
+  echo "[error] image_or_video_shape must use compact [B, T, C, H, W] syntax: ${CONFIG_PATH}" >&2
+  exit 1
+fi
+IFS=',' read -r _shape_b _shape_t _shape_c latent_h latent_w <<< "${shape_values}"
+latent_h="${latent_h//[[:space:]]/}"
+latent_w="${latent_w//[[:space:]]/}"
+if [[ ! "${latent_h}" =~ ^[0-9]+$ || ! "${latent_w}" =~ ^[0-9]+$ ]]; then
+  echo "[error] invalid latent H/W in image_or_video_shape: H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
+  exit 1
+fi
+if [[ $((latent_h % 2)) -ne 0 || $((latent_w % 2)) -ne 0 ]]; then
+  echo "[error] Wan DiT latent H/W must both be divisible by 2; got H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
+  echo "        Odd sizes are truncated by patch embedding (for example, H=45 becomes 44)." >&2
   exit 1
 fi
 
@@ -117,6 +145,7 @@ draw_progress() {
 
 echo "[run] benchmark=${BENCHMARK}, prompts=${prompt_count}, seeds=${SEEDS}"
 echo "[run] config=${CONFIG_PATH}, nproc=${NPROC_PER_NODE}, sp=${sp_size}, dp=${DP_SIZE}"
+echo "[run] generation_env=${GENERATION_ENV}"
 echo "[run] logs=${run_dir}"
 
 for sample_index in "${!seed_array[@]}"; do
@@ -133,7 +162,12 @@ for sample_index in "${!seed_array[@]}"; do
     -e "s/^  seed: .*/  seed: ${seed}/" \
     "${CONFIG_PATH}" > "${rendered_config}"
 
-  LLV2_DEVICE=npu torchrun \
+  env \
+    PATH="${GENERATION_ENV}/bin:${PATH}" \
+    CONDA_PREFIX="${GENERATION_ENV}" \
+    LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    LLV2_DEVICE=npu \
+    "${GENERATION_ENV}/bin/torchrun" \
     --nnodes=1 \
     --nproc_per_node="${NPROC_PER_NODE}" \
     --master_addr="${MASTER_ADDR}" \
@@ -164,7 +198,7 @@ for sample_index in "${!seed_array[@]}"; do
     exit "${status}"
   fi
 
-  python third_party/aisbench_adapter/prepare_vbench_videos.py \
+  "${GENERATION_ENV}/bin/python" third_party/aisbench_adapter/prepare_vbench_videos.py \
     --benchmark standard \
     --src-dir "${seed_dir}" \
     --prompts-file "${NAMING_PROMPTS}" \

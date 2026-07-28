@@ -1,4 +1,4 @@
-# 16-NPU VBench 1.0 Standard generation: SP8 x DP2, 5.21 s, approximately 1280x720.
+# 16-NPU VBench 1.0 Standard generation: SP8 x DP2, 5.21 s, 1280x704.
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -20,7 +20,7 @@ num_output_frames: 32
 
 data:
   data_path: data/benchmarks/vbench_standard/prompts.txt
-  image_or_video_shape: [1, 32, 48, 45, 80]
+  image_or_video_shape: [1, 32, 48, 44, 80]
 
 inference:
   sampling_steps: 4
