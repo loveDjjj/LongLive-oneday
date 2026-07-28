@@ -359,6 +359,44 @@ AISBench 文档从源码编译：
 pip install decord
 ```
 
+如果导入 decord 时出现以下错误：
+
+```text
+libstdc++.so.6: version `GLIBCXX_3.4.32' not found
+```
+
+说明 decord wheel 需要 GCC 13 的 C++ 运行库，但进程加载了较旧的
+`/usr/lib64/libstdc++.so.6`。这与 NPU、VBench 数据或 16 卡并行无关。先检查 Conda 环境：
+
+```bash
+echo "$CONDA_PREFIX"
+strings "$CONDA_PREFIX/lib/libstdc++.so.6" | grep GLIBCXX_3.4.32
+```
+
+如果能找到该符号，只需要让 Conda 动态库优先。仓库启动脚本已经自动执行这一设置；手工
+启动时使用：
+
+```bash
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -c "import decord; print(decord.__version__)"
+```
+
+如果 Conda 的 `libstdc++.so.6` 也没有该符号，使用清华 conda-forge 镜像安装 GCC 13 运行
+库，不要替换系统 `/usr/lib64/libstdc++.so.6`：
+
+```bash
+conda install -n aisbench_npu \
+  --override-channels \
+  -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge \
+  "libstdcxx-ng>=13,<14" "libgcc-ng>=13,<14"
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -c "import decord; print(decord.__version__)"
+```
+
+安装运行库后仍无法导入时，卸载不兼容的 wheel，按照 AISBench 文档在服务器上使用
+`-DUSE_CUDA=0` 从源码编译 decord，使其链接当前环境的 C++ 运行库。
+
 上述 mini 配置只有 1 个 seed，用于验证“LongLive 生成 -> 文件整理 -> AISBench 评分”完整
 链路。AISBench Standard 的正式协议要求视频文件名为 `{prompt}-{index}.mp4`，每条普通
 prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评测时应修改

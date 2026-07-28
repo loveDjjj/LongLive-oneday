@@ -20,3 +20,7 @@ export AISBENCH_MAX_WORKERS=16
 ```
 
 See `docs/NPU_BF16_RUN_GUIDE.md` for the complete Chinese workflow.
+
+The launcher prepends `$CONDA_PREFIX/lib` to `LD_LIBRARY_PATH` and verifies
+that `decord` can load before starting AISBench. This avoids accidentally
+loading an older `/usr/lib64/libstdc++.so.6` on Ascend servers.
