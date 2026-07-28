@@ -91,6 +91,11 @@ for placeholder, value in replacements.items():
 output_path.write_text(config, encoding="utf-8")
 PY
 
+# AISBench resolves its default outputs/ directory against the current working
+# directory. Keep results under LongLive even when this script is called by an
+# absolute path from another repository.
+cd "${REPO_ROOT}"
+
 ais_bench "${RENDERED_CONFIG}" \
   --mode eval \
   --max-num-workers "${AISBENCH_MAX_WORKERS:-16}"

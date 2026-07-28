@@ -306,6 +306,9 @@ export VBENCH_CACHE_DIR=/path/to/existing/vbench_cache
 bash third_party/aisbench_adapter/run_vbench_16npu.sh
 ```
 
+启动脚本会切换到 LongLive 仓库根目录，因此 AISBench 默认结果统一写入
+`LongLive-oneday/outputs/default/<timestamp>/`，不受执行命令时所在目录影响。
+
 适配依据是 AISBench 官方仓库 `https://github.com/AISBench/benchmark` 的 VBench 1.0
 配置。服务器上的版本应至少包含下面这些类，可以先检查，不会触发权重下载：
 
