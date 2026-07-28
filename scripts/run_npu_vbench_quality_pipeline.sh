@@ -133,14 +133,29 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 draw_progress() {
-  local completed="$1" total="$2" label="$3" width=36
+  local completed="$1" total="$2" global_completed="$3" global_total="$4"
+  local elapsed_seconds="$5" label="$6" width=36
   local filled empty
   filled=$((completed * width / total))
   empty=$((width - filled))
-  local done_bar pending_bar
+  local done_bar pending_bar elapsed_text eta_text rate_text
   printf -v done_bar '%*s' "${filled}" ''
   printf -v pending_bar '%*s' "${empty}" ''
-  printf '\r[%s] [%s%s] %d/%d' "${label}" "${done_bar// /#}" "${pending_bar// /-}" "${completed}" "${total}"
+  printf -v elapsed_text '%02d:%02d:%02d' \
+    "$((elapsed_seconds / 3600))" "$(((elapsed_seconds % 3600) / 60))" "$((elapsed_seconds % 60))"
+  if ((global_completed > 0)); then
+    local eta_seconds=$((elapsed_seconds * (global_total - global_completed) / global_completed))
+    printf -v eta_text '%02d:%02d:%02d' \
+      "$((eta_seconds / 3600))" "$(((eta_seconds % 3600) / 60))" "$((eta_seconds % 60))"
+    rate_text="$(awk -v elapsed="${elapsed_seconds}" -v count="${global_completed}" \
+      'BEGIN { if (count > 0) printf "%.1fs/video", elapsed / count; else print "--" }')"
+  else
+    eta_text="--:--:--"
+    rate_text="--"
+  fi
+  printf '\r[%s] [%s%s] %d/%d | total %d/%d [%s<%s, %s]' \
+    "${label}" "${done_bar// /#}" "${pending_bar// /-}" "${completed}" "${total}" \
+    "${global_completed}" "${global_total}" "${elapsed_text}" "${eta_text}" "${rate_text}"
 }
 
 echo "[run] benchmark=${BENCHMARK}, prompts=${prompt_count}, seeds=${SEEDS}"
@@ -148,6 +163,8 @@ echo "[run] config=${CONFIG_PATH}, nproc=${NPROC_PER_NODE}, sp=${sp_size}, dp=${
 echo "[run] generation_env=${GENERATION_ENV}"
 echo "[run] logs=${run_dir}"
 
+pipeline_started_at="$(date +%s)"
+total_videos=$((prompt_count * ${#seed_array[@]}))
 for sample_index in "${!seed_array[@]}"; do
   seed="${seed_array[${sample_index}]}"
   seed_dir="${raw_root}/seed_${seed}"
@@ -180,7 +197,10 @@ for sample_index in "${!seed_array[@]}"; do
   while kill -0 "${child_pid}" 2>/dev/null; do
     completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
     ((completed > prompt_count)) && completed="${prompt_count}"
-    draw_progress "${completed}" "${prompt_count}" "seed ${seed}"
+    global_completed=$((sample_index * prompt_count + completed))
+    elapsed_seconds=$(($(date +%s) - pipeline_started_at))
+    draw_progress "${completed}" "${prompt_count}" "${global_completed}" "${total_videos}" \
+      "${elapsed_seconds}" "seed ${seed} ($((sample_index + 1))/${#seed_array[@]})"
     sleep 2
   done
 
@@ -190,7 +210,11 @@ for sample_index in "${!seed_array[@]}"; do
   set -e
   child_pid=""
   completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
-  draw_progress "${completed}" "${prompt_count}" "seed ${seed}"
+  ((completed > prompt_count)) && completed="${prompt_count}"
+  global_completed=$((sample_index * prompt_count + completed))
+  elapsed_seconds=$(($(date +%s) - pipeline_started_at))
+  draw_progress "${completed}" "${prompt_count}" "${global_completed}" "${total_videos}" \
+    "${elapsed_seconds}" "seed ${seed} ($((sample_index + 1))/${#seed_array[@]})"
   printf '\n'
   if [[ "${status}" -ne 0 ]]; then
     echo "[error] seed ${seed} failed with exit code ${status}; log tail:" >&2

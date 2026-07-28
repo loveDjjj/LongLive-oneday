@@ -475,7 +475,7 @@ BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
 2. 每轮生成自动使用 `/mnt/share/r50063443/conda_envs/longlive` 环境，不受外层当前 Conda 环境影响。
 3. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成全部 944 条 prompt。
 4. 依次生成五个 seed，不把五个样本放入同一 batch。
-5. 终端只显示每个 seed 的视频完成进度，详细生成日志写入 `logs/npu_quality/`。
+5. 终端显示每个 seed 和五轮总进度，并给出累计耗时、动态 ETA 与平均秒/视频；详细生成日志写入 `logs/npu_quality/`。
 6. 用原始 prompt 文件名整理 4720 个视频。
 7. 切换到 `${AISBENCH_ENV}` 并调用 AISBench 的 16 维 VBench 质量评测。
 
