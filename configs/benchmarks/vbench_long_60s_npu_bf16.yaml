@@ -1,4 +1,4 @@
-# VBench-Long protocol: 360 latent frames -> 1437 decoded frames -> 59.88 s at 24 FPS.
+# 16-NPU VBench-Long: SP8 x DP2, 360 latent frames -> 1437 decoded frames -> 59.88 s at 24 FPS.
 # Correct full Wan VAE decoding is used. Verify memory before running the full prompt set.
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
@@ -8,7 +8,7 @@ model_kwargs:
   local_attn_size: 32
 
 sp_size: 8
-dp_size: 1
+dp_size: 2
 auto_sp_remainder: false
 model_num_heads: 24
 use_ema: false

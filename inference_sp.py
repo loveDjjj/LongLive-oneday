@@ -10,7 +10,6 @@ import torch.distributed as dist
 from einops import rearrange
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
 from torchvision.io import write_video
 from tqdm import tqdm
 
@@ -479,13 +478,10 @@ if is_main_process:
     print(f"[data] data_path={config.data_path}, mode={dataset._mode}, num_blocks={num_blocks}")
 num_prompts = len(dataset)
 if use_multi_dp:
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=total_dp_groups,
-        rank=dp_rank,
-        shuffle=False,
-        drop_last=True,
-    )
+    # DP groups use independent SP collectives, so uneven prompt counts are safe.
+    # A strided sampler avoids dropping or padding samples when len(dataset) is
+    # not divisible by the number of DP groups (for example, VBench-mini has 43).
+    sampler = range(dp_rank, num_prompts, total_dp_groups)
 elif dist.is_initialized():
     sampler = SequentialSampler(dataset)
 else:

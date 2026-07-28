@@ -249,94 +249,155 @@ Wan2.2 VAE 的时间压缩率是 4，正确的整段解码关系为：
 block 边界重置时间缓存。例如 128 latent 帧会输出约 19.33 秒，而不是正确整段解码的
 21.21 秒。该分块 fallback 不能用于正式质量评测。
 
-### 7.3 先运行 AISBench mini 单样本链路
+### 7.3 先运行 AISBench mini 单样本链路（默认 16 卡）
 
-建议先用 8 卡 SP、单 DP 组生成 mini 视频：
+质量评测配置默认使用 16 卡，即两个独立的 8 卡 SP 组并行处理 prompt：
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 LLV2_DEVICE=npu torchrun \
   --nnodes=1 \
-  --nproc_per_node=8 \
+  --nproc_per_node=16 \
   --master_addr=127.0.0.1 \
   --master_port=29501 \
   inference_sp.py \
   --config_path configs/benchmarks/vbench_mini_5s_npu_bf16.yaml
 ```
 
-当前推理入口按数据集序号保存文件。生成结束后，先把序号映射回 prompt，并按 VBench 的
-`{prompt}-{sample_index}.mp4` 规则创建评测目录：
+三个 VBench 质量配置均为：
+
+```yaml
+sp_size: 8
+dp_size: 2
+```
+
+因此 16 卡用于提高 prompt 吞吐量，不会让单条视频使用 16 卡 SP。`inference_sp.py` 使用不
+补齐、不丢弃的分组采样，43 条 mini prompt 会由两个 DP 组分别处理 22 条和 21 条。
+
+当前推理入口按数据集序号保存文件。生成结束后，运行仓库内的整理脚本，把序号映射回
+prompt，并按 VBench 的 `{prompt}-{sample_index}.mp4` 规则创建评测目录：
+
+```bash
+python third_party/aisbench_adapter/prepare_vbench_videos.py \
+  --benchmark mini \
+  --sample-index 0
+```
+
+脚本默认严格检查 43 条 prompt 是否全部生成。只测试部分 prompt 时可以增加
+`--allow-missing`；目标文件已存在且确认需要覆盖时增加 `--overwrite`。
+
+### 7.4 AISBench 代码和配置
+
+本仓库没有复制整个 AISBench，而是提供轻量适配层：
+
+```text
+third_party/aisbench_adapter/
+├── eval_longlive_vbench.py       # 可直接传给 ais_bench 的独立配置
+├── prepare_vbench_videos.py      # LongLive 输出文件整理脚本
+└── run_vbench_16npu.sh           # 16 NPU / 16 workers 启动脚本
+```
+
+服务器继续使用已经部署的 AISBench。适配脚本不会下载模型权重；默认从
+`$VBENCH_CACHE_DIR`（未设置时为 `~/.cache/vbench`）读取 AISBench 已有缓存。执行：
+
+```bash
+export VBENCH_CACHE_DIR=/path/to/existing/vbench_cache
+bash third_party/aisbench_adapter/run_vbench_16npu.sh
+```
+
+适配依据是 AISBench 官方仓库 `https://github.com/AISBench/benchmark` 的 VBench 1.0
+配置。服务器上的版本应至少包含下面这些类，可以先检查，不会触发权重下载：
 
 ```bash
 python - <<'PY'
-import re
-import shutil
-from pathlib import Path
-
-root = Path("/mnt/share/r50063443/LongLive-oneday")
-src_dir = root / "videos/benchmarks/vbench_mini_5s"
-dst_dir = root / "videos/benchmarks/vbench_mini_5s_vbench"
-prompts = (root / "data/benchmarks/vbench_mini/prompts.txt").read_text(
-    encoding="utf-8"
-).splitlines()
-dst_dir.mkdir(parents=True, exist_ok=True)
-
-for src in src_dir.glob("rank*-*-0_*.mp4"):
-    match = re.match(r"rank\d+-(\d+)-0_", src.name)
-    if match is None:
-        continue
-    prompt_idx = int(match.group(1))
-    shutil.copy2(src, dst_dir / f"{prompts[prompt_idx]}-0.mp4")
-
-print(f"prepared {len(list(dst_dir.glob('*.mp4')))} videos in {dst_dir}")
+from ais_bench.benchmark.datasets import VBenchDataset
+from ais_bench.benchmark.summarizers import VBenchSummarizer
+from ais_bench.benchmark.tasks import VBenchEvalTask
+print("AISBench VBench adapter is available")
 PY
 ```
 
-然后在已经部署好的 AISBench 仓库中，将 VBench 示例配置改为：
+脚本默认设置：
+
+```python
+ASCEND_RT_VISIBLE_DEVICES = "0,1,...,15"
+AISBENCH_MAX_WORKERS = 16
+```
+
+如果希望手工修改 AISBench 官方配置，只需要修改
+`ais_bench/configs/vbench_examples/eval_vbench_standard.py`：
 
 ```python
 DATA_PATH = "/mnt/share/r50063443/LongLive-oneday/videos/benchmarks/vbench_mini_5s_vbench"
+VBENCH_CACHE_DIR = "/path/to/existing/vbench_cache"
 
 vbench_eval_cfg = dict(
     load_ckpt_from_local=True,
     full_json_dir="/mnt/share/r50063443/LongLive-oneday/data/benchmarks/vbench_mini/VBench_full_info.json",
+    device="npu",
 )
 ```
 
-在 AISBench 仓库根目录执行：
+以下 AISBench 文件不需要修改：
+
+- `ais_bench/third_party/vbench/`：VBench 1.0 指标实现和默认 prompt。
+- `ais_bench/benchmark/summarizers/vbench.py`：Quality、Semantic、Total 汇总。
+- `ais_bench/benchmark/tasks/` 和 `datasets/`：本仓库配置直接复用这些实现。
+
+首次配置 AISBench 环境时，四个依赖 GRiT 的维度需要在 AISBench 根目录安装仓库内的
+detectron2。这个命令只安装代码，不下载 VBench 权重：
 
 ```bash
-ais_bench ais_bench/configs/vbench_examples/eval_vbench_standard.py \
-  --mode eval \
-  --max-num-workers 8
+pip install -e ais_bench/third_party/detectron2 --no-build-isolation
+```
+
+VBench 还依赖 decord。x86_64 通常可以直接安装；ARM 服务器没有对应 wheel 时需要按
+AISBench 文档从源码编译：
+
+```bash
+pip install decord
 ```
 
 上述 mini 配置只有 1 个 seed，用于验证“LongLive 生成 -> 文件整理 -> AISBench 评分”完整
 链路。AISBench Standard 的正式协议要求视频文件名为 `{prompt}-{index}.mp4`，每条普通
 prompt 需要 5 个不同 seed，`temporal_flickering` 需要 25 个。正式评测时应修改
 `logging.seed` 后分 5 次顺序生成，temporal flickering 子集分 25 次生成，并在每轮结束后把
-文件整理成 `{prompt}-0.mp4` 至 `{prompt}-4.mp4` 或 `{prompt}-24.mp4`。不要直接把
-`num_samples` 改成 5 或 25，否则会把样本放进同一 batch，显著增加显存。缺少这些重复样本
-时，所得结果只能标记为 single-sample diagnostic，不能报告为完整 VBench Standard 分数。
+对应轮次传给 `--sample-index`，整理成 `{prompt}-0.mp4` 至 `{prompt}-4.mp4` 或
+`{prompt}-24.mp4`。不要直接把 `num_samples` 改成 5 或 25，否则会把样本放进同一 batch，
+显著增加显存。缺少这些重复样本时，所得结果只能标记为 single-sample diagnostic，不能
+报告为完整 VBench Standard 分数。
 
-### 7.4 完整 VBench 和 VBench-Long
+### 7.5 完整 VBench 和 VBench-Long
 
 完整 5 秒 prompt 生成命令：
 
 ```bash
 LLV2_DEVICE=npu torchrun \
-  --nnodes=1 --nproc_per_node=8 \
+  --nnodes=1 --nproc_per_node=16 \
   --master_addr=127.0.0.1 --master_port=29501 \
   inference_sp.py \
   --config_path configs/benchmarks/vbench_standard_5s_npu_bf16.yaml
+```
+
+整理完整 Standard 输出并调用同一 AISBench 适配配置：
+
+```bash
+python third_party/aisbench_adapter/prepare_vbench_videos.py \
+  --benchmark standard \
+  --sample-index 0
+
+export LONGLIVE_VBENCH_DATA_PATH="$PWD/videos/benchmarks/vbench_standard_5s_vbench"
+export LONGLIVE_VBENCH_FULL_INFO="$PWD/data/benchmarks/vbench_standard/VBench_full_info.json"
+export VBENCH_CACHE_DIR=/path/to/existing/vbench_cache
+bash third_party/aisbench_adapter/run_vbench_16npu.sh
 ```
 
 60 秒 VBench-Long 命令：
 
 ```bash
 LLV2_DEVICE=npu torchrun \
-  --nnodes=1 --nproc_per_node=8 \
+  --nnodes=1 --nproc_per_node=16 \
   --master_addr=127.0.0.1 --master_port=29501 \
   inference_sp.py \
   --config_path configs/benchmarks/vbench_long_60s_npu_bf16.yaml
@@ -345,23 +406,29 @@ LLV2_DEVICE=npu torchrun \
 60 秒整段 VAE 解码显存较高。先用单条 prompt 验证；如果 OOM，不要切回错误的逐 block
 普通解码，应先实现保持时间缓存的 Wan VAE streaming decode。
 
-原生 VBench-Long 测评示例：
+先按 VBench 文件名整理长视频：
+
+```bash
+python third_party/aisbench_adapter/prepare_vbench_videos.py \
+  --benchmark long \
+  --sample-index 0
+```
+
+再运行原生 VBench-Long 测评：
 
 ```bash
 python vbench2_beta_long/eval_long.py \
-  --videos_path /mnt/share/r50063443/LongLive-oneday/videos/benchmarks/vbench_long_60s \
+  --videos_path /mnt/share/r50063443/LongLive-oneday/videos/benchmarks/vbench_long_60s_vbench \
   --dimension subject_consistency background_consistency motion_smoothness dynamic_degree aesthetic_quality imaging_quality \
   --mode long_vbench_standard \
   --num_of_samples_per_prompt 1 \
   --dev_flag
 ```
 
-该命令同样要求视频按 `{prompt}-0.mp4` 命名。可以复用 7.3 的整理脚本，只需把
-`vbench_mini_5s`、`vbench_mini_5s_vbench` 和 prompt 文件路径分别替换成
-`vbench_long_60s`、`vbench_long_60s_vbench` 和 `vbench_long/prompts.txt`。这里显式使用
-`--num_of_samples_per_prompt 1` 是为了与当前配置一致；正式多样本协议需生成 5 个 seed。
+这里显式使用 `--num_of_samples_per_prompt 1` 是为了与当前配置一致；正式多样本协议需生成
+5 个 seed。
 
-### 7.5 昇腾性能测试
+### 7.6 昇腾性能测试
 
 依次运行 `perf_16s_npu_bf16.yaml`、`perf_32s_npu_bf16.yaml` 和
 `perf_64s_npu_bf16.yaml`。8 卡配置 `sp_size=8, dp_size=1` 用于单条视频延迟；16 卡吞吐测试

@@ -1,4 +1,4 @@
-# AISBench VBench-1.0-mini smoke test: 32 latent frames -> 125 decoded frames -> 5.21 s at 24 FPS.
+# 16-NPU AISBench VBench-1.0-mini: SP8 x DP2, 32 latent frames -> 5.21 s at 24 FPS.
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -7,7 +7,7 @@ model_kwargs:
   local_attn_size: 32
 
 sp_size: 8
-dp_size: 1
+dp_size: 2
 auto_sp_remainder: false
 model_num_heads: 24
 use_ema: false
