@@ -479,7 +479,7 @@ BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
 
 1. 加载 `/usr/local/Ascend/ascend-toolkit/set_env.sh`。
 2. 每轮生成自动使用 `/mnt/share/r50063443/conda_envs/longlive` 环境，不受外层当前 Conda 环境影响。
-3. 使用 16 张 NPU，按 `sp_size=8, dp_size=2` 生成 K-Means 选出的186条 prompt。
+3. 默认使用12张 NPU，按 `sp_size=2, dp_size=6` 生成 K-Means 选出的186条 prompt；每个DP组每轮处理31条。
 4. 依次生成五个 seed，不把五个样本放入同一 batch。
 5. 终端显示每个 seed 和五轮总进度，并给出累计耗时、动态 ETA 与平均秒/视频；详细生成日志写入 `logs/npu_quality/`。
 6. 用原始 prompt 文件名整理930个视频。
@@ -491,7 +491,7 @@ BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
 export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
 export AISBENCH_ENV=/mnt/share/r50063443/conda_envs/aisbench_npu
 export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11
 ```
 
 每次运行使用带时间戳的独立目录：
@@ -515,6 +515,28 @@ bash scripts/run_npu_vbench_standard_pipeline.sh
 ```
 
 如果某个 seed 只有部分 MP4，该 seed 会从头重新生成；已经完整生成的 seed 不会重复计算。
+
+要在12卡上依次完成“增强 prompt 生成+AISBench”和“原始 prompt 生成+AISBench”，直接运行：
+
+```bash
+bash scripts/run_npu_vbench_12npu_all.sh
+```
+
+该脚本顶部集中定义了卡号、进程数、DP大小、AISBench worker、端口和两个 Conda 环境路径，
+默认配置为：
+
+```text
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11
+NPROC_PER_NODE=12
+sp_size=2
+DP_SIZE=6
+AISBENCH_MAX_WORKERS=12
+```
+
+`SP2` 满足当前模型的 head/block 约束，186条 prompt 又能被6个DP组整除，每组恰好31条。
+与已验证的SP4相比，SP2会增加单卡模型中间状态和KV cache占用，因此全量启动前应先观察
+第一条视频的峰值HBM。AISBench阶段不使用生成阶段的SP/DP，但会继承同一组12张可见NPU，
+并默认最多启动12个评测worker。
 
 ### 7.6 公开增强 prompt 对照组
 

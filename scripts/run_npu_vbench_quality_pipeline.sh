@@ -10,8 +10,8 @@ cd "${REPO_ROOT}"
 # prepares VBench-compatible names, and starts AISBench quality evaluation.
 BENCHMARK="${BENCHMARK:-standard}"
 SEEDS="${SEEDS:-0 1 2 3 4}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
-DP_SIZE="${DP_SIZE:-2}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-12}"
+DP_SIZE="${DP_SIZE:-6}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29530}"
 CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
@@ -286,7 +286,7 @@ env \
   LONGLIVE_VBENCH_DATA_PATH="${REPO_ROOT}/${prepared_dir}" \
   LONGLIVE_VBENCH_FULL_INFO="${REPO_ROOT}/${FULL_INFO}" \
   VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR}" \
-  AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-16}" \
+  AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-${NPROC_PER_NODE}}" \
   bash third_party/aisbench_adapter/run_vbench_16npu.sh \
   2>&1 | tee "${run_dir}/aisbench.log"
 
