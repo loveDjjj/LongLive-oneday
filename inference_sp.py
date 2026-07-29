@@ -482,7 +482,8 @@ configure_generator_torch_compile(pipeline, config, is_main_process)
 
 vae_device_str = getattr(config, "vae_device", None)
 use_dedicated_vae_device = bool(getattr(config, "streaming_vae", False)) and bool(vae_device_str)
-if use_dedicated_vae_device and sp_rank == 0:
+decode_on_this_rank = not use_effective_sp or sp_rank == 0
+if use_dedicated_vae_device and decode_on_this_rank:
     vae_device = torch.device(vae_device_str)
     pipeline.vae.to(device="cpu")
     pipeline.vae.to(device=vae_device)
@@ -491,8 +492,14 @@ if use_dedicated_vae_device and sp_rank == 0:
         pipeline.vae.std = pipeline.vae.std.to(device=vae_device)
     if is_main_process:
         print(f"[SP] VAE on {vae_device}, diffusion on {device}")
-else:
+elif decode_on_this_rank:
     pipeline.vae.to(device=device)
+else:
+    # SP produces the same gathered latent on every rank. Only the group leader
+    # needs a VAE copy on the accelerator because only that rank saves output.
+    pipeline.vae.to(device="cpu")
+if is_main_process and use_effective_sp:
+    print("[SP] VAE decode enabled on one leader per SP group")
 
 nfpb = getattr(config, "num_frame_per_block", 8)
 num_blocks = config.num_output_frames // nfpb
@@ -561,7 +568,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
     generated = pipeline.inference(
         noise=sampled_noise,
         text_prompts=prompts,
-        return_latents=save_latents_only,
+        return_latents=save_latents_only or not decode_on_this_rank,
     )
     synchronize_accelerator(device)
     generation_seconds = time.perf_counter() - generation_started

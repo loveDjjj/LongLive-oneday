@@ -538,6 +538,12 @@ AISBENCH_MAX_WORKERS=12
 第一条视频的峰值HBM。AISBench阶段不使用生成阶段的SP/DP，但会继承同一组12张可见NPU，
 并默认最多启动12个评测worker。
 
+SP组内各rank在去噪结束后持有相同的完整latent，但每组只需要输出一份视频。当前入口因此只在
+每个SP组的leader（`sp_rank=0`）上将VAE放入NPU并执行整段解码；其他rank直接返回latent并等待
+同步。`SP2 × DP6` 最多同时执行6路VAE解码，而不是12路。这不会改变生成结果或视频数量，但可
+避免非leader重复解码造成的HBM和主机内存峰值。如果进程仍无Python异常地以`exitcode=-9`退出，
+应检查系统或容器OOM记录，并优先退回`SP4 × DP3`降低模型副本和并行解码数量。
+
 ### 7.6 公开增强 prompt 对照组
 
 公开 VBench 仓库确实提供了一份 Wan2.1 的增强产物和生成说明：使用 Wan2.1
