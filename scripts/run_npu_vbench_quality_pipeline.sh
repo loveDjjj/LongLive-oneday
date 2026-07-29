@@ -117,7 +117,12 @@ if [[ "${#seed_array[@]}" -ne 5 ]]; then
   exit 1
 fi
 
-run_id="$(date +%Y%m%d_%H%M%S)_vbench_${RUN_TAG}_5seed_sp${sp_size}_dp${DP_SIZE}"
+default_run_id="$(date +%Y%m%d_%H%M%S)_vbench_${RUN_TAG}_5seed_sp${sp_size}_dp${DP_SIZE}"
+run_id="${RUN_ID:-${default_run_id}}"
+if [[ "${run_id}" == */* ]]; then
+  echo "[error] RUN_ID must be a directory name, not a path: ${run_id}" >&2
+  exit 1
+fi
 run_dir="logs/npu_quality/${run_id}"
 raw_root="videos/benchmarks/quality_runs/${run_id}/raw"
 prepared_dir="videos/benchmarks/quality_runs/${run_id}/vbench"
@@ -133,6 +138,26 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+
+select_master_port() {
+  local preferred_port="$1"
+  "${GENERATION_ENV}/bin/python" - "${MASTER_ADDR}" "${preferred_port}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+preferred = int(sys.argv[2])
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    try:
+        sock.bind((host, preferred))
+        selected = preferred
+    except OSError:
+        sock.bind((host, 0))
+        selected = sock.getsockname()[1]
+print(selected)
+PY
+}
 
 draw_progress() {
   local completed="$1" total="$2" global_completed="$3" global_total="$4"
@@ -164,6 +189,9 @@ echo "[run] benchmark=${BENCHMARK}, prompts=${prompt_count}, seeds=${SEEDS}"
 echo "[run] config=${CONFIG_PATH}, nproc=${NPROC_PER_NODE}, sp=${sp_size}, dp=${DP_SIZE}"
 echo "[run] generation_env=${GENERATION_ENV}"
 echo "[run] logs=${run_dir}"
+if [[ -n "${RUN_ID:-}" ]]; then
+  echo "[resume] reusing run_id=${run_id}; completed seeds will be skipped"
+fi
 
 pipeline_started_at="$(date +%s)"
 total_videos=$((prompt_count * ${#seed_array[@]}))
@@ -171,46 +199,62 @@ for sample_index in "${!seed_array[@]}"; do
   seed="${seed_array[${sample_index}]}"
   seed_dir="${raw_root}/seed_${seed}"
   raw_log="${run_dir}/seed_${seed}.log"
-  rendered_config="$(mktemp "${TMPDIR:-/tmp}/longlive_vbench.XXXXXX.yaml")"
   mkdir -p "${seed_dir}"
+  completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
+  if [[ "${completed}" -eq "${prompt_count}" ]]; then
+    echo "[resume] seed ${seed} already has ${completed}/${prompt_count} videos; skipping generation"
+    status=0
+  else
+    if [[ "${completed}" -gt 0 ]]; then
+      echo "[resume] seed ${seed} is partial (${completed}/${prompt_count}); regenerating this seed"
+    fi
+    rendered_config="$(mktemp "${TMPDIR:-/tmp}/longlive_vbench.XXXXXX.yaml")"
+    sed \
+      -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/" \
+      -e "s|^output_folder: .*|output_folder: ${seed_dir}|" \
+      -e "s|^  data_path: .*|  data_path: ${GENERATION_PROMPTS}|" \
+      -e "s/^  seed: .*/  seed: ${seed}/" \
+      "${CONFIG_PATH}" > "${rendered_config}"
 
-  sed \
-    -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/" \
-    -e "s|^output_folder: .*|output_folder: ${seed_dir}|" \
-    -e "s|^  data_path: .*|  data_path: ${GENERATION_PROMPTS}|" \
-    -e "s/^  seed: .*/  seed: ${seed}/" \
-    "${CONFIG_PATH}" > "${rendered_config}"
+    preferred_port=$((MASTER_PORT + sample_index))
+    seed_master_port="$(select_master_port "${preferred_port}")"
+    if [[ "${seed_master_port}" != "${preferred_port}" ]]; then
+      echo "[port] ${MASTER_ADDR}:${preferred_port} is busy; using ${seed_master_port} for seed ${seed}"
+    else
+      echo "[port] using ${MASTER_ADDR}:${seed_master_port} for seed ${seed}"
+    fi
 
-  env \
-    PATH="${GENERATION_ENV}/bin:${PATH}" \
-    CONDA_PREFIX="${GENERATION_ENV}" \
-    LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-    LLV2_DEVICE=npu \
-    "${GENERATION_ENV}/bin/torchrun" \
-    --nnodes=1 \
-    --nproc_per_node="${NPROC_PER_NODE}" \
-    --master_addr="${MASTER_ADDR}" \
-    --master_port="$((MASTER_PORT + sample_index))" \
-    inference_sp.py \
-    --config_path "${rendered_config}" \
-    >"${raw_log}" 2>&1 &
-  child_pid="$!"
+    env \
+      PATH="${GENERATION_ENV}/bin:${PATH}" \
+      CONDA_PREFIX="${GENERATION_ENV}" \
+      LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+      LLV2_DEVICE=npu \
+      "${GENERATION_ENV}/bin/torchrun" \
+      --nnodes=1 \
+      --nproc_per_node="${NPROC_PER_NODE}" \
+      --master_addr="${MASTER_ADDR}" \
+      --master_port="${seed_master_port}" \
+      inference_sp.py \
+      --config_path "${rendered_config}" \
+      >"${raw_log}" 2>&1 &
+    child_pid="$!"
 
-  while kill -0 "${child_pid}" 2>/dev/null; do
-    completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
-    ((completed > prompt_count)) && completed="${prompt_count}"
-    global_completed=$((sample_index * prompt_count + completed))
-    elapsed_seconds=$(($(date +%s) - pipeline_started_at))
-    draw_progress "${completed}" "${prompt_count}" "${global_completed}" "${total_videos}" \
-      "${elapsed_seconds}" "seed ${seed} ($((sample_index + 1))/${#seed_array[@]})"
-    sleep 2
-  done
+    while kill -0 "${child_pid}" 2>/dev/null; do
+      completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
+      ((completed > prompt_count)) && completed="${prompt_count}"
+      global_completed=$((sample_index * prompt_count + completed))
+      elapsed_seconds=$(($(date +%s) - pipeline_started_at))
+      draw_progress "${completed}" "${prompt_count}" "${global_completed}" "${total_videos}" \
+        "${elapsed_seconds}" "seed ${seed} ($((sample_index + 1))/${#seed_array[@]})"
+      sleep 2
+    done
 
-  set +e
-  wait "${child_pid}"
-  status="$?"
-  set -e
-  child_pid=""
+    set +e
+    wait "${child_pid}"
+    status="$?"
+    set -e
+    child_pid=""
+  fi
   completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
   ((completed > prompt_count)) && completed="${prompt_count}"
   global_completed=$((sample_index * prompt_count + completed))
@@ -229,7 +273,8 @@ for sample_index in "${!seed_array[@]}"; do
     --src-dir "${seed_dir}" \
     --prompts-file "${NAMING_PROMPTS}" \
     --dst-dir "${prepared_dir}" \
-    --sample-index "${sample_index}"
+    --sample-index "${sample_index}" \
+    --overwrite
   rm -f "${rendered_config}"
   rendered_config=""
 done

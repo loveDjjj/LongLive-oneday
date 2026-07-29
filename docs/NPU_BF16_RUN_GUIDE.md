@@ -506,6 +506,16 @@ outputs/default/<AISBench_timestamp>/      # AISBench 指标汇总
 昇腾适配和模型版本间的固定回归比较，但不是 Full VBench。先确认 mini 链路、权重路径及单个
 `704 × 1280` 视频显存正常，再启动20%流水线。
 
+每个 seed 启动前，流水线会检查 `MASTER_PORT + sample_index` 是否可用；端口被占用时自动
+选择当前节点的空闲端口。中断后可通过原 run id 续跑，已生成完整的 seed 会被跳过：
+
+```bash
+RUN_ID=20260729_092832_vbench_standard_20pct_5seed_sp4_dp2 \
+bash scripts/run_npu_vbench_standard_pipeline.sh
+```
+
+如果某个 seed 只有部分 MP4，该 seed 会从头重新生成；已经完整生成的 seed 不会重复计算。
+
 ### 7.6 公开增强 prompt 对照组
 
 公开 VBench 仓库确实提供了一份 Wan2.1 的增强产物和生成说明：使用 Wan2.1
