@@ -10,7 +10,9 @@ cd "${REPO_ROOT}"
 export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7,8,9,10,11"
 export NPROC_PER_NODE="12"
 export DP_SIZE="6"
-export AISBENCH_MAX_WORKERS="12"
+# This adapter does not explicitly bind VBench workers to different NPUs. Keep
+# evaluation serial unless the installed AISBench version provides that mapping.
+export AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-1}"
 export MASTER_ADDR="127.0.0.1"
 export MASTER_PORT="29530"
 export GENERATION_ENV="/mnt/share/r50063443/conda_envs/longlive"

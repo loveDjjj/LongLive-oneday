@@ -18,6 +18,7 @@ CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}
 GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
 VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
+AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-1}"
 
 case "${BENCHMARK}" in
   standard)
@@ -280,15 +281,23 @@ for sample_index in "${!seed_array[@]}"; do
 done
 
 echo "[evaluate] AISBench VBench 1.0, videos=${prepared_dir}"
+aisbench_log="${run_dir}/aisbench.log"
 env \
   PATH="${AISBENCH_ENV}/bin:${PATH}" \
   CONDA_PREFIX="${AISBENCH_ENV}" \
   LONGLIVE_VBENCH_DATA_PATH="${REPO_ROOT}/${prepared_dir}" \
   LONGLIVE_VBENCH_FULL_INFO="${REPO_ROOT}/${FULL_INFO}" \
   VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR}" \
-  AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-${NPROC_PER_NODE}}" \
+  AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS}" \
   bash third_party/aisbench_adapter/run_vbench_16npu.sh \
-  2>&1 | tee "${run_dir}/aisbench.log"
+  2>&1 | tee "${aisbench_log}"
+
+# AISBench may exit successfully even when individual VBench tasks fail. Do not
+# accept a summary assembled from missing dimensions as a valid evaluation.
+if grep -q '\[RUNNER-TASK-001\]' "${aisbench_log}"; then
+  echo "[error] one or more AISBench VBench tasks failed; inspect ${aisbench_log}" >&2
+  exit 1
+fi
 
 echo "[done] prepared videos: ${prepared_dir}"
 echo "[done] generation/AISBench logs: ${run_dir}"

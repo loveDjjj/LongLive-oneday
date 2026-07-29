@@ -99,4 +99,4 @@ cd "${REPO_ROOT}"
 
 ais_bench "${RENDERED_CONFIG}" \
   --mode eval \
-  --max-num-workers "${AISBENCH_MAX_WORKERS:-16}"
+  --max-num-workers "${AISBENCH_MAX_WORKERS:-1}"
