@@ -18,7 +18,7 @@ CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}
 GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
 VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
-AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-4}"
+AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-12}"
 
 case "${BENCHMARK}" in
   standard)

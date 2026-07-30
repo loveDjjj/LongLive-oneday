@@ -333,7 +333,7 @@ PY
 
 ```python
 ASCEND_RT_VISIBLE_DEVICES = "0,1,...,15"
-AISBENCH_MAX_WORKERS = 4
+AISBENCH_MAX_WORKERS = 12
 ```
 
 如果希望手工修改 AISBench 官方配置，只需要修改
@@ -530,17 +530,18 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11
 NPROC_PER_NODE=12
 sp_size=2
 DP_SIZE=6
-AISBENCH_MAX_WORKERS=4
+AISBENCH_MAX_WORKERS=12
 ```
 
 `SP2` 满足当前模型的 head/block 约束，186条 prompt 又能被6个DP组整除，每组恰好31条。
 与已验证的SP4相比，SP2会增加单卡模型中间状态和KV cache占用，因此全量启动前应先观察
 第一条视频的峰值HBM。AISBench阶段不使用生成阶段的SP/DP，但会继承同一组12张可见NPU，
-并默认并行启动4个评测worker。AISBench的`VBenchEvalTask`声明每个任务使用1张卡，`LocalRunner`
-会从`ASCEND_RT_VISIBLE_DEVICES`维护的资源池中为任务分配独立NPU，因此4个worker会使用4张卡。
-worker同时还会占用主机内存并并发读取930个视频；此前12个worker全开出现大量任务失败，因此
-默认不直接打满12卡。可在确认主机内存、文件系统吞吐和单轮任务日志正常后，依次尝试
-`AISBENCH_MAX_WORKERS=6`、`8`，最后再尝试`12`。
+并默认并行启动12个评测worker。AISBench的`VBenchEvalTask`声明每个任务使用1张卡，`LocalRunner`
+会从`ASCEND_RT_VISIBLE_DEVICES`维护的资源池中为任务分配独立NPU，因此12个worker会使用12张卡。
+生成阶段导出的`MASTER_PORT`不能传入评测阶段：每个VBench worker都会创建独立的单进程HCCL
+进程组，共用端口会触发`EADDRINUSE`。适配脚本会在启动AISBench前清除torchrun的分布式环境变量，
+由各worker自动选择空闲端口。如果主机内存或共享存储承受不了12路模型加载和视频读取，可用
+`AISBENCH_MAX_WORKERS=4`、`6`或`8`降低并发，不需要修改其他配置。
 
 SP组内各rank在去噪结束后持有相同的完整latent，但每组只需要输出一份视频。当前入口因此只在
 每个SP组的leader（`sp_rank=0`）上将VAE放入NPU并执行整段解码；其他rank直接返回latent并等待

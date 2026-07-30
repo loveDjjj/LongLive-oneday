@@ -10,9 +10,8 @@ cd "${REPO_ROOT}"
 export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7,8,9,10,11"
 export NPROC_PER_NODE="12"
 export DP_SIZE="6"
-# AISBench assigns one NPU to each VBench task. Four concurrent evaluators are a
-# conservative default because each task also consumes host RAM and video I/O.
-export AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-4}"
+# AISBench assigns one NPU and an independent rendezvous port to each task.
+export AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-12}"
 export MASTER_ADDR="127.0.0.1"
 export MASTER_PORT="29530"
 export GENERATION_ENV="/mnt/share/r50063443/conda_envs/longlive"
