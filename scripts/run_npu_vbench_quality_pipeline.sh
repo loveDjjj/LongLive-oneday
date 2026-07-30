@@ -29,6 +29,8 @@ export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
 export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
+GENERATION_ENTRYPOINT="${GENERATION_ENTRYPOINT:-inference_sp.py}"
+GENERATION_CONFIG_KIND="${GENERATION_CONFIG_KIND:-longlive}"
 
 # Select standard or augmented. Each run generates five seeds sequentially,
 # prepares VBench-compatible names, and starts AISBench quality evaluation.
@@ -37,14 +39,14 @@ SEEDS="${SEEDS:-0 1 2 3 4}"
 
 case "${BENCHMARK}" in
   standard)
-    RUN_TAG="standard_20pct"
+    RUN_TAG="${RUN_TAG_OVERRIDE:-standard_20pct}"
     CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_20pct_5s_npu_bf16.yaml}"
     GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard_20pct/prompts.txt}"
     NAMING_PROMPTS="${NAMING_PROMPTS:-${GENERATION_PROMPTS}}"
     FULL_INFO="${FULL_INFO:-data/benchmarks/vbench_standard_20pct/VBench_full_info.json}"
     ;;
   augmented)
-    RUN_TAG="augmented_20pct"
+    RUN_TAG="${RUN_TAG_OVERRIDE:-augmented_20pct}"
     CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/vbench_standard_20pct_augmented_5s_npu_bf16.yaml}"
     GENERATION_PROMPTS="${GENERATION_PROMPTS:-data/benchmarks/vbench_standard_20pct_augmented_wan21_qwen25_seed42/prompts.txt}"
     NAMING_PROMPTS="${NAMING_PROMPTS:-data/benchmarks/vbench_standard_20pct_augmented_wan21_qwen25_seed42/original_prompts.txt}"
@@ -56,7 +58,7 @@ case "${BENCHMARK}" in
     ;;
 esac
 
-for required_file in "${CONFIG_PATH}" "${GENERATION_PROMPTS}" "${NAMING_PROMPTS}" "${FULL_INFO}" "${CANN_ENV_SCRIPT}"; do
+for required_file in "${CONFIG_PATH}" "${GENERATION_ENTRYPOINT}" "${GENERATION_PROMPTS}" "${NAMING_PROMPTS}" "${FULL_INFO}" "${CANN_ENV_SCRIPT}"; do
   if [[ ! -f "${required_file}" ]]; then
     echo "[error] required file not found: ${required_file}" >&2
     exit 1
@@ -104,25 +106,24 @@ if [[ $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
   exit 1
 fi
 
-# Wan2.2-TI2V-5B uses a (1, 2, 2) DiT patch. Odd latent H/W values are
-# truncated by patch embedding and cannot be subtracted from the original
-# diffusion state. Reject them before loading the model.
-shape_values="$(sed -n 's/.*image_or_video_shape: *\[\([^]]*\)\].*/\1/p' "${CONFIG_PATH}" | head -n 1)"
-if [[ -z "${shape_values}" ]]; then
-  echo "[error] image_or_video_shape must use compact [B, T, C, H, W] syntax: ${CONFIG_PATH}" >&2
-  exit 1
-fi
-IFS=',' read -r _shape_b _shape_t _shape_c latent_h latent_w <<< "${shape_values}"
-latent_h="${latent_h//[[:space:]]/}"
-latent_w="${latent_w//[[:space:]]/}"
-if [[ ! "${latent_h}" =~ ^[0-9]+$ || ! "${latent_w}" =~ ^[0-9]+$ ]]; then
-  echo "[error] invalid latent H/W in image_or_video_shape: H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
-  exit 1
-fi
-if [[ $((latent_h % 2)) -ne 0 || $((latent_w % 2)) -ne 0 ]]; then
-  echo "[error] Wan DiT latent H/W must both be divisible by 2; got H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
-  echo "        Odd sizes are truncated by patch embedding (for example, H=45 becomes 44)." >&2
-  exit 1
+if [[ "${GENERATION_CONFIG_KIND}" == "longlive" ]]; then
+  # Wan DiT patch embedding requires even spatial latent dimensions.
+  shape_values="$(sed -n 's/.*image_or_video_shape: *\[\([^]]*\)\].*/\1/p' "${CONFIG_PATH}" | head -n 1)"
+  if [[ -z "${shape_values}" ]]; then
+    echo "[error] image_or_video_shape must use compact [B, T, C, H, W] syntax: ${CONFIG_PATH}" >&2
+    exit 1
+  fi
+  IFS=',' read -r _shape_b _shape_t _shape_c latent_h latent_w <<< "${shape_values}"
+  latent_h="${latent_h//[[:space:]]/}"
+  latent_w="${latent_w//[[:space:]]/}"
+  if [[ ! "${latent_h}" =~ ^[0-9]+$ || ! "${latent_w}" =~ ^[0-9]+$ ]]; then
+    echo "[error] invalid latent H/W in image_or_video_shape: H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
+    exit 1
+  fi
+  if [[ $((latent_h % 2)) -ne 0 || $((latent_w % 2)) -ne 0 ]]; then
+    echo "[error] Wan DiT latent H/W must both be divisible by 2; got H=${latent_h:-missing}, W=${latent_w:-missing}" >&2
+    exit 1
+  fi
 fi
 
 prompt_count="$(awk 'NF {count++} END {print count+0}' "${GENERATION_PROMPTS}")"
@@ -207,6 +208,7 @@ draw_progress() {
 
 echo "[run] benchmark=${BENCHMARK}, prompts=${prompt_count}, seeds=${SEEDS}"
 echo "[run] config=${CONFIG_PATH}, nproc=${NPROC_PER_NODE}, sp=${sp_size}, dp=${DP_SIZE}"
+echo "[run] generation_entrypoint=${GENERATION_ENTRYPOINT}"
 echo "[run] generation_env=${GENERATION_ENV}"
 echo "[run] logs=${run_dir}"
 if [[ -n "${RUN_ID:-}" ]]; then
@@ -255,7 +257,7 @@ for sample_index in "${!seed_array[@]}"; do
       --nproc_per_node="${NPROC_PER_NODE}" \
       --master_addr="${MASTER_ADDR}" \
       --master_port="${seed_master_port}" \
-      inference_sp.py \
+      "${GENERATION_ENTRYPOINT}" \
       --config_path "${rendered_config}" \
       >"${raw_log}" 2>&1 &
     child_pid="$!"

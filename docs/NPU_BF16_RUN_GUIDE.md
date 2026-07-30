@@ -718,6 +718,61 @@ P50 和 P95。DP2 吞吐应按两个组完成有效样本的共同墙钟时间�
 
 AISBench 自身的评测运行时间只代表评测器性能，不是 LongLive 生成性能，必须单独记录。
 
+### 7.9 原生 Wan2.2-TI2V-5B 125帧基线
+
+原生 Wan2.2 基线使用独立入口，不加载 LongLive 的 AR/DMD generator checkpoint：
+
+```text
+inference_wan22_sp.py
+configs/benchmarks/wan22_vbench_standard_20pct_125f_npu_bf16.yaml
+configs/benchmarks/wan22_vbench_standard_20pct_augmented_125f_npu_bf16.yaml
+```
+
+固定协议为 BF16、50步 UniPC、CFG 5.0、125 RGB帧、24 FPS 和1280×704。125 RGB帧对应
+32个Wan latent帧，与当前LongLive短视频配置一致。原生Wan对整段latent执行双向注意力，且
+每步分别计算条件和无条件分支；LongLive使用4步蒸馏、因果分块注意力和KV cache，两者不能
+通过简单替换checkpoint共用同一个生成入口。
+
+12卡依次运行增强版和标准版：
+
+```bash
+bash scripts/run_npu_wan22_vbench_all.sh
+```
+
+只运行其中一组：
+
+```bash
+bash scripts/run_npu_wan22_vbench_augmented_pipeline.sh
+bash scripts/run_npu_wan22_vbench_standard_pipeline.sh
+```
+
+三个公开入口顶部都集中定义运行布局，默认12卡`SP2 × DP6`。运行时只覆盖临时YAML中的
+`sp_size`和`dp_size`。8卡示例：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+SP_SIZE=2 \
+bash scripts/run_npu_wan22_vbench_standard_pipeline.sh
+```
+
+此时`DP_SIZE`自动为4，AISBench worker自动为8。原生Wan Ulysses要求`SP_SIZE`整除24个
+attention heads；12卡上`SP12×DP1`、`SP6×DP2`、`SP4×DP3`、`SP3×DP4`、`SP2×DP6`和
+`SP1×DP12`均能通过布局校验。质量吞吐测试优先使用`SP2×DP6`；如果单卡注意力显存不足，
+改为`SP4×DP3`或`SP6×DP2`。
+
+五个seed仍按顺序执行，186条prompt不要求整除DP组数。生成输出复用现有rank/index命名、
+`prepare_vbench_videos.py`和AISBench 16维评测。中断后使用原run id恢复：
+
+```bash
+RUN_ID=<wan22_standard_run_id> \
+bash scripts/run_npu_wan22_vbench_standard_pipeline.sh
+```
+
+总控入口分别使用`WAN22_AUGMENTED_RUN_ID`和`WAN22_STANDARD_RUN_ID`恢复两阶段任务。原生
+50步+CFG的计算量显著高于LongLive 4步；正式生成930个视频前，应先将配置中的
+`inference_iter`临时设为`0`，验证单条视频的算子兼容性、HBM峰值和保存结果。
+
 ## 8. 是否需要训练
 
 如果目标只是“在昇腾上跑起来并复现推理效果”，不需要训练，直接使用已经下载好的 LongLive 5B 权重即可。

@@ -1,7 +1,6 @@
 # Adopted from https://github.com/Wan-Video/Wan2.2
 # SPDX-License-Identifier: Apache-2.0
 import torch
-import torch.cuda.amp as amp
 
 from ..modules.model import sinusoidal_embedding_1d
 from .ulysses import distributed_attention, distributed_flex_attention
@@ -43,37 +42,41 @@ def sp_rope_apply(
     grid_sizes: [B, 3].
     freqs:      [M, C // 2].
     """
-    n, c = x.size(2), x.size(3) // 2
+    s, n, c = x.size(1), x.size(2), x.size(3) // 2
+    rope_float_dtype = torch.float32 if x.device.type == "npu" else torch.float64
+    rope_complex_dtype = torch.complex64 if x.device.type == "npu" else None
     # split freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    if rope_complex_dtype is not None:
+        freqs = tuple(freq.to(rope_complex_dtype) for freq in freqs)
 
     # loop over samples
     output = []
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        local_f = f
-        sp_rank = get_rank()
-        start_frame = sp_rank * local_f
-        seq_len = local_f * h * w
+        seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
-            seq_len, n, -1, 2))
+        x_i = torch.view_as_complex(x[i, :s].to(rope_float_dtype).reshape(
+            s, n, -1, 2))
         temporal_offset_i = select_temporal_offset_for_sample(
-            temporal_offset, i, local_f, start_frame=start_frame)
+            temporal_offset, i, f, start_frame=0)
         temporal_freqs = _compute_temporal_freqs(
-            freqs[0], local_f, start_frame, t_scale, x.device,
+            freqs[0], f, 0, t_scale, x.device,
             method=method, original_seq_len=original_seq_len,
             temporal_offset=temporal_offset_i)
         freqs_i = torch.cat([
-            temporal_freqs.view(local_f, 1, 1, -1).expand(local_f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(local_f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(local_f, h, w, -1)
+            temporal_freqs.view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
         ],
                             dim=-1).reshape(seq_len, 1, -1)
+        sp_rank = get_rank()
+        freqs_i = pad_freqs(freqs_i, s * get_world_size())
+        freqs_i = freqs_i[sp_rank * s:(sp_rank + 1) * s]
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
+        x_i = torch.cat([x_i, x[i, s:]])
 
         # append to collection
         output.append(x_i)
@@ -118,7 +121,7 @@ def sp_dit_forward(
     # time embeddings
     if t.dim() == 1:
         t = t.expand(t.size(0), seq_len)
-    with torch.amp.autocast('cuda', dtype=torch.float32):
+    with torch.autocast(device_type=device.type, enabled=False):
         bt = t.size(0)
         t = t.flatten()
         e = self.time_embedding(
