@@ -1,0 +1,32 @@
+# Native Wan2.2-TI2V-5B on VBench Mini with Wan2.1/Qwen2.5 augmentation.
+model_kwargs:
+  model_name: Wan2.2-TI2V-5B
+  model_root: /mnt/share/weight/Wan2.2-TI2V-5B
+  timestep_shift: 5.0
+
+# Launch scripts override these values in a temporary YAML.
+sp_size: 2
+dp_size: 6
+
+output_folder: videos/benchmarks/wan22_vbench_mini_5pct_augmented_125f
+num_samples: 1
+save_with_index: true
+inference_iter: -1
+num_output_frames: 125
+
+data:
+  data_path: data/benchmarks/vbench_mini_augmented_wan21_qwen25_seed42/prompts.txt
+  width: 1280
+  height: 704
+
+inference:
+  sampling_steps: 50
+  sample_solver: unipc
+  guidance_scale: 5.0
+  negative_prompt: null
+  fps: 24
+  t5_cpu: false
+  offload_model: false
+
+logging:
+  seed: 0

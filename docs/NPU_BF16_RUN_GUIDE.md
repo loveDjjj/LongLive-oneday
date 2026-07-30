@@ -724,8 +724,8 @@ AISBench 自身的评测运行时间只代表评测器性能，不是 LongLive �
 
 ```text
 inference_wan22_sp.py
-configs/benchmarks/wan22_vbench_standard_20pct_125f_npu_bf16.yaml
-configs/benchmarks/wan22_vbench_standard_20pct_augmented_125f_npu_bf16.yaml
+configs/benchmarks/wan22_vbench_mini_5pct_125f_npu_bf16.yaml
+configs/benchmarks/wan22_vbench_mini_5pct_augmented_125f_npu_bf16.yaml
 ```
 
 固定协议为 BF16、50步 UniPC、CFG 5.0、125 RGB帧、24 FPS 和1280×704。125 RGB帧对应
@@ -733,7 +733,8 @@ configs/benchmarks/wan22_vbench_standard_20pct_augmented_125f_npu_bf16.yaml
 每步分别计算条件和无条件分支；LongLive使用4步蒸馏、因果分块注意力和KV cache，两者不能
 通过简单替换checkpoint共用同一个生成入口。
 
-12卡依次运行增强版和标准版：
+默认使用43条prompt的VBench Mini（约为完整Standard的5%）。12卡依次运行增强版和标准版，
+每组仍顺序生成5个seed，即每组生成`43 × 5 = 215`个视频：
 
 ```bash
 bash scripts/run_npu_wan22_vbench_all.sh
@@ -761,7 +762,7 @@ attention heads；12卡上`SP12×DP1`、`SP6×DP2`、`SP4×DP3`、`SP3×DP4`、`
 `SP1×DP12`均能通过布局校验。质量吞吐测试优先使用`SP2×DP6`；如果单卡注意力显存不足，
 改为`SP4×DP3`或`SP6×DP2`。
 
-五个seed仍按顺序执行，186条prompt不要求整除DP组数。生成输出复用现有rank/index命名、
+五个seed仍按顺序执行，43条prompt不要求整除DP组数。生成输出复用现有rank/index命名、
 `prepare_vbench_videos.py`和AISBench 16维评测。中断后使用原run id恢复：
 
 ```bash
@@ -770,8 +771,12 @@ bash scripts/run_npu_wan22_vbench_standard_pipeline.sh
 ```
 
 总控入口分别使用`WAN22_AUGMENTED_RUN_ID`和`WAN22_STANDARD_RUN_ID`恢复两阶段任务。原生
-50步+CFG的计算量显著高于LongLive 4步；正式生成930个视频前，应先将配置中的
+50步+CFG的计算量显著高于LongLive 4步；正式生成215个视频前，应先将配置中的
 `inference_iter`临时设为`0`，验证单条视频的算子兼容性、HBM峰值和保存结果。
+
+Mini覆盖全部16个VBench维度，适合快速回归和同协议模型对比，但不能把分数作为完整VBench
+Standard论文结果。旧的20%配置和数据仍保留；切回时必须同时覆盖配置、生成prompt、命名prompt
+和评测JSON，不能只替换YAML。
 
 ## 8. 是否需要训练
 

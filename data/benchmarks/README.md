@@ -17,6 +17,9 @@ videos or VBench evaluator checkpoints.
   records and 186 unique prompts, covering all 16 VBench metrics.
 - `vbench_standard_20pct_augmented_wan21_qwen25_seed42/`: the same 186-prompt
   subset mapped to the public Wan2.1/Qwen2.5 seed-42 augmentation.
+- `vbench_mini_augmented_wan21_qwen25_seed42/`: the 43-prompt VBench Mini
+  subset mapped to the same public augmentation, with original prompts retained
+  for VBench-compatible output names.
 - `vbench_long/`: Official VBench-Long metadata and clip-splitting configs.
 - `performance/`: A small fixed prompt set for Ascend latency and throughput
   measurements. It is not a quality benchmark dataset.
