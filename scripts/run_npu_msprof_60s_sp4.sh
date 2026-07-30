@@ -7,13 +7,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 # ---- Runtime settings. Edit here or override with environment variables. ----
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-12,13,14,15}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 export SP_SIZE="${SP_SIZE:-4}"
 export DP_SIZE="${DP_SIZE:-1}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29820}"
-export CONDA_ENV="${CONDA_ENV:-longlive}"
+export CONDA_ENV="${CONDA_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
 export CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/msprof_longlive_60s_sp4_dp1_npu_bf16.yaml}"
 
