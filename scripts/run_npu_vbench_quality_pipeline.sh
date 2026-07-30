@@ -6,19 +6,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# ---- Runtime layout. Edit here or override with environment variables. ----
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-12}"
+export SP_SIZE="${SP_SIZE:-2}"
+export DP_SIZE="${DP_SIZE:-$((NPROC_PER_NODE / SP_SIZE))}"
+export AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-${NPROC_PER_NODE}}"
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT="${MASTER_PORT:-29530}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
+export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
+export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
+
 # Select standard or augmented. Each run generates five seeds sequentially,
 # prepares VBench-compatible names, and starts AISBench quality evaluation.
 BENCHMARK="${BENCHMARK:-standard}"
 SEEDS="${SEEDS:-0 1 2 3 4}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-12}"
-DP_SIZE="${DP_SIZE:-6}"
-MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MASTER_PORT="${MASTER_PORT:-29530}"
-CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
-GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
-VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
-AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-12}"
 
 case "${BENCHMARK}" in
   standard)
@@ -79,9 +83,13 @@ if [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
   export ASCEND_RT_VISIBLE_DEVICES="${visible_devices}"
 fi
 
-sp_size="$(awk '/^sp_size:/ {print $2; exit}' "${CONFIG_PATH}")"
-if [[ -z "${sp_size}" || $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
-  echo "[error] parallel layout mismatch: sp=${sp_size:-missing}, dp=${DP_SIZE}, nproc=${NPROC_PER_NODE}" >&2
+sp_size="${SP_SIZE}"
+if [[ ! "${sp_size}" =~ ^[1-9][0-9]*$ || ! "${DP_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] SP_SIZE and DP_SIZE must be positive integers: sp=${sp_size}, dp=${DP_SIZE}" >&2
+  exit 1
+fi
+if [[ $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
+  echo "[error] parallel layout mismatch: sp=${sp_size}, dp=${DP_SIZE}, nproc=${NPROC_PER_NODE}" >&2
   exit 1
 fi
 
@@ -211,6 +219,7 @@ for sample_index in "${!seed_array[@]}"; do
     fi
     rendered_config="$(mktemp "${TMPDIR:-/tmp}/longlive_vbench.XXXXXX.yaml")"
     sed \
+      -e "s/^sp_size: .*/sp_size: ${sp_size}/" \
       -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/" \
       -e "s|^output_folder: .*|output_folder: ${seed_dir}|" \
       -e "s|^  data_path: .*|  data_path: ${GENERATION_PROMPTS}|" \

@@ -516,22 +516,50 @@ bash scripts/run_npu_vbench_standard_pipeline.sh
 
 如果某个 seed 只有部分 MP4，该 seed 会从头重新生成；已经完整生成的 seed 不会重复计算。
 
-要在12卡上依次完成“增强 prompt 生成+AISBench”和“原始 prompt 生成+AISBench”，直接运行：
+要依次完成“增强 prompt 生成+AISBench”和“原始 prompt 生成+AISBench”，直接运行：
 
 ```bash
-bash scripts/run_npu_vbench_12npu_all.sh
+bash scripts/run_npu_vbench_all.sh
 ```
 
-该脚本顶部集中定义了卡号、进程数、DP大小、AISBench worker、端口和两个 Conda 环境路径，
-默认配置为：
+该脚本顶部集中定义了卡号、进程数、SP/DP大小、AISBench worker、端口和两个 Conda 环境路径。
+运行时会用`SP_SIZE`和`DP_SIZE`改写临时YAML，仓库中的正式配置文件不会改变。默认配置为：
 
 ```text
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11
 NPROC_PER_NODE=12
-sp_size=2
+SP_SIZE=2
 DP_SIZE=6
 AISBENCH_MAX_WORKERS=12
 ```
+
+改为8卡时无需修改YAML，只需在命令前覆盖变量：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+SP_SIZE=2 \
+DP_SIZE=4 \
+AISBENCH_MAX_WORKERS=8 \
+bash scripts/run_npu_vbench_all.sh
+```
+
+`DP_SIZE`默认按`NPROC_PER_NODE / SP_SIZE`计算，`AISBENCH_MAX_WORKERS`默认等于
+`NPROC_PER_NODE`，所以上述命令也可只显式设置可见卡、进程数和SP：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+SP_SIZE=2 \
+bash scripts/run_npu_vbench_all.sh
+```
+
+旧名称`scripts/run_npu_vbench_12npu_all.sh`保留为兼容转发入口，但新任务应使用不绑定卡数的
+`scripts/run_npu_vbench_all.sh`。
+
+prompt数量不要求能被`DP_SIZE`整除。入口按DP rank做步进分片；例如186条数据在8卡
+`SP2 × DP4`下会自动分成`47/47/46/46`，五个seed仍会完整生成930个视频。生成完成后的
+AISBench继承同一组可见NPU，但不使用生成阶段的SP/DP分组。
 
 `SP2` 满足当前模型的 head/block 约束，186条 prompt 又能被6个DP组整除，每组恰好31条。
 与已验证的SP4相比，SP2会增加单卡模型中间状态和KV cache占用，因此全量启动前应先观察

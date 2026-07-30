@@ -6,14 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# Change this path to perf_32s_npu_bf16.yaml or perf_64s_npu_bf16.yaml as needed.
-CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/perf_16s_npu_bf16.yaml}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
-DP_SIZE="${DP_SIZE:-2}"
-MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MASTER_PORT="${MASTER_PORT:-29520}"
-WARMUP_PER_RANK="${WARMUP_PER_RANK:-1}"
-CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+# ---- Runtime layout. Edit here or override with environment variables. ----
+# Change CONFIG_PATH to perf_32s_npu_bf16.yaml or perf_64s_npu_bf16.yaml as needed.
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/perf_16s_npu_bf16.yaml}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
+export SP_SIZE="${SP_SIZE:-8}"
+export DP_SIZE="${DP_SIZE:-$((NPROC_PER_NODE / SP_SIZE))}"
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT="${MASTER_PORT:-29520}"
+export WARMUP_PER_RANK="${WARMUP_PER_RANK:-1}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "[error] config not found: ${CONFIG_PATH}" >&2
@@ -40,8 +43,12 @@ if [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
   export ASCEND_RT_VISIBLE_DEVICES="${visible_devices}"
 fi
 
-sp_size="$(awk '/^sp_size:/ {print $2; exit}' "${CONFIG_PATH}")"
-if [[ -z "${sp_size}" || $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
+sp_size="${SP_SIZE}"
+if [[ ! "${sp_size}" =~ ^[1-9][0-9]*$ || ! "${DP_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] SP_SIZE and DP_SIZE must be positive integers: sp=${sp_size}, dp=${DP_SIZE}" >&2
+  exit 1
+fi
+if [[ $((sp_size * DP_SIZE)) -ne NPROC_PER_NODE ]]; then
   echo "[error] parallel layout mismatch: sp_size=${sp_size:-missing}, " \
        "dp_size=${DP_SIZE}, nproc=${NPROC_PER_NODE}" >&2
   exit 1
@@ -67,6 +74,7 @@ rendered_config="$(mktemp "${TMPDIR:-/tmp}/longlive_perf.XXXXXX.yaml")"
 mkdir -p "${run_dir}" "${video_dir}"
 
 sed \
+  -e "s/^sp_size: .*/sp_size: ${sp_size}/" \
   -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/" \
   -e "s|^output_folder: .*|output_folder: ${video_dir}|" \
   "${CONFIG_PATH}" > "${rendered_config}"
