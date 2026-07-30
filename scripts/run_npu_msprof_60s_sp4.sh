@@ -24,6 +24,7 @@ export MSPROF_STORAGE_LIMIT="${MSPROF_STORAGE_LIMIT:-50000MB}"
 # msprof-analyze reads the profiling database directly. Avoid the much larger
 # automatic Timeline/CSV export for long multi-process video generation.
 export MSPROF_OUTPUT_TYPE="${MSPROF_OUTPUT_TYPE:-db}"
+export MSPROF_RECOVER_PARSE="${MSPROF_RECOVER_PARSE:-auto}"
 
 if [[ "${NPROC_PER_NODE}" -ne 4 || "${SP_SIZE}" -ne 4 || "${DP_SIZE}" -ne 1 ]]; then
   echo "[error] this profile is fixed to nproc=4, SP4 x DP1" >&2
@@ -128,6 +129,32 @@ if [[ "${profile_status}" -ne 0 ]]; then
     exit "${profile_status}"
   fi
   echo "[warning] found ${#prof_dirs[@]} PROF_* directories; attempting recovery analysis" >&2
+fi
+
+# torchrun may leave one raw PROF_* directory per worker even when the model
+# exits normally. msprof-analyze requires each directory to be exported and
+# analyzed by msprof first. Repeating these commands on parsed data is safe.
+if [[ "${MSPROF_RECOVER_PARSE}" == "true" || \
+      ("${MSPROF_RECOVER_PARSE}" == "auto" && "${profile_status}" -ne 0) ]]; then
+  recovery_log="${run_dir}/msprof_recovery.log"
+  recovery_failures=0
+  for prof_dir in "${prof_dirs[@]}"; do
+    echo "[recover] export $(basename "${prof_dir}")"
+    if ! msprof --export=on --output="${prof_dir}" 2>&1 | tee -a "${recovery_log}"; then
+      echo "[warning] msprof export failed: ${prof_dir}" >&2
+      recovery_failures=$((recovery_failures + 1))
+      continue
+    fi
+    echo "[recover] analyze $(basename "${prof_dir}")"
+    if ! msprof --analyze=on --output="${prof_dir}" 2>&1 | tee -a "${recovery_log}"; then
+      echo "[warning] msprof analyze failed: ${prof_dir}" >&2
+      recovery_failures=$((recovery_failures + 1))
+    fi
+  done
+  if [[ "${recovery_failures}" -ne 0 ]]; then
+    echo "[warning] ${recovery_failures} profiling directories failed offline parsing" >&2
+    echo "[hint] inspect ${recovery_log}" >&2
+  fi
 fi
 
 # This is useful for correlating the trace with the generated sample. It is not
