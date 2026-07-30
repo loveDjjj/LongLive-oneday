@@ -21,6 +21,9 @@ export CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/msprof_longlive_60s_sp4_dp
 export MSPROF_TASK_TIME="${MSPROF_TASK_TIME:-on}"
 export MSPROF_AIC_METRICS="${MSPROF_AIC_METRICS:-PipeUtilization}"
 export MSPROF_STORAGE_LIMIT="${MSPROF_STORAGE_LIMIT:-50000MB}"
+# msprof-analyze reads the profiling database directly. Avoid the much larger
+# automatic Timeline/CSV export for long multi-process video generation.
+export MSPROF_OUTPUT_TYPE="${MSPROF_OUTPUT_TYPE:-db}"
 
 if [[ "${NPROC_PER_NODE}" -ne 4 || "${SP_SIZE}" -ne 4 || "${DP_SIZE}" -ne 1 ]]; then
   echo "[error] this profile is fixed to nproc=4, SP4 x DP1" >&2
@@ -67,7 +70,8 @@ for command_name in msprof msprof-analyze torchrun; do
   fi
 done
 
-run_id="$(date +%Y%m%d_%H%M%S)_longlive_60s_sp4_dp1"
+config_tag="$(basename "${CONFIG_PATH}" .yaml)"
+run_id="$(date +%Y%m%d_%H%M%S)_${config_tag}_sp4_dp1"
 run_dir="logs/msprof/${run_id}"
 profile_dir="${run_dir}/profiling"
 analysis_dir="${run_dir}/analysis"
@@ -87,11 +91,12 @@ echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES}, layout=SP4 x DP1"
 echo "[run] config=${rendered_config}"
 echo "[run] profile output=${profile_dir}"
 echo "[run] msprof output can be large; storage limit=${MSPROF_STORAGE_LIMIT}"
+echo "[run] msprof output type=${MSPROF_OUTPUT_TYPE}"
 
 set +e
 LLV2_DEVICE=npu msprof \
   --output="${profile_dir}" \
-  --type=text \
+  --type="${MSPROF_OUTPUT_TYPE}" \
   --storage-limit="${MSPROF_STORAGE_LIMIT}" \
   --ascendcl=on \
   --model-execution=on \
@@ -114,12 +119,15 @@ LLV2_DEVICE=npu msprof \
 profile_status="${PIPESTATUS[0]}"
 set -e
 
+mapfile -t prof_dirs < <(find "${profile_dir}" -type d -name 'PROF_*' | sort)
 if [[ "${profile_status}" -ne 0 ]]; then
-  echo "[error] msprof generation failed with exit code ${profile_status}" >&2
-  echo "[hint] inspect ${raw_log}" >&2
-  echo "[hint] if --task-time rejects '${MSPROF_TASK_TIME}', retry with:" >&2
-  echo "       MSPROF_TASK_TIME=l1 bash $0" >&2
-  exit "${profile_status}"
+  echo "[warning] msprof returned ${profile_status} after the application exited" >&2
+  echo "[hint] inspect ${raw_log}, disk capacity, and files under ${profile_dir}" >&2
+  if [[ "${#prof_dirs[@]}" -eq 0 ]]; then
+    echo "[error] no PROF_* data is available for recovery analysis" >&2
+    exit "${profile_status}"
+  fi
+  echo "[warning] found ${#prof_dirs[@]} PROF_* directories; attempting recovery analysis" >&2
 fi
 
 # This is useful for correlating the trace with the generated sample. It is not
@@ -127,7 +135,6 @@ fi
 python scripts/summarize_npu_benchmark.py \
   "${raw_log}" --warmup-per-rank 0 | tee "${benchmark_summary}"
 
-mapfile -t prof_dirs < <(find "${profile_dir}" -type d -name 'PROF_*' | sort)
 if [[ "${#prof_dirs[@]}" -eq 0 ]]; then
   echo "[error] no PROF_* directory found under ${profile_dir}" >&2
   exit 1
@@ -180,3 +187,6 @@ echo "[done] profiled benchmark summary=${benchmark_summary}"
 echo "[done] profiling=${profile_dir}"
 echo "[done] analysis=${analysis_dir}"
 echo "[note] use an unprofiled run for final latency/FPS because msprof adds overhead"
+if [[ "${profile_status}" -ne 0 ]]; then
+  echo "[note] msprof collection returned ${profile_status}; treat recovered analysis as potentially incomplete"
+fi
