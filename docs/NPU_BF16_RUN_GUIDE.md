@@ -469,11 +469,8 @@ cd /mnt/share/r50063443/LongLive-oneday
 bash scripts/run_npu_vbench_standard_pipeline.sh
 ```
 
-等价的通用入口是：
-
-```bash
-BENCHMARK=standard bash scripts/run_npu_vbench_quality_pipeline.sh
-```
+`scripts/run_npu_vbench_quality_pipeline.sh`是标准版和增强版入口共用的内部实现，不应在其中
+修改卡数或直接启动。
 
 流水线自动完成：
 
@@ -589,12 +586,6 @@ SP组内各rank在去噪结束后持有相同的完整latent，但每组只需�
 ```bash
 cd /mnt/share/r50063443/LongLive-oneday
 bash scripts/run_npu_vbench_augmented_pipeline.sh
-```
-
-等价通用入口：
-
-```bash
-BENCHMARK=augmented bash scripts/run_npu_vbench_quality_pipeline.sh
 ```
 
 增强描述只用于 LongLive 的文本条件。整理视频和 AISBench 语义评测仍使用对应的原始 VBench

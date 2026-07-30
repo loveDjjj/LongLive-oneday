@@ -6,14 +6,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# ---- Runtime layout. Edit here or override with environment variables. ----
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-12}"
-export SP_SIZE="${SP_SIZE:-2}"
-export DP_SIZE="${DP_SIZE:-$((NPROC_PER_NODE / SP_SIZE))}"
-export AISBENCH_MAX_WORKERS="${AISBENCH_MAX_WORKERS:-${NPROC_PER_NODE}}"
-export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29530}"
+# Internal implementation. Set the runtime layout in one of these launchers:
+# run_npu_vbench_all.sh, run_npu_vbench_standard_pipeline.sh, or
+# run_npu_vbench_augmented_pipeline.sh.
+required_layout_vars=(
+  ASCEND_RT_VISIBLE_DEVICES
+  NPROC_PER_NODE
+  SP_SIZE
+  DP_SIZE
+  AISBENCH_MAX_WORKERS
+  MASTER_ADDR
+  MASTER_PORT
+)
+for required_var in "${required_layout_vars[@]}"; do
+  if [[ -z "${!required_var:-}" ]]; then
+    echo "[error] ${required_var} is not set; start this pipeline through a public launcher" >&2
+    exit 1
+  fi
+done
+
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
