@@ -128,7 +128,12 @@ def sp_dit_forward(
             sinusoidal_embedding_1d(self.freq_dim,
                                     t).unflatten(0, (bt, seq_len)).float())
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-        assert e.dtype == torch.float32 and e0.dtype == torch.float32
+        if e.dtype != torch.float32 or e0.dtype != torch.float32:
+            raise RuntimeError(
+                "Wan SP timestep embeddings must run in FP32, got "
+                f"e={e.dtype}, e0={e0.dtype}. Keep time_embedding and "
+                "time_projection in FP32 when converting the DiT to BF16."
+            )
 
     # context
     context_lens = None

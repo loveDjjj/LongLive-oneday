@@ -164,6 +164,11 @@ class WanTI2V:
         else:
             if convert_model_dtype:
                 model.to(self.param_dtype)
+                # Wan's sequence-parallel forward computes timestep embeddings
+                # outside autocast and requires these two small modules in FP32.
+                # Keep the DiT backbone in BF16 while preserving that invariant.
+                model.time_embedding.float()
+                model.time_projection.float()
             if not self.init_on_cpu:
                 model.to(self.device)
 
