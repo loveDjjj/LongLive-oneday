@@ -17,7 +17,7 @@ Required environment variables can override the defaults:
 export LONGLIVE_VBENCH_DATA_PATH=/path/to/prepared/videos
 export LONGLIVE_VBENCH_FULL_INFO=/path/to/VBench_full_info.json
 export VBENCH_CACHE_DIR=/mnt/weight/vbench_models/
-export AISBENCH_MAX_WORKERS=1
+export AISBENCH_MAX_WORKERS=4
 ```
 
 See `docs/NPU_BF16_RUN_GUIDE.md` for the complete Chinese workflow.
