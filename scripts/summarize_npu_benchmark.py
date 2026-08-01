@@ -20,6 +20,7 @@ NUMERIC_FIELDS = {
     "generation_fps": float,
     "rtf": float,
     "peak_memory_gb": float,
+    "vae_peak_memory_gb": float,
 }
 
 
@@ -84,6 +85,11 @@ def main() -> None:
     rtf_values = [record["rtf"] for record in measured]
     save_values = [record.get("save_seconds", 0.0) for record in measured]
     peak_values = [record["peak_memory_gb"] for record in measured if "peak_memory_gb" in record]
+    vae_peak_values = [
+        record["vae_peak_memory_gb"]
+        for record in measured
+        if "vae_peak_memory_gb" in record
+    ]
     per_rank_seconds = defaultdict(float)
     for record in measured:
         per_rank_seconds[record["rank"]] += record["generation_seconds"]
@@ -101,6 +107,8 @@ def main() -> None:
     )
     if peak_values:
         print(f"peak_memory_gb_max={max(peak_values):.2f}")
+    if vae_peak_values:
+        print(f"vae_peak_memory_gb_max={max(vae_peak_values):.2f}")
     print(
         f"generation_videos_per_hour={len(measured) / concurrent_wall_seconds * 3600:.2f} "
         f"estimated_concurrent_wall_seconds={concurrent_wall_seconds:.3f}"

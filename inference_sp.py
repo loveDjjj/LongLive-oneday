@@ -43,9 +43,12 @@ def reset_peak_memory(device):
     reset = getattr(accelerator, "reset_peak_memory_stats", None)
     if reset is not None:
         try:
-            reset()
+            reset(device)
         except (RuntimeError, TypeError):
-            pass
+            try:
+                reset()
+            except (RuntimeError, TypeError):
+                pass
 
 
 def peak_memory_gb(device):
@@ -54,9 +57,12 @@ def peak_memory_gb(device):
     if max_memory is None:
         return None
     try:
-        return max_memory() / (1024 ** 3)
+        return max_memory(device) / (1024 ** 3)
     except (RuntimeError, TypeError):
-        return None
+        try:
+            return max_memory() / (1024 ** 3)
+        except (RuntimeError, TypeError):
+            return None
 
 
 def save_prompts_to_txt(prompts_for_sample, prompt_txt_path: str, is_main_process: bool):
@@ -312,6 +318,7 @@ if "LOCAL_RANK" in os.environ:
         )
 else:
     local_rank = 0
+    world_size = 1
     rank = 0
     device = set_device(local_rank)
     set_seed(config.seed)
@@ -483,15 +490,38 @@ configure_generator_torch_compile(pipeline, config, is_main_process)
 vae_device_str = getattr(config, "vae_device", None)
 use_dedicated_vae_device = bool(getattr(config, "streaming_vae", False)) and bool(vae_device_str)
 decode_on_this_rank = not use_effective_sp or sp_rank == 0
+dedicated_vae_device = None
+if use_dedicated_vae_device and total_dp_groups != 1:
+    raise ValueError(
+        "A single inference.vae_device cannot serve multiple DP groups safely. "
+        "Use dp_size=1, or launch one independent SP+VAE process per replica."
+    )
+if use_dedicated_vae_device and is_npu():
+    requested_vae_device = torch.device(vae_device_str)
+    if requested_vae_device.type != "npu" or requested_vae_device.index is None:
+        raise ValueError(
+            "Ascend asynchronous VAE requires an explicit device such as vae_device: npu:4."
+        )
+    if requested_vae_device.index < world_size:
+        raise ValueError(
+            f"vae_device={requested_vae_device} overlaps the {world_size} torchrun worker "
+            "devices. Expose one extra NPU and use its logical index."
+        )
+    if requested_vae_device.index >= torch.npu.device_count():
+        raise ValueError(
+            f"vae_device={requested_vae_device} is unavailable; "
+            f"ASCEND_RT_VISIBLE_DEVICES exposes {torch.npu.device_count()} logical NPUs."
+        )
 if use_dedicated_vae_device and decode_on_this_rank:
     vae_device = torch.device(vae_device_str)
+    dedicated_vae_device = vae_device
     pipeline.vae.to(device="cpu")
     pipeline.vae.to(device=vae_device)
     if hasattr(pipeline.vae, "mean"):
         pipeline.vae.mean = pipeline.vae.mean.to(device=vae_device)
         pipeline.vae.std = pipeline.vae.std.to(device=vae_device)
     if is_main_process:
-        print(f"[SP] VAE on {vae_device}, diffusion on {device}")
+        print(f"[SP] Async VAE on {vae_device}, diffusion on {device}")
 elif decode_on_this_rank:
     pipeline.vae.to(device=device)
 else:
@@ -563,6 +593,8 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
     if is_main_process:
         print(f"\n[SP] Generating video {idx}: {prompt[:60]}...")
     reset_peak_memory(device)
+    if dedicated_vae_device is not None:
+        reset_peak_memory(dedicated_vae_device)
     synchronize_accelerator(device)
     generation_started = time.perf_counter()
     generated = pipeline.inference(
@@ -573,6 +605,11 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
     synchronize_accelerator(device)
     generation_seconds = time.perf_counter() - generation_started
     generation_peak_memory_gb = peak_memory_gb(device)
+    vae_peak_memory_gb = (
+        peak_memory_gb(dedicated_vae_device)
+        if dedicated_vae_device is not None
+        else None
+    )
 
     should_save = (sp_rank == 0) if use_effective_sp else True
     if idx < num_prompts and should_save:
@@ -630,12 +667,16 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
             if generation_peak_memory_gb is not None
             else "n/a"
         )
+        vae_peak_memory_text = (
+            f"{vae_peak_memory_gb:.2f}" if vae_peak_memory_gb is not None else "n/a"
+        )
         print(
             f"[benchmark] rank={rank} prompt_index={idx} "
             f"generation_seconds={generation_seconds:.3f} "
             f"save_seconds={save_seconds:.3f} pixel_frames={frame_count} "
             f"video_seconds={video_seconds:.3f} generation_fps={generation_fps:.3f} "
-            f"rtf={real_time_factor:.3f} peak_memory_gb={peak_memory_text}"
+            f"rtf={real_time_factor:.3f} peak_memory_gb={peak_memory_text} "
+            f"vae_peak_memory_gb={vae_peak_memory_text}"
         )
 
     if config.inference_iter != -1 and i >= config.inference_iter:

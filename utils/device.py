@@ -115,6 +115,58 @@ def synchronize(device=None) -> None:
         torch.cuda.synchronize(device)
 
 
+def _device_type(device) -> str:
+    if hasattr(device, "type"):
+        return str(device.type)
+    return str(device).split(":", 1)[0]
+
+
+def supports_streams(device) -> bool:
+    kind = _device_type(device)
+    accelerator = getattr(torch, kind, None)
+    return (
+        kind in {"cuda", "npu"}
+        and accelerator is not None
+        and hasattr(accelerator, "Stream")
+        and hasattr(accelerator, "Event")
+        and hasattr(accelerator, "stream")
+    )
+
+
+def create_stream(device):
+    """Create a CUDA/NPU stream on ``device``."""
+    kind = _device_type(device)
+    accelerator = getattr(torch, kind, None)
+    if not supports_streams(device):
+        raise RuntimeError(f"{kind} runtime does not expose Stream/Event support")
+    try:
+        return accelerator.Stream(device=device)
+    except TypeError:
+        with device_context(device):
+            return accelerator.Stream()
+
+
+def create_event(device, *, enable_timing: bool = False):
+    """Create an event using the runtime associated with ``device``."""
+    kind = _device_type(device)
+    accelerator = getattr(torch, kind, None)
+    if not supports_streams(device):
+        raise RuntimeError(f"{kind} runtime does not expose Stream/Event support")
+    try:
+        return accelerator.Event(enable_timing=enable_timing)
+    except TypeError:
+        return accelerator.Event()
+
+
+def stream_context(stream, device=None):
+    """Enter the CUDA/NPU stream context for ``stream``."""
+    kind = _device_type(device if device is not None else stream.device)
+    accelerator = getattr(torch, kind, None)
+    if accelerator is None or not hasattr(accelerator, "stream"):
+        raise RuntimeError(f"{kind} runtime does not expose a stream context")
+    return accelerator.stream(stream)
+
+
 def device_context(device):
     if device is None:
         return nullcontext()

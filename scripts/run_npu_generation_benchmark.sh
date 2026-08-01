@@ -17,6 +17,7 @@ export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29520}"
 export WARMUP_PER_RANK="${WARMUP_PER_RANK:-1}"
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "[error] config not found: ${CONFIG_PATH}" >&2
@@ -26,14 +27,18 @@ if [[ ! -f "${CANN_ENV_SCRIPT}" ]]; then
   echo "[error] CANN environment script not found: ${CANN_ENV_SCRIPT}" >&2
   exit 1
 fi
+if [[ ! -x "${GENERATION_ENV}/bin/torchrun" || ! -x "${GENERATION_ENV}/bin/python" ]]; then
+  echo "[error] LongLive environment is incomplete: ${GENERATION_ENV}" >&2
+  exit 1
+fi
 
 set +u
 # shellcheck disable=SC1090
 source "${CANN_ENV_SCRIPT}"
 set -u
-if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
-  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-fi
+export CONDA_PREFIX="${GENERATION_ENV}"
+export PATH="${GENERATION_ENV}/bin:${PATH}"
+export LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 if [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
   visible_devices=""
@@ -73,11 +78,15 @@ summary_file="${run_dir}/summary.txt"
 rendered_config="$(mktemp "${TMPDIR:-/tmp}/longlive_perf.XXXXXX.yaml")"
 mkdir -p "${run_dir}" "${video_dir}"
 
-sed \
-  -e "s/^sp_size: .*/sp_size: ${sp_size}/" \
-  -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/" \
-  -e "s|^output_folder: .*|output_folder: ${video_dir}|" \
-  "${CONFIG_PATH}" > "${rendered_config}"
+sed_args=(
+  -e "s/^sp_size: .*/sp_size: ${sp_size}/"
+  -e "s/^dp_size: .*/dp_size: ${DP_SIZE}/"
+  -e "s|^output_folder: .*|output_folder: ${video_dir}|"
+)
+if [[ -n "${VAE_DEVICE:-}" ]]; then
+  sed_args+=(-e "s|^  vae_device: .*|  vae_device: ${VAE_DEVICE}|")
+fi
+sed "${sed_args[@]}" "${CONFIG_PATH}" > "${rendered_config}"
 
 child_pid=""
 cleanup() {
@@ -104,9 +113,13 @@ draw_progress() {
 }
 
 echo "[run] config=${CONFIG_PATH} nproc=${NPROC_PER_NODE} sp=${sp_size} dp=${DP_SIZE}"
+echo "[run] generation_env=${GENERATION_ENV}"
+if [[ -n "${VAE_DEVICE:-}" ]]; then
+  echo "[run] dedicated VAE device=${VAE_DEVICE}"
+fi
 echo "[run] full log: ${raw_log}"
 
-LLV2_DEVICE=npu torchrun \
+LLV2_DEVICE=npu "${GENERATION_ENV}/bin/torchrun" \
   --nnodes=1 \
   --nproc_per_node="${NPROC_PER_NODE}" \
   --master_addr="${MASTER_ADDR}" \
@@ -140,7 +153,7 @@ if [[ "${status}" -ne 0 ]]; then
   exit "${status}"
 fi
 
-python scripts/summarize_npu_benchmark.py \
+"${GENERATION_ENV}/bin/python" scripts/summarize_npu_benchmark.py \
   "${raw_log}" \
   --warmup-per-rank "${WARMUP_PER_RANK}" \
   | tee "${summary_file}"

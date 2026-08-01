@@ -4,6 +4,7 @@
 from tqdm import tqdm
 from typing import List, Optional
 import os
+import queue
 import statistics
 import threading
 import torch
@@ -20,7 +21,16 @@ from wan_5b.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from utils.wan_5b_wrapper import WanDiffusionWrapper, WanTextEncoder, build_vae_5b
 from utils.dataset import DEFAULT_SCENE_CUT_PREFIX
 from utils.config import section_get, wan_default_config
-from utils.device import empty_cache, is_cuda, synchronize
+from utils.device import (
+    create_event,
+    create_stream,
+    device_context,
+    empty_cache,
+    is_cuda,
+    stream_context,
+    supports_streams,
+    synchronize,
+)
 from utils.i2v_conditioning import (
     _overwrite_i2v_context,
     _zero_i2v_context_timestep,
@@ -469,7 +479,13 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         streaming_decode = self.streaming_vae and not return_latents
         pipeline_vae = streaming_decode and self.vae_device is not None
         cuda_runtime = is_cuda()
-        async_vae = streaming_decode and self.async_vae and not pipeline_vae and cuda_runtime
+        accelerator_streams = supports_streams(noise.device)
+        async_vae = (
+            streaming_decode
+            and self.async_vae
+            and not pipeline_vae
+            and accelerator_streams
+        )
         if streaming_decode:
             vae_dev = self.vae_device if pipeline_vae else noise.device
             vae_scale = [
@@ -479,44 +495,53 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             self.vae.model.clear_cache()
             video_chunks = []
             if async_vae:
-                vae_stream = torch.cuda.Stream(device=noise.device)
+                vae_stream = create_stream(noise.device)
                 prev_vae_done = None
             if pipeline_vae:
                 vae_thread_error = []
                 vae_thread_chunks = []
-                vae_work_queue = []
-                vae_queue_lock = threading.Lock()
-                vae_work_ready = threading.Event()
+                vae_work_queue = queue.Queue()
                 vae_all_done = threading.Event()
 
                 def _vae_thread_fn():
                     try:
-                        while True:
-                            vae_work_ready.wait()
-                            vae_work_ready.clear()
+                        with device_context(vae_dev):
+                            worker_stream = (
+                                create_stream(vae_dev) if supports_streams(vae_dev) else None
+                            )
                             while True:
-                                with vae_queue_lock:
-                                    if not vae_work_queue:
-                                        break
-                                    item = vae_work_queue.pop(0)
-                                if item is None:
-                                    vae_all_done.set()
-                                    return
-                                decoded = _decode_vae_chunk(
-                                    self.vae.model,
-                                    item,
-                                    vae_scale,
-                                ).float().clamp_(-1, 1)
-                                # Pinned-memory DtoH: pageable copy hits ~0.2 GB/s
-                                # (1.5s per 313MB chunk → ~80s/prompt at end); pinned
-                                # path runs at PCIe limit (~25 GB/s = ~12ms / chunk).
-                                pinned = torch.empty(
-                                    decoded.shape, dtype=decoded.dtype,
-                                    device="cpu", pin_memory=True,
-                                )
-                                pinned.copy_(decoded, non_blocking=True)
-                                synchronize(decoded.device)
-                                vae_thread_chunks.append(pinned)
+                                item = vae_work_queue.get()
+                                try:
+                                    if item is None:
+                                        vae_all_done.set()
+                                        return
+                                    context = (
+                                        stream_context(worker_stream, vae_dev)
+                                        if worker_stream is not None
+                                        else device_context(None)
+                                    )
+                                    with context:
+                                        decoded = _decode_vae_chunk(
+                                            self.vae.model,
+                                            item,
+                                            vae_scale,
+                                        ).float().clamp_(-1, 1)
+                                        # Pinned DtoH avoids a pageable-copy bottleneck.
+                                        pinned = torch.empty(
+                                            decoded.shape,
+                                            dtype=decoded.dtype,
+                                            device="cpu",
+                                            pin_memory=True,
+                                        )
+                                        pinned.copy_(decoded, non_blocking=True)
+                                    if worker_stream is not None:
+                                        worker_stream.synchronize()
+                                    else:
+                                        synchronize(decoded.device)
+                                    vae_thread_chunks.append(pinned)
+                                    del decoded, item
+                                finally:
+                                    vae_work_queue.task_done()
                     except Exception as exc:
                         vae_thread_error.append(exc)
                         vae_all_done.set()
@@ -693,11 +718,11 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
 
             if streaming_decode:
                 if async_vae:
-                    diffusion_done = torch.cuda.Event()
+                    diffusion_done = create_event(noise.device)
                     diffusion_done.record()
                     if prev_vae_done is not None:
                         prev_vae_done.synchronize()
-                    with torch.cuda.stream(vae_stream):
+                    with stream_context(vae_stream, noise.device):
                         vae_stream.wait_event(diffusion_done)
                         chunk_bcthw = latents.permute(0, 2, 1, 3, 4).contiguous()
                         decoded_chunk = _decode_vae_chunk(
@@ -706,13 +731,11 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                             vae_scale,
                         ).float().clamp_(-1, 1)
                         video_chunks.append(decoded_chunk)
-                    prev_vae_done = torch.cuda.Event()
+                    prev_vae_done = create_event(noise.device)
                     prev_vae_done.record(vae_stream)
                 elif pipeline_vae:
                     latent_on_vae = latents.permute(0, 2, 1, 3, 4).contiguous().to(vae_dev)
-                    with vae_queue_lock:
-                        vae_work_queue.append(latent_on_vae)
-                    vae_work_ready.set()
+                    vae_work_queue.put(latent_on_vae)
                 else:
                     chunk_bcthw = latents.permute(0, 2, 1, 3, 4).contiguous()
                     decoded_chunk = _decode_vae_chunk(
@@ -774,9 +797,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             if async_vae:
                 vae_stream.synchronize()
             elif pipeline_vae:
-                with vae_queue_lock:
-                    vae_work_queue.append(None)
-                vae_work_ready.set()
+                vae_work_queue.put(None)
                 vae_all_done.wait()
                 vae_bg_thread.join()
                 if vae_thread_error:
