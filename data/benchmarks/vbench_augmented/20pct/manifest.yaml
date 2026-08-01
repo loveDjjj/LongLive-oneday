@@ -1,0 +1,4 @@
+generation_prompts: prompts.txt
+naming_prompts: ../../vbench_standard/20pct/prompts.txt
+full_info: ../../vbench_standard/20pct/full_info.json
+augmentation: {source: Wan2.1, model: Qwen2.5-3B-Instruct, seed: 42}

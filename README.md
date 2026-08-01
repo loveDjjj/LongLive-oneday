@@ -81,72 +81,17 @@ The default git clone fetches objects from all branches, including our demopage 
 
 ### Quick Start
 
-#### BF16
+The `npu` branch maintains two Ascend BF16 inference workflows:
 
-```python
-import torch
-from omegaconf import OmegaConf
-
-from pipeline import CausalDiffusionInferencePipeline
-from utils.config import normalize_config
-from utils.inference_utils import (
-    load_generator_checkpoint,
-    place_vae_for_streaming,
-    prepare_single_prompt_inputs,
-    save_video,
-)
-
-prompt = "A compact silver robot walks through a clean robotics lab."
-merged_checkpoint_path = "LongLive-2.0-5B/model_bf16.pt"
-
-config = normalize_config(OmegaConf.load("configs/inference.yaml"))
-device = torch.device("cuda")
-
-torch.set_grad_enabled(False)
-pipe = CausalDiffusionInferencePipeline(config, device=device)
-load_generator_checkpoint(pipe.generator, merged_checkpoint_path)
-pipe = pipe.to(device=device, dtype=torch.bfloat16)
-place_vae_for_streaming(pipe, config)  # honor streaming_vae + vae_device when set
-pipe.generator.model.eval().requires_grad_(False)
-
-noise, prompts = prepare_single_prompt_inputs(config, prompt, device)
-video = pipe.inference(noise=noise, text_prompts=prompts)
-save_video(video[0], "videos/quickstart/sample.mp4", fps=24)
+```bash
+bash scripts/run_msprof.sh 32s
+bash scripts/run_vbench.sh longlive2_standard_20pct
 ```
 
-`place_vae_for_streaming` is a no-op unless `inference.streaming_vae` is true and `inference.vae_device` is set, so toggling streaming-pipeline decode in your yaml is enough — the script does not need to change.
-
-#### NVFP4
-
-Point `checkpoints.generator_ckpt` in `configs/nvfp4/inference_nvfp4.yaml` at the downloaded checkpoint and set `model_quant_use_transformer_engine` according to the backend you are using:
-
-- TransformerEngine checkpoint (`model_te.pt`): `model_quant_use_transformer_engine: true`
-- FourOverSix checkpoint (`model_4o6.pt`): `model_quant_use_transformer_engine: false`
-
-`setup_nvfp4_pipeline` handles checkpoint loading, NVFP4 module wrapping, weight materialization, dtype/device placement, and the streaming-pipeline VAE relocation for both backends — the bf16 `pipe.to(...)` shortcut is unsafe here because it would cast the quantized buffers.
-
-```python
-import torch
-from omegaconf import OmegaConf
-
-from pipeline import CausalDiffusionInferencePipeline
-from utils.config import normalize_config
-from utils.inference_utils import prepare_single_prompt_inputs, save_video, setup_nvfp4_pipeline
-
-prompt = "A compact silver robot walks through a clean robotics lab."
-
-config = normalize_config(OmegaConf.load("configs/nvfp4/inference_nvfp4.yaml"))
-device = torch.device("cuda")
-
-torch.set_grad_enabled(False)
-pipe = CausalDiffusionInferencePipeline(config, device=device)
-setup_nvfp4_pipeline(pipe, config, device)
-pipe.generator.model.eval().requires_grad_(False)
-
-noise, prompts = prepare_single_prompt_inputs(config, prompt, device)
-video = pipe.inference(noise=noise, text_prompts=prompts)
-save_video(video[0], "videos/quickstart/sample_nvfp4.mp4", fps=24)
-```
+Runtime presets live in `configs/inference/`. See
+[`docs/NPU_BF16_RUN_GUIDE.md`](docs/NPU_BF16_RUN_GUIDE.md) for device layout,
+environment variables, datasets, output naming, and profiler semantics. NVFP4
+configs are intentionally not shipped on this Ascend-only branch.
 
 ## Training Modes
 

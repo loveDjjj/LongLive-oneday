@@ -1,0 +1,80 @@
+# Ascend VBench Standard presets. VBench-Long remains a separate, future
+# protocol because its evaluator is not yet adapted to Ascend.
+models:
+  longlive2:
+    entrypoint: inference_sp.py
+    model_name: Wan2.2-TI2V-5B
+    model_root: /mnt/share/weight/Wan2.2-TI2V-5B
+    generator_checkpoint: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+    timestep_shift: 5.0
+    num_frame_per_block: 8
+    local_attn_size: 32
+    sampling_steps: 4
+    guidance_scale: 1.0
+    sink_size: 8
+    multi_shot_sink: true
+    multi_shot_rope_offset: 8
+  wan22:
+    entrypoint: inference_wan22_sp.py
+    model_name: Wan2.2-TI2V-5B
+    model_root: /mnt/share/weight/Wan2.2-TI2V-5B
+    timestep_shift: 5.0
+    sampling_steps: 50
+    sample_solver: unipc
+    guidance_scale: 5.0
+    width: 1280
+    height: 704
+
+datasets:
+  standard:
+    full:
+      generation_prompts: data/benchmarks/vbench_standard/full/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/full/prompts.txt
+      full_info: data/benchmarks/vbench_standard/full/full_info.json
+    5pct:
+      generation_prompts: data/benchmarks/vbench_standard/5pct/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/5pct/prompts.txt
+      full_info: data/benchmarks/vbench_standard/5pct/full_info.json
+    20pct:
+      generation_prompts: data/benchmarks/vbench_standard/20pct/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/20pct/prompts.txt
+      full_info: data/benchmarks/vbench_standard/20pct/full_info.json
+  augmented:
+    full:
+      generation_prompts: data/benchmarks/vbench_augmented/full/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/full/prompts.txt
+      full_info: data/benchmarks/vbench_standard/full/full_info.json
+    5pct:
+      generation_prompts: data/benchmarks/vbench_augmented/5pct/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/5pct/prompts.txt
+      full_info: data/benchmarks/vbench_standard/5pct/full_info.json
+    20pct:
+      generation_prompts: data/benchmarks/vbench_augmented/20pct/prompts.txt
+      naming_prompts: data/benchmarks/vbench_standard/20pct/prompts.txt
+      full_info: data/benchmarks/vbench_standard/20pct/full_info.json
+
+defaults:
+  pixel_frames: 125
+  fps: 24
+  sp_size: 2
+  dp_size: 6
+  seeds: [0, 1, 2, 3, 4]
+
+presets:
+  longlive2_standard_full: {engine: longlive2, category: standard, subset: full}
+  longlive2_standard_5pct: {engine: longlive2, category: standard, subset: 5pct}
+  longlive2_standard_20pct: {engine: longlive2, category: standard, subset: 20pct}
+  longlive2_augmented_full: {engine: longlive2, category: augmented, subset: full}
+  longlive2_augmented_5pct: {engine: longlive2, category: augmented, subset: 5pct}
+  longlive2_augmented_20pct: {engine: longlive2, category: augmented, subset: 20pct}
+  wan22_standard_full: {engine: wan22, category: standard, subset: full}
+  wan22_standard_5pct: {engine: wan22, category: standard, subset: 5pct}
+  wan22_standard_20pct: {engine: wan22, category: standard, subset: 20pct}
+  wan22_augmented_full: {engine: wan22, category: augmented, subset: full}
+  wan22_augmented_5pct: {engine: wan22, category: augmented, subset: 5pct}
+  wan22_augmented_20pct: {engine: wan22, category: augmented, subset: 20pct}
+
+sparsity:
+  enabled: false
+  method: dense
+  options: {}

@@ -11,20 +11,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_DEFAULTS = {
-    "mini": (
-        REPO_ROOT / "videos/benchmarks/vbench_mini_5s",
-        REPO_ROOT / "data/benchmarks/vbench_mini/prompts.txt",
-        REPO_ROOT / "videos/benchmarks/vbench_mini_5s_vbench",
-    ),
     "standard": (
-        REPO_ROOT / "videos/benchmarks/vbench_standard_5s",
-        REPO_ROOT / "data/benchmarks/vbench_standard/prompts.txt",
-        REPO_ROOT / "videos/benchmarks/vbench_standard_5s_vbench",
-    ),
-    "long": (
-        REPO_ROOT / "videos/benchmarks/vbench_long_60s",
-        REPO_ROOT / "data/benchmarks/vbench_long/prompts.txt",
-        REPO_ROOT / "videos/benchmarks/vbench_long_60s_vbench",
+        REPO_ROOT / "runs/vbench/manual/videos/raw",
+        REPO_ROOT / "data/benchmarks/vbench_standard/full/prompts.txt",
+        REPO_ROOT / "runs/vbench/manual/videos/prepared",
     ),
 }
 VIDEO_PATTERN = re.compile(r"^rank\d+-(\d+)-(\d+)_.*\.mp4$")
@@ -34,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prepare LongLive outputs for AISBench/VBench evaluation."
     )
-    parser.add_argument("--benchmark", choices=BENCHMARK_DEFAULTS, default="mini")
+    parser.add_argument("--benchmark", choices=BENCHMARK_DEFAULTS, default="standard")
     parser.add_argument("--src-dir", type=Path, help="LongLive output directory")
     parser.add_argument("--prompts-file", type=Path, help="Prompt file used for generation")
     parser.add_argument("--dst-dir", type=Path, help="VBench-compatible output directory")

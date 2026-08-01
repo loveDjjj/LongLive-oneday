@@ -1,0 +1,51 @@
+# Ascend msprof inference presets. All reported timings are collected under
+# msprof and are intended for comparisons made with the same profiler options.
+model:
+  name: Wan2.2-TI2V-5B
+  root: /mnt/share/weight/Wan2.2-TI2V-5B
+  generator_checkpoint: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+  timestep_shift: 5.0
+  num_frame_per_block: 8
+  local_attn_size: 32
+
+runtime:
+  sp_size: 4
+  dp_size: 1
+  model_num_heads: 24
+  vae_mode: async_dedicated
+
+generation:
+  latent_channels: 48
+  latent_height: 44
+  latent_width: 80
+  sampling_steps: 4
+  sink_size: 8
+  guidance_scale: 1.0
+  multi_shot_sink: true
+  multi_shot_rope_offset: 8
+
+measurement:
+  prompts: data/benchmarks/performance/prompts.txt
+  num_prompts: 2
+  warmup_per_rank: 1
+  seed: 0
+
+presets:
+  16s:
+    latent_frames: 96
+  32s:
+    latent_frames: 192
+  64s:
+    latent_frames: 384
+
+msprof:
+  output_type: db
+  storage_limit: 50000MB
+  task_time: "on"
+  aic_metrics: PipeUtilization
+  recover_parse: auto
+
+sparsity:
+  enabled: false
+  method: dense
+  options: {}

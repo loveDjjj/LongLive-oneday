@@ -111,7 +111,8 @@ if args.use_te_quant is not None:
 if is_npu() and getattr(config, "model_quant", False):
     raise NotImplementedError(
         "Ascend NPU BF16 reproduction does not support the NVIDIA NVFP4 path. "
-        "Use configs/inference.yaml with model_quant=false and kv_quant=false."
+        "Use scripts/run_msprof.sh or scripts/run_vbench.sh with the maintained "
+        "configs/inference presets."
     )
 
 if not hasattr(config, "sampling_steps") or config.sampling_steps is None:

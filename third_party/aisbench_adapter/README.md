@@ -9,7 +9,8 @@ download evaluator checkpoints.
 - `eval_longlive_vbench.py` is a runtime-rendered template mirroring the public
   AISBench VBench 1.0 config. It intentionally contains no `os.environ` calls
   because MMEngine parses configs in lazy mode.
-- `run_vbench_16npu.sh` exposes 16 Ascend NPUs and starts 16 AISBench workers.
+- `run_vbench_eval.sh` starts the AISBench evaluator using the visible Ascend
+  devices and configured worker count.
 
 Required environment variables can override the defaults:
 
