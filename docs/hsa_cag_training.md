@@ -55,7 +55,9 @@ TRAIN_RUN_NAME=hsa_cag_2k \
 bash scripts/run_npu_hsa_cag_training.sh
 ```
 
-复用同一个 `TRAIN_RUN_NAME` 会从该目录中最新的检查点继续训练。启动脚本会记录配置文件、解析后的配置、完整日志和实际使用端口。有效全局 Batch Size 为：
+复用同一个 `TRAIN_RUN_NAME` 会从该目录中最新的检查点继续训练。新版 LoRA 检查点会完整保存 Generator/Critic LoRA、两套 AdamW Optimizer State、训练 Step、全局样本游标和各 Rank 的随机数状态。相同卡数、单卡 Batch Size 和梯度累积配置下可以无损恢复；旧版仅包含 LoRA 权重和 Step 的检查点仍可加载，但会输出 AdamW State 缺失警告。
+
+改变卡数后，FSDP 会将完整 Optimizer State 重新分片，因此可以继续训练；但样本到 Rank 的分配和各 Rank 随机数流会改变，不能保证与原布局逐样本、逐位一致。启动脚本还会记录配置文件、解析后的配置、完整日志和实际使用端口。有效全局 Batch Size 为：
 
 ```text
 NPROC_PER_NODE * batch_size * GRADIENT_ACCUMULATION_STEPS

@@ -1033,6 +1033,25 @@ def cycle(dl):
         for data in dl:
             yield data
 
+
+class ResumableDistributedSampler(torch.utils.data.distributed.DistributedSampler):
+    """Distributed sampler that skips an initial per-rank sample offset once."""
+
+    def __init__(self, *args, start_index=0, **kwargs):
+        super().__init__(*args, **kwargs)
+        if start_index < 0:
+            raise ValueError(f"start_index must be non-negative, got {start_index}")
+        self.start_index = int(start_index) % max(self.num_samples, 1)
+
+    def __iter__(self):
+        indices = list(super().__iter__())
+        start_index = self.start_index
+        self.start_index = 0
+        return iter(indices[start_index:])
+
+    def __len__(self):
+        return max(super().__len__() - self.start_index, 0)
+
 def multi_video_collate_fn(batch):
     # batch is a length-B list of dictionaries returned by __getitem__.
     frames = torch.stack([b["frames"] for b in batch], dim=0)  # (B, T, C, H, W)

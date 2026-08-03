@@ -4,12 +4,17 @@ import gc
 import logging
 
 from utils.dataset import cycle
-from utils.dataset import MultiVideoConcatDataset, MultiTextConcatDataset, multi_video_collate_fn, eval_collate_fn, DEFAULT_SCENE_CUT_PREFIX
+from utils.dataset import MultiVideoConcatDataset, MultiTextConcatDataset, ResumableDistributedSampler, multi_video_collate_fn, eval_collate_fn, DEFAULT_SCENE_CUT_PREFIX
 from utils.config import section_get, wan_default_config
 from utils.distributed import EMA_FSDP, fsdp_wrap, launch_distributed_job
 from utils.misc import (
     set_seed,
     merge_dict_list
+)
+from utils.training_state import (
+    capture_rng_state,
+    restore_fsdp_optimizer_state,
+    restore_rng_state,
 )
 from utils.device import current_device, default_device, empty_cache
 import torch.distributed as dist
@@ -38,6 +43,7 @@ class Trainer:
     def __init__(self, config):
         self.config = config
         self.step = 0
+        self._resume_training_state = None
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
         if torch.cuda.is_available():
@@ -342,6 +348,7 @@ class Trainer:
                     self.step = lora_checkpoint["step"]
                     if self.is_main_process:
                         print(f"Resuming LoRA training from step {self.step}")
+                self._resume_training_state = lora_checkpoint
             else:
                 if self.is_main_process:
                     print("No LoRA checkpoint to load, starting from scratch")
@@ -443,6 +450,9 @@ class Trainer:
             weight_decay=config.weight_decay
         )
 
+        if self.is_lora_enabled and self._resume_training_state is not None:
+            self._restore_lora_optimizer_state(self._resume_training_state)
+
         # Step 5: Initialize the dataloader
         self.use_backward_simulation = getattr(config, "backward_simulation", True)
 
@@ -514,9 +524,14 @@ class Trainer:
             collate_fn = multi_video_collate_fn
             if dist.get_rank() == 0 and single_video_only:
                 print(f"[uniform_prompt] single_video_only enabled: each sample uses one video only")
-        random_seed = int(time.time()) % (2**31) * dist.get_rank()
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True, seed=random_seed)
+        resume_sample_offset = self._resume_sample_offset(config.batch_size)
+        sampler = ResumableDistributedSampler(
+            dataset,
+            shuffle=True,
+            drop_last=True,
+            seed=int(config.seed),
+            start_index=resume_sample_offset,
+        )
         dataloader = torch.utils.data.DataLoader(
             dataset, batch_size=config.batch_size, sampler=sampler,
             num_workers=2, prefetch_factor=1, pin_memory=False,
@@ -780,6 +795,10 @@ class Trainer:
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
         self.previous_time = None
+
+        if self.is_lora_enabled and self._resume_training_state is not None:
+            self._restore_rng_state(self._resume_training_state)
+            self._resume_training_state = None
         
         if self.is_main_process:
             print(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
@@ -792,6 +811,93 @@ class Trainer:
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(device)
+
+    def _restore_lora_optimizer_state(self, checkpoint):
+        optimizer_keys = ("generator_optimizer", "critic_optimizer")
+        missing = [key for key in optimizer_keys if key not in checkpoint]
+        if missing:
+            if self.is_main_process:
+                print(
+                    "Warning: LoRA checkpoint predates full-state resume and is missing "
+                    f"{missing}; AdamW state will start fresh."
+                )
+            return
+
+        restore_fsdp_optimizer_state(
+            FSDP,
+            self.model.generator,
+            self.generator_optimizer,
+            checkpoint["generator_optimizer"],
+        )
+        restore_fsdp_optimizer_state(
+            FSDP,
+            self.model.fake_score,
+            self.critic_optimizer,
+            checkpoint["critic_optimizer"],
+        )
+        if self.is_main_process:
+            print("Restored generator and critic AdamW state from LoRA checkpoint")
+
+    def _resume_sample_offset(self, batch_size):
+        checkpoint = self._resume_training_state
+        if checkpoint is None:
+            return 0
+
+        current_accumulation = int(
+            getattr(self, "gradient_accumulation_steps", self.config.gradient_accumulation_steps)
+        )
+
+        saved_world_size = int(checkpoint.get("world_size", self.world_size))
+        saved_batch_size = int(checkpoint.get("batch_size", batch_size))
+        saved_accumulation = int(
+            checkpoint.get("gradient_accumulation_steps", current_accumulation)
+        )
+        global_samples = int(
+            checkpoint.get(
+                "global_samples_consumed",
+                self.step * saved_world_size * saved_batch_size * saved_accumulation,
+            )
+        )
+        denominator = self.world_size * int(batch_size)
+        local_batches, remainder = divmod(global_samples, denominator)
+        if remainder and self.is_main_process:
+            print(
+                "Warning: saved global sample cursor is not divisible by the new training layout; "
+                "the resumed data position is rounded down."
+            )
+        if (
+            saved_world_size != self.world_size
+            or saved_batch_size != int(batch_size)
+            or saved_accumulation != current_accumulation
+        ) and self.is_main_process:
+            print(
+                "Warning: training layout changed from "
+                f"world={saved_world_size}, batch={saved_batch_size}, accumulation={saved_accumulation} "
+                f"to world={self.world_size}, batch={batch_size}, "
+                f"accumulation={current_accumulation}. Optimizer state is resharded, "
+                "but sample-to-rank assignment cannot be bitwise identical."
+            )
+        return local_batches * int(batch_size)
+
+    def _gather_rng_states(self):
+        local_state = capture_rng_state()
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local_state)
+        return gathered
+
+    def _restore_rng_state(self, checkpoint):
+        rng_states = checkpoint.get("rng_states")
+        if not rng_states or len(rng_states) != self.world_size:
+            if self.is_main_process:
+                print(
+                    "Warning: per-rank RNG state is unavailable for this world size; "
+                    "continuing from deterministic rank seeds."
+                )
+            return
+        state = rng_states[dist.get_rank()]
+        restore_rng_state(state)
+        if self.is_main_process:
+            print("Restored per-rank Python, NumPy, Torch, and accelerator RNG state")
 
     def _materialize_quantized_model_before_fsdp(
         self,
@@ -916,15 +1022,52 @@ class Trainer:
         print("Start gathering distributed model states...")
 
         if self.is_lora_enabled:
+            rng_states = self._gather_rng_states()
             gen_lora_sd = self._gather_lora_state_dict(
                 self.model.generator.model)
             crit_lora_sd = self._gather_lora_state_dict(
                 self.model.fake_score.model)
 
+            with FSDP.state_dict_type(
+                self.model.generator,
+                StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+                FullOptimStateDictConfig(rank0_only=True, offload_to_cpu=True),
+            ):
+                generator_optim_state = FSDP.optim_state_dict(
+                    self.model.generator, self.generator_optimizer
+                )
+
+            if dist.is_initialized():
+                dist.barrier()
+
+            with FSDP.state_dict_type(
+                self.model.fake_score,
+                StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+                FullOptimStateDictConfig(rank0_only=True, offload_to_cpu=True),
+            ):
+                critic_optim_state = FSDP.optim_state_dict(
+                    self.model.fake_score, self.critic_optimizer
+                )
+
             state_dict = {
                 "generator_lora": gen_lora_sd,
                 "critic_lora": crit_lora_sd,
+                "generator_optimizer": generator_optim_state,
+                "critic_optimizer": critic_optim_state,
                 "step": self.step,
+                "checkpoint_format_version": 2,
+                "world_size": self.world_size,
+                "batch_size": int(self.config.batch_size),
+                "gradient_accumulation_steps": self.gradient_accumulation_steps,
+                "global_samples_consumed": (
+                    self.step
+                    * self.world_size
+                    * int(self.config.batch_size)
+                    * self.gradient_accumulation_steps
+                ),
+                "rng_states": rng_states,
             }
         else:
             with FSDP.state_dict_type(
