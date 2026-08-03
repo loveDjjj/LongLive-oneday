@@ -8,6 +8,8 @@ export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-6}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29600}"
 export MAX_ITERS="${MAX_ITERS:-2000}"
+export HSA_QUERY_BLOCK_BATCH="${HSA_QUERY_BLOCK_BATCH:-2}"
+export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
 export LLV2_DEVICE="npu"
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
@@ -73,6 +75,10 @@ config.checkpoints.generator_ckpt = os.environ["GENERATOR_CKPT"]
 config.data.data_path = os.environ["TRAIN_PROMPTS"]
 config.training.gradient_accumulation_steps = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
 config.training.max_iters = int(os.environ["MAX_ITERS"])
+query_block_batch = int(os.environ["HSA_QUERY_BLOCK_BATCH"])
+if query_block_batch <= 0:
+    raise ValueError("HSA_QUERY_BLOCK_BATCH must be positive")
+config.model_kwargs.sparse_config.query_block_batch = query_block_batch
 OmegaConf.save(config, output)
 PY
 
@@ -92,6 +98,7 @@ PY
 )"
 export MASTER_PORT
 echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
+echo "[run] hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
 
 extra_args=()
 if [[ "${DISABLE_WANDB}" == "1" ]]; then

@@ -7,9 +7,11 @@ from utils.i2v_conditioning import (
     _zero_i2v_context_timestep,
 )
 from typing import List, Optional, Tuple
+import os
 import torch
 import torch.distributed as dist
 from torchvision.io import write_video
+from tqdm.auto import tqdm
 
 
 
@@ -513,7 +515,21 @@ class SelfForcingTrainingPipeline:
         self.generator.model.rope_temporal_offset = 0.0
 
         grad_enable_mask = torch.zeros((batch_size, sum(all_num_frames)), dtype=torch.bool)
-        for block_index, current_num_frames in enumerate(all_num_frames):
+        show_progress = (
+            os.environ.get("LLV2_TRAIN_PROGRESS", "1") != "0"
+            and (not dist.is_initialized() or dist.get_rank() == 0)
+        )
+        block_progress = tqdm(
+            enumerate(all_num_frames),
+            total=len(all_num_frames),
+            desc="[rollout] chunks",
+            unit="chunk",
+            position=1,
+            leave=False,
+            dynamic_ncols=True,
+            disable=not show_progress,
+        )
+        for block_index, current_num_frames in block_progress:
             if phi != 0.0 and self._is_scene_cut_from_mask(scene_cut_mask, block_index):
                 current_shot_index += 1
                 self.generator.model.rope_temporal_offset = current_shot_index * phi
@@ -548,6 +564,11 @@ class SelfForcingTrainingPipeline:
 
             # Step 3.1: Spatial denoising loop (UniPC multi-step)
             for index, t in enumerate(sample_scheduler.timesteps):
+                if show_progress:
+                    block_progress.set_postfix_str(
+                        f"denoise {index + 1}/{num_denoising_steps}",
+                        refresh=True,
+                    )
                 if self.same_step_across_blocks:
                     exit_flag = (index == exit_flags[0])
                 else:
@@ -608,6 +629,8 @@ class SelfForcingTrainingPipeline:
                     break
 
             # Step 3.2: record the model's output
+            if show_progress:
+                block_progress.set_postfix_str("update KV cache", refresh=True)
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
             # Step 3.3: rerun with context noise to update the cache

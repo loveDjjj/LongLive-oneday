@@ -28,6 +28,7 @@ from torch.distributed.fsdp import (
     StateDictType, FullStateDictConfig, FullOptimStateDictConfig
 )
 from torchvision.io import write_video
+from tqdm.auto import tqdm
 
 # LoRA related imports
 import peft
@@ -57,6 +58,7 @@ class Trainer:
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = current_device()
         self.is_main_process = global_rank == 0
+        self._train_progress = None
         self.causal = getattr(config, "causal", getattr(config, "all_causal", True))
         self.disable_wandb = config.disable_wandb
 
@@ -1136,6 +1138,9 @@ class Trainer:
     def fwdbwd_one_step(self, batch, train_generator):
         self.model.eval()  # prevent any randomness (e.g. dropout)
 
+        phase = "generator" if train_generator else "critic"
+        self._set_train_progress(f"{phase}: text encoding")
+
         if self.step % 5 == 0:
             empty_cache()
 
@@ -1212,6 +1217,7 @@ class Trainer:
 
         # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:
+            self._set_train_progress("generator: rollout and DMD loss")
             generator_loss, generator_log_dict = self.model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
                 conditional_dict=conditional_dict,
@@ -1221,6 +1227,7 @@ class Trainer:
             )
 
             # Scale loss for gradient accumulation and backward
+            self._set_train_progress("generator: backward")
             scaled_generator_loss = generator_loss / self.gradient_accumulation_steps
             scaled_generator_loss.backward()
             generator_log_dict.update({"generator_loss": generator_loss,
@@ -1230,6 +1237,7 @@ class Trainer:
         else:
             generator_log_dict = {}
 
+        self._set_train_progress("critic: rollout and loss")
         critic_loss, critic_log_dict = self.model.critic_loss(
             image_or_video_shape=image_or_video_shape,
             conditional_dict=conditional_dict,
@@ -1239,12 +1247,17 @@ class Trainer:
         )
 
         # Scale loss for gradient accumulation and backward
+        self._set_train_progress("critic: backward")
         scaled_critic_loss = critic_loss / self.gradient_accumulation_steps
         scaled_critic_loss.backward()
         critic_log_dict.update({"critic_loss": critic_loss,
                                 "critic_grad_norm": torch.tensor(0.0, device=self.device)})
 
         return critic_log_dict
+
+    def _set_train_progress(self, stage):
+        if self.is_main_process and self._train_progress is not None:
+            self._train_progress.set_postfix_str(stage, refresh=True)
 
     def generate_video(self, pipeline, num_frames, prompts, image=None, latents_only=False):
         batch_size = len(prompts)
@@ -1293,6 +1306,15 @@ class Trainer:
     
     def train(self):
         start_step = self.step
+        show_progress = os.environ.get("LLV2_TRAIN_PROGRESS", "1") != "0"
+        self._train_progress = tqdm(
+            total=int(self.config.max_iters),
+            initial=min(self.step, int(self.config.max_iters)),
+            desc="[train]",
+            unit="step",
+            dynamic_ncols=True,
+            disable=not (self.is_main_process and show_progress),
+        )
         try:
             while True:
                 # Check if we should train generator on this optimization step
@@ -1307,6 +1329,10 @@ class Trainer:
                 accumulated_critic_logs = []
 
                 for accumulation_step in range(self.gradient_accumulation_steps):
+                    self._set_train_progress(
+                        f"step {self.step}: accumulation "
+                        f"{accumulation_step + 1}/{self.gradient_accumulation_steps}"
+                    )
                     batch = next(self.dataloader)
 
                     # Train generator (if needed)
@@ -1319,6 +1345,7 @@ class Trainer:
                     accumulated_critic_logs.append(extra_crit)
 
                 # Compute grad norm and update parameters
+                self._set_train_progress(f"step {self.step}: optimizer")
                 if TRAIN_GENERATOR:
                     generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
                     generator_log_dict = merge_dict_list(accumulated_generator_logs)
@@ -1338,6 +1365,8 @@ class Trainer:
 
                 # Increment the step since we finished gradient update
                 self.step += 1
+                if self.is_main_process:
+                    self._train_progress.update(1)
 
                 # Create EMA params (if not already created)
                 if (self.step >= self.config.ema_start_step) and \
@@ -1392,9 +1421,9 @@ class Trainer:
                     self.previous_time = current_time
                     # Log training progress
                     if TRAIN_GENERATOR and generator_log_dict:
-                        print(f"step {self.step}, per iteration time {iteration_time}, generator_loss {generator_log_dict['generator_loss'].mean().item()}, generator_grad_norm {generator_log_dict['generator_grad_norm'].mean().item()}, dmdtrain_gradient_norm {generator_log_dict['dmdtrain_gradient_norm'].mean().item()}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
+                        self._train_progress.write(f"step {self.step}, per iteration time {iteration_time}, generator_loss {generator_log_dict['generator_loss'].mean().item()}, generator_grad_norm {generator_log_dict['generator_grad_norm'].mean().item()}, dmdtrain_gradient_norm {generator_log_dict['dmdtrain_gradient_norm'].mean().item()}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
                     else:
-                        print(f"step {self.step}, per iteration time {iteration_time}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
+                        self._train_progress.write(f"step {self.step}, per iteration time {iteration_time}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
 
                 # ---------------------------------------- Visualization ---------------------------------------------------
 
@@ -1409,6 +1438,11 @@ class Trainer:
             print(f"[ERROR] [Rank {dist.get_rank()}] Exception traceback:", flush=True)
             import traceback
             traceback.print_exc()
+            raise
+        finally:
+            if self._train_progress is not None:
+                self._train_progress.close()
+                self._train_progress = None
 
     def _configure_lora_for_model(self, transformer, model_name):
         """Configure LoRA for a WanDiffusionWrapper model"""
