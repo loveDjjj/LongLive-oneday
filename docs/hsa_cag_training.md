@@ -29,7 +29,7 @@
 bash scripts/prepare_hsa_training_data.sh
 ```
 
-脚本会下载 `gdhe17/Self-Forcing/vidprom_filtered_extended.txt`，校验 SHA256，去重，并移除与 VBench Prompt 规范化后完全相同的样本。预期得到 `248217` 条训练 Prompt。数据来源和过滤规则见 `data/train/README.md`。
+脚本默认离线运行。如果已存在并通过 SHA256 和数量校验的 `prompts_train.txt`，会直接复用且不会发起任何网络请求；否则会查找本地 `source_prompts.txt` 或 `vidprom_filtered_extended.txt`，完成去重并移除与 VBench Prompt 规范化后完全相同的样本。也可以通过 `SOURCE_FILE=/path/to/vidprom_filtered_extended.txt` 指定本地文件。只有显式设置 `ALLOW_DOWNLOAD=1` 时才会访问 Hugging Face。预期得到 `248217` 条训练 Prompt。数据来源和过滤规则见 `data/train/README.md`。
 
 ## 启动训练
 

@@ -7,10 +7,15 @@ Light-Forcing/Self-Forcing prompt corpus with:
 bash scripts/prepare_hsa_training_data.sh
 ```
 
-This downloads `gdhe17/Self-Forcing/vidprom_filtered_extended.txt`, verifies
-SHA256 `7896742f468bc8aef9e4547424d1ce0a951acdb2a82233790155401a99bf5aa5`,
-deduplicates prompts, and removes normalized exact overlaps with the complete
-standard and augmented VBench prompt files.
+The script is offline by default. It first reuses a validated
+`prompts_train.txt`, then looks for a local `source_prompts.txt` or
+`vidprom_filtered_extended.txt`. A different local file can be selected with
+`SOURCE_FILE=/path/to/vidprom_filtered_extended.txt`. Only
+`ALLOW_DOWNLOAD=1 bash scripts/prepare_hsa_training_data.sh` is allowed to
+access Hugging Face. The source SHA256 is
+`7896742f468bc8aef9e4547424d1ce0a951acdb2a82233790155401a99bf5aa5`.
+The preparation step deduplicates prompts and removes normalized exact
+overlaps with the complete standard and augmented VBench prompt files.
 
 Expected output is 248,217 prompts with SHA256
 `c5ca345c5cb83db295dee0dda0f06530032e5ea2fe0e83c6fe686a4111b02623`.
