@@ -233,6 +233,12 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         num_output_frames = (
             num_frames if clamp_i2v_first_chunk else num_frames + num_input_frames
         )
+        dit_model = self._dit_model
+        if (
+            hasattr(dit_model, "configure_sparse_attention")
+            and getattr(dit_model, "sparse_config", {}).get("enabled", False)
+        ):
+            dit_model.configure_sparse_attention(num_output_frames)
         conditional_dict = self.text_encoder(
             text_prompts=text_prompts[0]
         )

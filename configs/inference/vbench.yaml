@@ -77,4 +77,14 @@ presets:
 sparsity:
   enabled: false
   method: dense
-  options: {}
+  options:
+    sparsity: 0.85
+    sparsity_base: 0.95
+    block_q: 40
+    block_k: 40
+    keep_frames: 6
+    keep_sink: 1
+    keep_near: 2
+    dense_current: true
+    min_sparse_history_frames: 2
+    query_block_batch: 2

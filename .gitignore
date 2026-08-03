@@ -16,6 +16,8 @@ runs/
 wandb/
 debug_save/
 pretrained/
+data/train/**
+!data/train/README.md
 .codex/
 .claude/
 

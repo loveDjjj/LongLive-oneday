@@ -294,6 +294,7 @@ class WanDiffusionWrapper(torch.nn.Module):
             rope_method="linear",
             original_seq_len=None,
             model_root=None,
+            sparse_config=None,
     ):
         super().__init__()
         self.model_root = _resolve_wan_model_root(model_name, model_root)
@@ -301,7 +302,8 @@ class WanDiffusionWrapper(torch.nn.Module):
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
                 self.model_root, local_attn_size=local_attn_size, sink_size=sink_size,
-                num_frame_per_block=num_frame_per_block)
+                num_frame_per_block=num_frame_per_block,
+                sparse_config=sparse_config)
         else:
             self.model = WanModel.from_pretrained(self.model_root)
         self.model.eval()

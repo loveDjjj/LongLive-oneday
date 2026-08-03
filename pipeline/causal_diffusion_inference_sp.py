@@ -39,6 +39,7 @@ class SPWanDiffusionWrapper5B(torch.nn.Module):
         t_scale=1.0,
         rope_method="linear",
         original_seq_len=None,
+        sparse_config=None,
     ):
         super().__init__()
         if model_name != "Wan2.2-TI2V-5B":
@@ -58,6 +59,7 @@ class SPWanDiffusionWrapper5B(torch.nn.Module):
             local_attn_size=local_attn_size,
             sink_size=sink_size,
             num_frame_per_block=num_frame_per_block,
+            sparse_config=sparse_config,
         )
         self.model.eval()
         self.model.t_scale = t_scale
@@ -185,6 +187,7 @@ class CausalDiffusionInferencePipelineSP(CausalDiffusionInferencePipeline):
                 local_attn_size=_model_kw(model_kwargs, "local_attn_size", -1),
                 sink_size=_model_kw(model_kwargs, "sink_size", 0),
                 num_frame_per_block=getattr(args, "num_frame_per_block", 1),
+                sparse_config=_model_kw(model_kwargs, "sparse_config", None),
                 t_scale=getattr(args, "t_scale", 1.0),
                 rope_method=getattr(args, "rope_method", "linear"),
                 original_seq_len=getattr(args, "original_seq_len", None),

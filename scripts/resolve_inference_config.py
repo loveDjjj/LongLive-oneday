@@ -57,6 +57,25 @@ def _save(config: dict, output: Path | None) -> None:
     OmegaConf.save(OmegaConf.create(config), output)
 
 
+def _sparse_model_config(sparsity) -> dict | None:
+    method_override = os.environ.get("LONGLIVE_SPARSE_METHOD", "").strip()
+    enabled = bool(sparsity.enabled) or bool(method_override)
+    if not enabled:
+        return None
+    method = method_override or str(sparsity.method)
+    if method != "hsa_cag":
+        raise ValueError(f"unsupported sparse attention method={method!r}")
+    options = OmegaConf.to_container(sparsity.options, resolve=True)
+    return {"enabled": True, **options}
+
+
+def _sparse_method(sparsity) -> str:
+    method_override = os.environ.get("LONGLIVE_SPARSE_METHOD", "").strip()
+    if method_override:
+        return method_override
+    return str(sparsity.method) if bool(sparsity.enabled) else "dense"
+
+
 def resolve_msprof(args) -> dict:
     config = _load(args.config)
     preset = _require_preset(config, args.preset)
@@ -88,14 +107,18 @@ def resolve_msprof(args) -> dict:
     vae_device = f"npu:{nproc}" if async_vae else None
     output_folder = args.output_folder or "videos/msprof"
     model = config.model
+    model_kwargs = {
+        "model_name": str(model.name),
+        "model_root": _model_root(str(model.root)),
+        "timestep_shift": float(model.timestep_shift),
+        "num_frame_per_block": int(model.num_frame_per_block),
+        "local_attn_size": int(model.local_attn_size),
+    }
+    sparse_config = _sparse_model_config(config.sparsity)
+    if sparse_config is not None:
+        model_kwargs["sparse_config"] = sparse_config
     resolved = {
-        "model_kwargs": {
-            "model_name": str(model.name),
-            "model_root": _model_root(str(model.root)),
-            "timestep_shift": float(model.timestep_shift),
-            "num_frame_per_block": int(model.num_frame_per_block),
-            "local_attn_size": int(model.local_attn_size),
-        },
+        "model_kwargs": model_kwargs,
         "sp_size": sp_size,
         "dp_size": dp_size,
         "auto_sp_remainder": False,
@@ -141,7 +164,7 @@ def resolve_msprof(args) -> dict:
     _save(resolved, args.output)
 
     pixel_frames = (frames - 1) * 4 + 1
-    sparse_method = str(config.sparsity.method)
+    sparse_method = _sparse_method(config.sparsity)
     metadata = {
         "task": "msprof",
         "engine": "longlive2",
@@ -198,14 +221,18 @@ def resolve_vbench(args) -> dict:
         if (pixel_frames - 1) % 4 != 0:
             raise ValueError("LongLive pixel_frames must satisfy (pixel_frames - 1) % 4 == 0")
         latent_frames = (pixel_frames - 1) // 4 + 1
+        model_kwargs = {
+            "model_name": str(engine.model_name),
+            "model_root": model_root,
+            "timestep_shift": float(engine.timestep_shift),
+            "num_frame_per_block": int(engine.num_frame_per_block),
+            "local_attn_size": int(engine.local_attn_size),
+        }
+        sparse_config = _sparse_model_config(config.sparsity)
+        if sparse_config is not None:
+            model_kwargs["sparse_config"] = sparse_config
         resolved = {
-            "model_kwargs": {
-                "model_name": str(engine.model_name),
-                "model_root": model_root,
-                "timestep_shift": float(engine.timestep_shift),
-                "num_frame_per_block": int(engine.num_frame_per_block),
-                "local_attn_size": int(engine.local_attn_size),
-            },
+            "model_kwargs": model_kwargs,
             "sp_size": sp_size,
             "dp_size": dp_size,
             "auto_sp_remainder": False,
@@ -243,6 +270,8 @@ def resolve_vbench(args) -> dict:
             "logging": {"seed": seed},
         }
     elif engine_name == "wan22":
+        if _sparse_model_config(config.sparsity) is not None:
+            raise ValueError("HSA+CAG is implemented for LongLive2 causal inference only")
         latent_frames = None
         resolved = {
             "model_kwargs": {
@@ -278,7 +307,7 @@ def resolve_vbench(args) -> dict:
         raise ValueError(f"unsupported VBench engine={engine_name!r}")
 
     _save(resolved, args.output)
-    sparse_method = str(config.sparsity.method)
+    sparse_method = _sparse_method(config.sparsity)
     metadata = {
         "task": "vbench",
         "preset": args.preset,

@@ -91,7 +91,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
     """Causal self-attention with Ulysses sequence/head exchange."""
 
     def __init__(self, dim, num_heads, local_attn_size=-1, sink_size=0,
-                 qk_norm=True, eps=1e-6):
+                 sparse_config=None, qk_norm=True, eps=1e-6):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -100,6 +100,9 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
         self.global_sink_size = 0
+        from wan_5b.modules.sparse_attention import SparseAttentionConfig
+        self.sparse_config = dict(sparse_config or {})
+        self._sparse_config = SparseAttentionConfig.from_mapping(self.sparse_config)
         self.qk_norm = qk_norm
         self.eps = eps
 
@@ -117,6 +120,11 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def set_sparse_config(self, sparse_config):
+        from wan_5b.modules.sparse_attention import SparseAttentionConfig
+        self.sparse_config = dict(sparse_config or {})
+        self._sparse_config = SparseAttentionConfig.from_mapping(self.sparse_config)
 
     def forward(self, x, seq_lens, grid_sizes, freqs, kv_cache=None,
                 current_start=0, cache_start=None, t_scale=1.0,
@@ -210,7 +218,18 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             raise NotImplementedError("use_relative_rope is not implemented for SP inference.")
 
         with NVTXRange("ulysses_cached_attention"):
-            out_heads = attention(roped_q, k_full, v_full, causal=False)
+            if self._sparse_config.enabled:
+                from wan_5b.modules.sparse_attention import hierarchical_sparse_attention
+                num_new_frames = max(1, s_total // frame_seqlen)
+                chunk_id = current_start_frame // num_new_frames
+                out_heads = hierarchical_sparse_attention(
+                    roped_q, k_full, v_full,
+                    frame_seq=frame_seqlen,
+                    chunk_id=chunk_id,
+                    sparse_config=self._sparse_config,
+                )
+            else:
+                out_heads = attention(roped_q, k_full, v_full, causal=False)
         with NVTXRange("ulysses_head_to_seq"):
             out = ulysses_head_to_seq(out_heads)
         with NVTXRange("ulysses_out_proj"):
@@ -333,11 +352,12 @@ class UlyssesCausalWanSelfAttention(nn.Module):
 
 class UlyssesCausalWanAttentionBlock(nn.Module):
     def __init__(self, dim, ffn_dim, num_heads, local_attn_size=-1,
-                 sink_size=0, qk_norm=True, cross_attn_norm=False, eps=1e-6):
+                 sink_size=0, sparse_config=None, qk_norm=True,
+                 cross_attn_norm=False, eps=1e-6):
         super().__init__()
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = UlyssesCausalWanSelfAttention(
-            dim, num_heads, local_attn_size, sink_size, qk_norm, eps
+            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm, eps
         )
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = MultiShotT2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
@@ -450,6 +470,7 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
                  in_dim=48, dim=3072, ffn_dim=14336, freq_dim=256,
                  text_dim=4096, out_dim=48, num_heads=24, num_layers=30,
                  local_attn_size=-1, sink_size=0, num_frame_per_block=1,
+                 sparse_config=None,
                  qk_norm=True, cross_attn_norm=True, eps=1e-6):
         super().__init__()
         assert model_type in ["t2v", "i2v", "ti2v"]
@@ -466,6 +487,15 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.num_layers = num_layers
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
+        self.sparse_config = dict(sparse_config or {})
+        if self.sparse_config.get("enabled") and self.sparse_config.get("num_output_frames"):
+            from wan_5b.modules.sparse_attention import with_cag_schedule
+            self.sparse_config = with_cag_schedule(
+                self.sparse_config,
+                num_output_frames=int(self.sparse_config["num_output_frames"]),
+                num_frame_per_block=int(num_frame_per_block),
+                local_attn_size=int(local_attn_size),
+            )
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
@@ -479,7 +509,7 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList([
             UlyssesCausalWanAttentionBlock(
                 dim, ffn_dim, num_heads, local_attn_size, sink_size,
-                qk_norm, cross_attn_norm, eps,
+                self.sparse_config, qk_norm, cross_attn_norm, eps,
             )
             for _ in range(num_layers)
         ])
@@ -501,6 +531,17 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.original_seq_len = None
         self.rope_temporal_offset = 0.0
         self.kv_quant_config = None
+
+    def configure_sparse_attention(self, num_output_frames):
+        from wan_5b.modules.sparse_attention import with_cag_schedule
+        self.sparse_config = with_cag_schedule(
+            self.sparse_config,
+            num_output_frames=int(num_output_frames),
+            num_frame_per_block=int(self.num_frame_per_block),
+            local_attn_size=int(self.local_attn_size),
+        )
+        for block in self.blocks:
+            block.self_attn.set_sparse_config(self.sparse_config)
 
     def forward(self, x, t, context, seq_len, clip_fea=None, y=None,
                 kv_cache=None, crossattn_cache=None, current_start=0,

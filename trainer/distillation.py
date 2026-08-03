@@ -84,9 +84,6 @@ class Trainer:
         else:
             raise ValueError(f"Unsupported distribution matching loss: {config.distribution_loss}")
 
-        # Save pretrained model state_dicts to CPU
-        self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
-
         # ================================= NVFP4 Quantized Training / Inference =================================
         # `generator_quant` is the preferred student flag; `model_quant` is kept
         # as a legacy alias used by earlier Sage configs.

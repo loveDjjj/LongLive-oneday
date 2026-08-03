@@ -97,6 +97,10 @@ configs are intentionally not shipped on this Ascend-only branch.
 
 LongLive2.0 supports both T2V and I2V training. Each modality follows the same two-stage recipe: AR teacher-forcing training first, then DMD distillation from the AR checkpoint.
 
+The Ascend HSA+CAG sparse-attention adaptation, prompt preparation, DMD recipe,
+and dense/sparse evaluation procedure are documented in
+[`docs/hsa_cag_training.md`](docs/hsa_cag_training.md).
+
 ### T2V Training
 
 ```bash

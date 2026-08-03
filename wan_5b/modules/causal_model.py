@@ -315,6 +315,7 @@ class CausalWanSelfAttention(nn.Module):
                  num_heads,
                  local_attn_size=-1,
                  sink_size=0,
+                 sparse_config=None,
                  qk_norm=True,
                  eps=1e-6):
         assert dim % num_heads == 0
@@ -325,6 +326,9 @@ class CausalWanSelfAttention(nn.Module):
         self.local_attn_size = local_attn_size if local_attn_size != -1 else 24
         self.sink_size = sink_size
         self.global_sink_size = 0
+        from .sparse_attention import SparseAttentionConfig
+        self.sparse_config = dict(sparse_config or {})
+        self._sparse_config = SparseAttentionConfig.from_mapping(self.sparse_config)
         self.qk_norm = qk_norm
         self.eps = eps
         self.max_attention_size = 24 * 880 if local_attn_size == -1 else local_attn_size * 880
@@ -336,6 +340,11 @@ class CausalWanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def set_sparse_config(self, sparse_config):
+        from .sparse_attention import SparseAttentionConfig
+        self.sparse_config = dict(sparse_config or {})
+        self._sparse_config = SparseAttentionConfig.from_mapping(self.sparse_config)
 
     def forward(
         self,
@@ -789,9 +798,29 @@ class CausalWanSelfAttention(nn.Module):
                         method=method, original_seq_len=original_seq_len,
                     ).type_as(v)
 
-                x = attention(roped_query, roped_window_k, window_v)
+                if self._sparse_config.enabled:
+                    from .sparse_attention import hierarchical_sparse_attention
+                    chunk_id = (current_start // frame_seqlen) // max(num_new_frames, 1)
+                    x = hierarchical_sparse_attention(
+                        roped_query, roped_window_k, window_v,
+                        frame_seq=frame_seqlen,
+                        chunk_id=chunk_id,
+                        sparse_config=self._sparse_config,
+                    )
+                else:
+                    x = attention(roped_query, roped_window_k, window_v)
             else:
-                x = attention(roped_query, window_k, window_v)
+                if self._sparse_config.enabled:
+                    from .sparse_attention import hierarchical_sparse_attention
+                    chunk_id = (current_start // frame_seqlen) // max(num_new_frames, 1)
+                    x = hierarchical_sparse_attention(
+                        roped_query, window_k, window_v,
+                        frame_seq=frame_seqlen,
+                        chunk_id=chunk_id,
+                        sparse_config=self._sparse_config,
+                    )
+                else:
+                    x = attention(roped_query, window_k, window_v)
 
         # output
         x = x.flatten(2)
@@ -812,6 +841,7 @@ class CausalWanAttentionBlock(nn.Module):
                  num_heads,
                  local_attn_size=-1,
                  sink_size=0,
+                 sparse_config=None,
                  qk_norm=True,
                  cross_attn_norm=False,
                  eps=1e-6):
@@ -826,7 +856,9 @@ class CausalWanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = CausalWanSelfAttention(dim, num_heads, local_attn_size, sink_size, qk_norm, eps)
+        self.self_attn = CausalWanSelfAttention(
+            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm, eps
+        )
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -999,6 +1031,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  local_attn_size=-1,
                  sink_size=0,
                  num_frame_per_block=1,
+                 sparse_config=None,
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6):
@@ -1057,6 +1090,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_layers = num_layers
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
+        self.sparse_config = dict(sparse_config or {})
+        if self.sparse_config.get("enabled") and self.sparse_config.get("num_output_frames"):
+            from .sparse_attention import with_cag_schedule
+            self.sparse_config = with_cag_schedule(
+                self.sparse_config,
+                num_output_frames=int(self.sparse_config["num_output_frames"]),
+                num_frame_per_block=int(num_frame_per_block),
+                local_attn_size=int(local_attn_size),
+            )
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
@@ -1076,7 +1118,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # blocks
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(dim, ffn_dim, num_heads,
-                                  local_attn_size, sink_size, qk_norm, cross_attn_norm, eps)
+                                  local_attn_size, sink_size, self.sparse_config,
+                                  qk_norm, cross_attn_norm, eps)
             for _ in range(num_layers)
         ])
 
@@ -1109,6 +1152,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.original_seq_len = None
         self.rope_temporal_offset = 0.0
         self.kv_quant_config = None
+
+    def configure_sparse_attention(self, num_output_frames):
+        from .sparse_attention import with_cag_schedule
+        self.sparse_config = with_cag_schedule(
+            self.sparse_config,
+            num_output_frames=int(num_output_frames),
+            num_frame_per_block=int(self.num_frame_per_block),
+            local_attn_size=int(self.local_attn_size),
+        )
+        for block in self.blocks:
+            block.self_attn.set_sparse_config(self.sparse_config)
 
     def _set_gradient_checkpointing(self, module, value=False):
         self.gradient_checkpointing = value
