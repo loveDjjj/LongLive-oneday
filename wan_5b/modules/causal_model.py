@@ -17,6 +17,7 @@ from wan_5b.modules.model import (
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 import os
+from dataclasses import dataclass
 import torch.nn as nn
 import torch
 import math
@@ -36,6 +37,76 @@ except ModuleNotFoundError as exc:
 if is_cuda():
     flex_attention = torch.compile(
         flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+
+
+@dataclass(frozen=True)
+class _NpuBlockwiseMask:
+    """Compact mask metadata for the eager Ascend training attention path."""
+
+    mode: str
+    num_frames: int
+    frame_seqlen: int
+    num_frame_per_block: int
+
+
+def _is_npu_device(device: torch.device | str) -> bool:
+    return str(device).split(":", 1)[0] == "npu"
+
+
+def _chunk_ranges(mask: _NpuBlockwiseMask):
+    if mask.mode == "i2v":
+        yield 0, mask.frame_seqlen
+        start_frame = 1
+    else:
+        start_frame = 0
+
+    for frame_start in range(
+        start_frame, mask.num_frames, mask.num_frame_per_block
+    ):
+        frame_end = min(
+            frame_start + mask.num_frame_per_block, mask.num_frames
+        )
+        yield frame_start * mask.frame_seqlen, frame_end * mask.frame_seqlen
+
+
+def _npu_blockwise_attention(q, k, v, mask: _NpuBlockwiseMask):
+    """Execute block-causal training attention without FlexAttention/Triton."""
+    if mask.mode != "teacher":
+        outputs = [
+            attention(q[:, start:end], k[:, :end], v[:, :end])
+            for start, end in _chunk_ranges(mask)
+        ]
+        return torch.cat(outputs, dim=1)
+
+    clean_length = mask.num_frames * mask.frame_seqlen
+    if q.shape[1] != clean_length * 2:
+        raise ValueError(
+            "Teacher-forcing attention expects concatenated clean/noisy tokens; "
+            f"got {q.shape[1]} tokens for clean length {clean_length}."
+        )
+
+    clean_outputs = []
+    noisy_outputs = []
+    for start, end in _chunk_ranges(mask):
+        clean_outputs.append(
+            attention(q[:, start:end], k[:, :end], v[:, :end])
+        )
+        noisy_k = torch.cat(
+            [k[:, :start], k[:, clean_length + start:clean_length + end]],
+            dim=1,
+        )
+        noisy_v = torch.cat(
+            [v[:, :start], v[:, clean_length + start:clean_length + end]],
+            dim=1,
+        )
+        noisy_outputs.append(
+            attention(
+                q[:, clean_length + start:clean_length + end],
+                noisy_k,
+                noisy_v,
+            )
+        )
+    return torch.cat(clean_outputs + noisy_outputs, dim=1)
 
 
 from utils.position_embedding_utils import (
@@ -390,91 +461,72 @@ class CausalWanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
 
         if kv_cache is None:
-            # Teacher-forcing training doubles sequence length with clean/noisy halves.
-            is_tf = (s == seq_lens[0].item() * 2)
+            is_tf = s == seq_lens[0].item() * 2
             if is_tf:
-                q_chunk = torch.chunk(q, 2, dim=1)
-                k_chunk = torch.chunk(k, 2, dim=1)
-                roped_query = []
-                roped_key = []
-                # rope should be same for clean and noisy parts
-                for ii in range(2):
-                    rq = rope_apply(q_chunk[ii], grid_sizes, freqs, t_scale=t_scale,
-                                    method=method, original_seq_len=original_seq_len,
-                                    temporal_offset=temporal_offset).type_as(v)
-                    rk = rope_apply(k_chunk[ii], grid_sizes, freqs, t_scale=t_scale,
-                                    method=method, original_seq_len=original_seq_len,
-                                    temporal_offset=temporal_offset).type_as(v)
-                    roped_query.append(rq)
-                    roped_key.append(rk)
-
-                roped_query = torch.cat(roped_query, dim=1)
-                roped_key = torch.cat(roped_key, dim=1)
-
-                padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
-                padded_roped_query = torch.cat(
-                    [roped_query,
-                     torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
-                                 device=q.device, dtype=v.dtype)],
-                    dim=1
-                )
-
-                padded_roped_key = torch.cat(
-                    [roped_key, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
-                                            device=k.device, dtype=v.dtype)],
-                    dim=1
-                )
-
-                padded_v = torch.cat(
-                    [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
-                                    device=v.device, dtype=v.dtype)],
-                    dim=1
-                )
-
-                x = flex_attention(
-                    query=padded_roped_query.transpose(2, 1),
-                    key=padded_roped_key.transpose(2, 1),
-                    value=padded_v.transpose(2, 1),
-                    block_mask=block_mask
-                )
-                x = x[:, :, :(-padded_length)] if padded_length > 0 else x
-                x = x.transpose(2, 1)
-
+                q_parts = torch.chunk(q, 2, dim=1)
+                k_parts = torch.chunk(k, 2, dim=1)
+                roped_query = torch.cat([
+                    rope_apply(
+                        part, grid_sizes, freqs, t_scale=t_scale,
+                        method=method, original_seq_len=original_seq_len,
+                        temporal_offset=temporal_offset,
+                    ).type_as(v)
+                    for part in q_parts
+                ], dim=1)
+                roped_key = torch.cat([
+                    rope_apply(
+                        part, grid_sizes, freqs, t_scale=t_scale,
+                        method=method, original_seq_len=original_seq_len,
+                        temporal_offset=temporal_offset,
+                    ).type_as(v)
+                    for part in k_parts
+                ], dim=1)
             else:
-                roped_query = rope_apply(q, grid_sizes, freqs, t_scale=t_scale,
-                                         method=method, original_seq_len=original_seq_len,
-                                         temporal_offset=temporal_offset).type_as(v)
-                roped_key = rope_apply(k, grid_sizes, freqs, t_scale=t_scale,
-                                       method=method, original_seq_len=original_seq_len,
-                                       temporal_offset=temporal_offset).type_as(v)
+                roped_query = rope_apply(
+                    q, grid_sizes, freqs, t_scale=t_scale,
+                    method=method, original_seq_len=original_seq_len,
+                    temporal_offset=temporal_offset,
+                ).type_as(v)
+                roped_key = rope_apply(
+                    k, grid_sizes, freqs, t_scale=t_scale,
+                    method=method, original_seq_len=original_seq_len,
+                    temporal_offset=temporal_offset,
+                ).type_as(v)
 
+            if isinstance(block_mask, _NpuBlockwiseMask):
+                x = _npu_blockwise_attention(
+                    roped_query, roped_key, v, block_mask
+                )
+            else:
                 padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
-                padded_roped_query = torch.cat(
-                    [roped_query,
-                     torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
-                                 device=q.device, dtype=v.dtype)],
-                    dim=1
-                )
-
-                padded_roped_key = torch.cat(
-                    [roped_key, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
-                                            device=k.device, dtype=v.dtype)],
-                    dim=1
-                )
-
-                padded_v = torch.cat(
-                    [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
-                                    device=v.device, dtype=v.dtype)],
-                    dim=1
-                )
-
+                padded_roped_query = torch.cat([
+                    roped_query,
+                    torch.zeros(
+                        q.shape[0], padded_length, q.shape[2], q.shape[3],
+                        device=q.device, dtype=v.dtype,
+                    ),
+                ], dim=1)
+                padded_roped_key = torch.cat([
+                    roped_key,
+                    torch.zeros(
+                        k.shape[0], padded_length, k.shape[2], k.shape[3],
+                        device=k.device, dtype=v.dtype,
+                    ),
+                ], dim=1)
+                padded_v = torch.cat([
+                    v,
+                    torch.zeros(
+                        v.shape[0], padded_length, v.shape[2], v.shape[3],
+                        device=v.device, dtype=v.dtype,
+                    ),
+                ], dim=1)
                 x = flex_attention(
                     query=padded_roped_query.transpose(2, 1),
                     key=padded_roped_key.transpose(2, 1),
                     value=padded_v.transpose(2, 1),
-                    block_mask=block_mask
+                    block_mask=block_mask,
                 )
-                x = x[:, :, :(-padded_length)] if padded_length > 0 else x
+                x = x[:, :, :-padded_length] if padded_length > 0 else x
                 x = x.transpose(2, 1)
         else:
             # iter-31: read Python ints from module-level dict (set by
@@ -1180,6 +1232,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         The first frame is separated out to support I2V generation
         We use flexattention to construct the attention mask
         """
+        if _is_npu_device(device):
+            return _NpuBlockwiseMask(
+                mode="i2v",
+                num_frames=num_frames,
+                frame_seqlen=frame_seqlen,
+                num_frame_per_block=num_frame_per_block,
+            )
+
         total_length = num_frames * frame_seqlen
 
         # we do right padding to get to a multiple of 128
@@ -1223,7 +1283,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         a token can attend to all tokens before the end of its current
         num_frame_per_block chunk.
         """
-        print(f"num_frame_per_block: {num_frame_per_block}")
+        if _is_npu_device(device):
+            return _NpuBlockwiseMask(
+                mode="causal",
+                num_frames=num_frames,
+                frame_seqlen=frame_seqlen,
+                num_frame_per_block=num_frame_per_block,
+            )
+
         total_length = num_frames * frame_seqlen
         padded_length = math.ceil(total_length / 128) * 128 - total_length
 
@@ -1269,6 +1336,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         num_frame_per_block: int = 1,
         batch_size: int | None = None,
     ):
+        if _is_npu_device(device):
+            return _NpuBlockwiseMask(
+                mode="teacher",
+                num_frames=num_frames,
+                frame_seqlen=frame_seqlen,
+                num_frame_per_block=num_frame_per_block,
+            )
+
         total_length = num_frames * frame_seqlen * 2
         padded_length = math.ceil(total_length / 128) * 128 - total_length
 
