@@ -1,62 +1,39 @@
-# LongLive2 HSA+CAG on Ascend NPU
+# 昇腾 NPU 上的 LongLive2 HSA+CAG
 
-This branch adds a Light-Forcing-style sparse post-training and inference path
-without replacing LongLive's existing causal KV cache, Ulysses SP, checkpoint,
-or asynchronous VAE implementations.
+本分支新增了与 Light Forcing 类似的稀疏后训练和推理路径，同时保留 LongLive 现有的因果 KV Cache、Ulysses SP、检查点格式和异步 VAE 实现。
 
-## What Is Implemented
+## 已实现功能
 
-- **CAG:** each generated chunk receives a concrete sparsity value. The first
-  chunk is dense and later chunks follow the `base - beta/sqrt(frames)` schedule
-  while matching the configured average historical sparsity budget.
-- **HSA frame routing:** every query block keeps sink frames, recent frames, and
-  the most relevant middle historical frames.
-- **HSA block routing:** token blocks are ranked only inside the retained
-  historical frames. Current-chunk blocks remain dense by default.
-- **Ascend backend:** selected K/V blocks are gathered and evaluated with
-  PyTorch SDPA. Several query blocks are folded into one SDPA batch to reduce
-  NPU launch overhead. Routing is non-differentiable; gradients still flow
-  through selected Q/K/V attention computation.
-- **Training:** prompt-only DMD post-training uses the sparse LongLive generator,
-  a dense real-score teacher, and the existing trainable fake-score critic.
-- **Inference:** both normal cached attention and Ulysses SP cached attention
-  accept the same sparse configuration.
+- CAG Chunk 稀疏率：第一个 Chunk 保持 Dense，后续 Chunk 的历史 KV 稀疏率按 `base - beta / sqrt(frames)` 增长，并满足配置的平均历史稀疏率目标。
+- HSA 帧级路由：保留 Sink 帧、最近帧，以及与当前 Query 最相关的中间历史帧。
+- HSA Block 级路由：在选中的历史帧内继续筛选 Token Block，当前 Chunk 始终保持完整可见。
+- 昇腾执行后端：先 Gather 选中的 K/V，再调用 PyTorch SDPA；支持 Query Block 批处理。路由选择本身不可微，但梯度可以通过被选中的 Q/K/V 传播。
+- 训练：仅使用 Prompt 的 DMD 后训练，包含稀疏 Generator、Dense Real Teacher 和 Fake Critic。
+- 推理：普通推理和 Ulysses SP 的 Cached Attention 路径均支持 HSA+CAG。
 
-The NPU backend is a correctness and training backend, not a fused equivalent
-of Light Forcing's Triton/FA4 CUDA kernel. It performs real sparse attention
-compute, but profiling is required before claiming end-to-end acceleration.
+当前 NPU 后端优先保证正确性和可训练性，并不是 Light Forcing 中融合后的 Triton/FA4 Kernel。它会真实减少参与注意力计算的历史 K/V Token，但最终加速效果仍需通过 msprof 验证，不能仅根据理论稀疏率判断。
 
-This is an adaptation rather than a bit-for-bit copy of the paper setup.
-Upstream Light Forcing trains a causal Wan2.1 student against non-causal
-Wan2.1-14B score models. This repository currently supports the Wan2.2-TI2V-5B
-all-causal DMD stack, so the dense teacher and critic are Wan2.2-5B. It also
-uses LongLive2's native 8-latent chunk and 44x80 latent resolution. The default
-0.85/0.95 sparsity pair is deliberately more conservative than the paper's
-short-video 0.88/0.98 pair for the first NPU run.
+本实现相对原版 Light Forcing 做了以下适配：
 
-## Data
+- 原论文使用因果 Wan2.1 Student，并使用非因果 Wan2.1-14B 提供 Score；本项目使用全因果 Wan2.2-TI2V-5B Teacher/Critic，以兼容现有 LongLive2 检查点和训练代码。
+- 保留项目原生的 8 帧 Latent Chunk 和 `44x80` Token Grid。
+- 默认平均历史稀疏率和末期基础稀疏率分别设为 `0.85`、`0.95`，比论文中的 `0.88`、`0.98` 更保守，便于先验证 NPU 稳定性和质量。
 
-The training path uses text prompts only. It does not download videos or stored
-VAE latents: the student starts from noise and creates its own intermediate
-latent trajectory online, while DMD compares dense-teacher and fake-critic
-scores on noisy versions of that trajectory.
+## 训练数据
 
-Prepare the exact prompt corpus used by the upstream Self-Forcing/Light-Forcing
-recipe:
+训练只需要 Prompt，不需要读取真实视频或预先保存的 VAE Latent。Student 从纯噪声开始在线生成中间状态，DMD Loss 比较 Real Teacher 与 Fake Critic 在这些状态上的 Score。
+
+准备数据：
 
 ```bash
 bash scripts/prepare_hsa_training_data.sh
 ```
 
-The script downloads `gdhe17/Self-Forcing/vidprom_filtered_extended.txt`, checks
-its SHA256, removes duplicates, and removes normalized exact VBench overlaps.
-The expected result is 248,217 prompts. See `data/train/README.md` for license
-and checksum details.
+脚本会下载 `gdhe17/Self-Forcing/vidprom_filtered_extended.txt`，校验 SHA256，去重，并移除与 VBench Prompt 规范化后完全相同的样本。预期得到 `248217` 条训练 Prompt。数据来源和过滤规则见 `data/train/README.md`。
 
-## Train
+## 启动训练
 
-Start with a short smoke run. The 12 processes are distributed training/FSDP
-workers; this trainer does not use inference SP/DP layout variables.
+先运行 10 Iteration 的 Smoke Test。这里的 12 个进程是 FSDP Worker，不使用推理阶段的 SP/DP 布局：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
@@ -67,7 +44,7 @@ TRAIN_RUN_NAME=hsa_cag_smoke \
 bash scripts/run_npu_hsa_cag_training.sh
 ```
 
-Then run the 2,000-iteration post-training recipe:
+Smoke Test 通过后启动正式训练：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
@@ -78,15 +55,15 @@ TRAIN_RUN_NAME=hsa_cag_2k \
 bash scripts/run_npu_hsa_cag_training.sh
 ```
 
-Reusing `TRAIN_RUN_NAME=hsa_cag_2k` resumes from the latest checkpoint in that
-log directory. The launcher validates paths, generates a resolved config,
-chooses another local rendezvous port if the preferred one is occupied, and
-reports the effective global batch (`world_size * accumulation * batch_size`).
+复用同一个 `TRAIN_RUN_NAME` 会从该目录中最新的检查点继续训练。启动脚本会记录配置文件、解析后的配置、完整日志和实际使用端口。有效全局 Batch Size 为：
 
-## Merge And Evaluate
+```text
+NPROC_PER_NODE * batch_size * GRADIENT_ACCUMULATION_STEPS
+```
 
-Training checkpoints contain generator and critic LoRA state. Merge the
-generator LoRA before the unified inference scripts:
+## 合并与评测
+
+训练检查点同时包含 Generator LoRA 和 Critic LoRA。评测前只需将 Generator LoRA 合并到 LongLive2 Generator：
 
 ```bash
 /mnt/share/r50063443/conda_envs/longlive/bin/python \
@@ -98,7 +75,7 @@ generator LoRA before the unified inference scripts:
   --device npu:0
 ```
 
-Run a dense control and HSA on the same merged weights:
+使用同一个合并后的检查点分别运行 Dense 对照组和 Sparse 实验组：
 
 ```bash
 LONGLIVE_GENERATOR_CKPT=checkpoints/longlive2_hsa_cag_2k_merged.pt \
@@ -111,7 +88,7 @@ RUN_ID=hsa_cag_sparse \
 bash scripts/run_vbench.sh longlive2_standard_20pct
 ```
 
-The same switch works with msprof:
+使用相同稀疏设置进行 32 秒 msprof 测试：
 
 ```bash
 LONGLIVE_GENERATOR_CKPT=checkpoints/longlive2_hsa_cag_2k_merged.pt \
@@ -119,40 +96,37 @@ LONGLIVE_SPARSE_METHOD=hsa_cag \
 bash scripts/run_msprof.sh 32s
 ```
 
-Compare VBench Total/Quality/Semantic, generation-only latency/FPS, peak HBM,
-FlashAttention/SDPA operator time, and HCCL time. A useful acceptance gate is
-quality loss below 0.5 VBench Total with a repeatable unprofiled speedup.
+重点比较以下指标：
 
-## Tuning
+- VBench Total、Quality 和 Semantic 分数。
+- 无 Profiling 时的生成延迟与 FPS。
+- 峰值 HBM 占用。
+- FlashAttention/SDPA 算子耗时。
+- HCCL 通信耗时。
 
-The main settings are under `sparse_config` in the training YAML and
-`sparsity.options` in the inference YAML:
+建议的第一阶段验收标准是：VBench Total 下降小于 `0.5`，同时在多次无 Profiling 测试中获得可复现的端到端加速。
 
-| Setting | Meaning | Default |
-|---|---|---:|
-| `sparsity` | Average later-chunk historical sparsity target | 0.85 |
-| `sparsity_base` | Late-chunk CAG base sparsity | 0.95 |
-| `block_q`, `block_k` | Router/attention token block sizes | 40 |
-| `keep_frames` | Frames admitted to second-stage routing | 6 |
-| `keep_sink` | Always eligible earliest frames | 1 |
-| `keep_near` | Always eligible most recent history frames | 2 |
-| `dense_current` | Keep all current chunk K/V blocks | true |
-| `query_block_batch` | Query blocks folded into one SDPA batch | 2 |
+## 参数调优
 
-For 44x80 latent resolution, each frame has 880 tokens, so block sizes must
-divide 880. Larger `query_block_batch` reduces launches but raises temporary
-gather memory. Start at 2 on Ascend and profile 1/2/4 before changing sparsity.
+主要参数位于配置文件的 `sparse_config` 和 `sparsity.options`：
 
-## Scope And Limitations
+| 参数 | 含义 | 默认值 |
+| --- | --- | --- |
+| `sparsity` | 后续 Chunk 的平均历史 KV 稀疏率目标 | `0.85` |
+| `sparsity_base` | CAG 后期的基础稀疏率 | `0.95` |
+| `block_q`、`block_k` | 路由和注意力使用的 Token Block 大小 | `40` |
+| `keep_frames` | 进入第二阶段路由的历史帧数量 | `6` |
+| `keep_sink` | 始终可被选中的最早历史帧数量 | `1` |
+| `keep_near` | 始终可被选中的最近历史帧数量 | `2` |
+| `dense_current` | 当前 Chunk 是否保持 Dense | `true` |
+| `query_block_batch` | 单次 SDPA 合并处理的 Query Block 数量 | `2` |
 
-- Zero-shot HSA inference is supported, but DMD post-training is recommended to
-  recover the distribution shift introduced by routing. DMD is not required to
-  make sparse attention execute.
-- The current chunk is dense for stability, so achieved end-to-end FLOP
-  reduction has a floor. The configured sparsity applies to historical blocks.
-- The router uses mean-pooled query/key similarity and `topk`; route decisions
-  do not receive gradients, matching common sparse-routing practice.
-- Training currently uses FSDP data parallelism, not Ulysses sequence-parallel
-  training. Ulysses HSA is implemented for inference.
-- A custom fused Ascend block-sparse attention operator is the next performance
-  step if gather plus SDPA launch overhead dominates msprof results.
+在 `44x80` Grid 下，每个 Latent Frame 包含 `880` 个 Token，因此 Block 大小必须能整除 `880`。增大 `query_block_batch` 可以减少 Kernel Launch 次数，但会增加临时 Gather Tensor 的显存占用。建议在昇腾上从 `2` 开始，并在修改稀疏率之前通过 msprof 对比 `1/2/4`。
+
+## 范围与限制
+
+- HSA+CAG 支持零训练直接推理。DMD 后训练用于补偿稀疏注意力带来的分布偏移，是推荐步骤，但不是启用稀疏推理的必要条件。
+- 当前 Chunk 保持 Dense，因此端到端 FLOPs 存在下限；稀疏主要作用于历史 KV。
+- 当前使用 Mean-pooled Q/K 和 Top-K 完成路由，路由索引不可微。
+- 训练阶段使用 FSDP 数据并行，不使用 Ulysses Sequence Parallel；推理阶段支持 Ulysses HSA。
+- 如果 msprof 显示 Gather 和 SDPA 成为主要瓶颈，下一步应实现昇腾自定义融合 Block-Sparse 算子。
