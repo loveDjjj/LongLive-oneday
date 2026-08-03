@@ -295,12 +295,17 @@ class WanDiffusionWrapper(torch.nn.Module):
             original_seq_len=None,
             model_root=None,
             sparse_config=None,
+            use_ulysses_sp=False,
     ):
         super().__init__()
         self.model_root = _resolve_wan_model_root(model_name, model_root)
 
         if is_causal:
-            self.model = CausalWanModel.from_pretrained(
+            model_cls = CausalWanModel
+            if use_ulysses_sp:
+                from wan_5b.modules.causal_model_sp_ulysses import UlyssesSPCausalWanModel
+                model_cls = UlyssesSPCausalWanModel
+            self.model = model_cls.from_pretrained(
                 self.model_root, local_attn_size=local_attn_size, sink_size=sink_size,
                 num_frame_per_block=num_frame_per_block,
                 sparse_config=sparse_config)

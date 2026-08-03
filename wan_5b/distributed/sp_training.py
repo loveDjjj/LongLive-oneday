@@ -36,6 +36,37 @@ _dp_group = None
 _compiled_flex_attention = None
 
 
+def build_sp_dp_rank_layout(world_size, sp_size):
+    """Return contiguous SP groups and strided DP groups."""
+    world_size = int(world_size)
+    sp_size = int(sp_size)
+    if sp_size <= 0 or world_size % sp_size != 0:
+        raise ValueError(
+            f"world_size ({world_size}) must be divisible by positive sp_size ({sp_size})"
+        )
+    dp_size = world_size // sp_size
+    sp_groups = [
+        list(range(dp_rank * sp_size, (dp_rank + 1) * sp_size))
+        for dp_rank in range(dp_size)
+    ]
+    dp_groups = [
+        [dp_rank * sp_size + sp_rank for dp_rank in range(dp_size)]
+        for sp_rank in range(sp_size)
+    ]
+    return sp_groups, dp_groups
+
+
+def resolve_kv_cache_heads(num_heads, sp_world_size=1):
+    """Return the per-rank attention head count for a Ulysses KV cache."""
+    num_heads = int(num_heads)
+    sp_world_size = int(sp_world_size)
+    if sp_world_size <= 0 or num_heads % sp_world_size != 0:
+        raise ValueError(
+            f"num_heads ({num_heads}) must be divisible by SP size ({sp_world_size})"
+        )
+    return num_heads // sp_world_size
+
+
 def sp_training_sequence_frame_count(config):
     """Frames that are sharded by training sequence parallelism."""
     return int(list(config.image_or_video_shape)[1])

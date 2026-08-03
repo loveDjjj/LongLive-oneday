@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # ---------- User-editable distributed/runtime settings ----------
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-12}"
-export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-6}"
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
+export SP_SIZE="${SP_SIZE:-4}"
+export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29600}"
 export MAX_ITERS="${MAX_ITERS:-2000}"
-export HSA_QUERY_BLOCK_BATCH="${HSA_QUERY_BLOCK_BATCH:-2}"
+export HSA_QUERY_BLOCK_BATCH="${HSA_QUERY_BLOCK_BATCH:-1}"
 export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
 export LLV2_DEVICE="npu"
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
@@ -37,6 +38,11 @@ if (( ${#visible_devices[@]} != NPROC_PER_NODE )); then
     echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE}, but ASCEND_RT_VISIBLE_DEVICES has ${#visible_devices[@]} devices" >&2
     exit 2
 fi
+if (( NPROC_PER_NODE % SP_SIZE != 0 )); then
+    echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE} must be divisible by SP_SIZE=${SP_SIZE}" >&2
+    exit 2
+fi
+DP_SIZE=$((NPROC_PER_NODE / SP_SIZE))
 for required in \
     "${PYTHON}" \
     "${TORCHRUN}" \
@@ -53,9 +59,9 @@ for required in \
 done
 
 PROMPT_COUNT="$(${PYTHON} -c 'import sys; print(sum(bool(x.strip()) for x in open(sys.argv[1], encoding="utf-8")))' "${TRAIN_PROMPTS}")"
-EFFECTIVE_BATCH=$((NPROC_PER_NODE * GRADIENT_ACCUMULATION_STEPS))
+EFFECTIVE_BATCH=$((DP_SIZE * GRADIENT_ACCUMULATION_STEPS))
 echo "[run] config=${CONFIG_PATH}"
-echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} nproc=${NPROC_PER_NODE} effective_batch=${EFFECTIVE_BATCH}"
+echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} nproc=${NPROC_PER_NODE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}"
 echo "[run] prompts=${PROMPT_COUNT} model_root=${MODEL_ROOT}"
 echo "[run] generator_ckpt=${GENERATOR_CKPT}"
 echo "[run] logs=${LOG_DIR}"
@@ -75,6 +81,7 @@ config.checkpoints.generator_ckpt = os.environ["GENERATOR_CKPT"]
 config.data.data_path = os.environ["TRAIN_PROMPTS"]
 config.training.gradient_accumulation_steps = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
 config.training.max_iters = int(os.environ["MAX_ITERS"])
+config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
 query_block_batch = int(os.environ["HSA_QUERY_BLOCK_BATCH"])
 if query_block_batch <= 0:
     raise ValueError("HSA_QUERY_BLOCK_BATCH must be positive")

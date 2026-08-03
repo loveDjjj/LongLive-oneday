@@ -55,6 +55,40 @@ class Trainer:
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
 
+        self.sequence_parallel_size = int(getattr(config, "sequence_parallel_size", 1))
+        if self.world_size % self.sequence_parallel_size != 0:
+            raise ValueError(
+                f"world_size ({self.world_size}) must be divisible by "
+                f"sequence_parallel_size ({self.sequence_parallel_size})"
+            )
+        self.data_parallel_size = self.world_size // self.sequence_parallel_size
+        self.data_parallel_rank = global_rank // self.sequence_parallel_size
+        self.sp_group = None
+        self.dp_group = None
+        if self.sequence_parallel_size > 1:
+            from wan_5b.distributed.sp_training import (
+                build_sp_dp_rank_layout,
+                set_data_parallel_group,
+                set_sequence_parallel_group,
+                validate_sequence_parallel_training_config,
+            )
+            from wan_5b.distributed.sp_ulysses_inference import init_sequence_parallel
+
+            validate_sequence_parallel_training_config(
+                config, self.sequence_parallel_size, config.num_frame_per_block
+            )
+            sp_rank_lists, dp_rank_lists = build_sp_dp_rank_layout(
+                self.world_size, self.sequence_parallel_size
+            )
+            sp_groups = [dist.new_group(ranks=ranks) for ranks in sp_rank_lists]
+            self.sp_group = sp_groups[self.data_parallel_rank]
+            set_sequence_parallel_group(self.sp_group)
+            init_sequence_parallel(group=self.sp_group)
+
+            dp_groups = [dist.new_group(ranks=ranks) for ranks in dp_rank_lists]
+            self.dp_group = dp_groups[global_rank % self.sequence_parallel_size]
+            set_data_parallel_group(self.dp_group)
+
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = current_device()
         self.is_main_process = global_rank == 0
@@ -68,7 +102,15 @@ class Trainer:
             dist.broadcast(random_seed, src=0)
             config.seed = random_seed.item()
 
-        set_seed(config.seed + global_rank)
+        # Ranks in one SP group must sample identical noise/timesteps because
+        # they jointly execute one logical sample.
+        set_seed(config.seed + self.data_parallel_rank)
+
+        if self.is_main_process and self.sequence_parallel_size > 1:
+            print(
+                f"[SP-DP] enabled: SP={self.sequence_parallel_size}, "
+                f"DP={self.data_parallel_size}, world={self.world_size}"
+            )
 
         if self.is_main_process and not self.disable_wandb:
             if getattr(config, "wandb_key", None):
@@ -529,6 +571,8 @@ class Trainer:
         resume_sample_offset = self._resume_sample_offset(config.batch_size)
         sampler = ResumableDistributedSampler(
             dataset,
+            num_replicas=self.data_parallel_size,
+            rank=self.data_parallel_rank,
             shuffle=True,
             drop_last=True,
             seed=int(config.seed),
@@ -1453,7 +1497,10 @@ class Trainer:
         all_causal = getattr(self.config, 'all_causal', False)
         generator_is_causal = getattr(self.config, 'generator_is_causal', True)
         if model_name == 'generator':
-            adapter_target_modules = ['CausalWanAttentionBlock'] if generator_is_causal else ['WanAttentionBlock']
+            adapter_target_modules = (
+                ['CausalWanAttentionBlock', 'UlyssesCausalWanAttentionBlock']
+                if generator_is_causal else ['WanAttentionBlock']
+            )
         elif model_name == 'fake_score':
             adapter_target_modules = ['CausalWanAttentionBlock'] if all_causal else ['WanAttentionBlock']
         else:

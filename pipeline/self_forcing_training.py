@@ -92,7 +92,17 @@ class SelfForcingTrainingPipeline:
         ])
 
     def generate_and_sync_list(self, num_blocks, num_denoising_steps, device):
+        group = None
         rank = dist.get_rank() if dist.is_initialized() else 0
+        src = 0
+        if dist.is_initialized():
+            from wan_5b.distributed.sp_ulysses_inference import (
+                get_sp_group, get_sp_rank, is_sp_enabled,
+            )
+            if is_sp_enabled():
+                group = get_sp_group()
+                rank = get_sp_rank()
+                src = (dist.get_rank() // dist.get_world_size(group)) * dist.get_world_size(group)
 
         if rank == 0:
             # Generate random indices
@@ -107,7 +117,7 @@ class SelfForcingTrainingPipeline:
         else:
             indices = torch.empty(num_blocks, dtype=torch.long, device=device)
         if dist.is_initialized():
-            dist.broadcast(indices, src=0)  # Broadcast the random indices to all ranks
+            dist.broadcast(indices, src=src, group=group)
         return indices.tolist()
 
     def generate_chunk_with_cache(
@@ -705,6 +715,10 @@ class SelfForcingTrainingPipeline:
         # Get the actual number of heads and head dimension from model
         num_heads = self.generator.model.num_heads
         head_dim = self.generator.model.dim // num_heads
+        from wan_5b.distributed.sp_training import resolve_kv_cache_heads
+        from wan_5b.distributed.sp_ulysses_inference import get_sp_world_size, is_sp_enabled
+        if is_sp_enabled():
+            num_heads = resolve_kv_cache_heads(num_heads, get_sp_world_size())
         
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({

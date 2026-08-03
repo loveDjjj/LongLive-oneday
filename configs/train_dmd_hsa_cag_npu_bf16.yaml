@@ -3,6 +3,7 @@
 # provide the DMD supervision. This is prompt-only and does not load videos.
 
 infra:
+  sequence_parallel_size: 4
   sharding_strategy: hybrid_full
   mixed_precision: true
   gradient_checkpointing: true
@@ -28,8 +29,8 @@ model_kwargs:
     keep_near: 2
     dense_current: true
     min_sparse_history_frames: 2
-    # Portable NPU backend batches two routed query blocks per SDPA call.
-    query_block_batch: 2
+    # Keep the portable NPU backend memory-bounded during backward recompute.
+    query_block_batch: 1
     num_output_frames: 32
     num_frame_per_block: 8
     local_attn_size: 32
@@ -72,9 +73,8 @@ training:
   beta1_critic: 0.0
   beta2_critic: 0.999
   batch_size: 1
-  # 12 NPUs x 6 accumulation = effective global batch 72, close to the
-  # Light Forcing global batch 64. Override from the launcher when needed.
-  gradient_accumulation_steps: 6
+  # SP4 x DP4 with 16 accumulation gives effective global batch 64.
+  gradient_accumulation_steps: 16
   ema_weight: 0.99
   ema_start_step: 200
   log_iters: 10

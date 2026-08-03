@@ -33,11 +33,12 @@ bash scripts/prepare_hsa_training_data.sh
 
 ## 启动训练
 
-先运行 10 Iteration 的 Smoke Test。这里的 12 个进程是 FSDP Worker，不使用推理阶段的 SP/DP 布局：
+先运行 10 Iteration 的 Smoke Test。默认使用 16 张卡组成 `SP4 x DP4`：每 4 张卡通过 Ulysses 将生成器的 Sequence/Attention Head 互换，4 个 SP 组分别处理不同 Prompt。Dense Teacher 和 Critic 仍保持原 DMD 计算路径，所有模型继续由 FSDP 分片参数。
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+NPROC_PER_NODE=16 \
+SP_SIZE=4 \
 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=10 \
 TRAIN_RUN_NAME=hsa_cag_smoke \
@@ -47,9 +48,10 @@ bash scripts/run_npu_hsa_cag_training.sh
 Smoke Test 通过后启动正式训练：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 \
-GRADIENT_ACCUMULATION_STEPS=6 \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+NPROC_PER_NODE=16 \
+SP_SIZE=4 \
+GRADIENT_ACCUMULATION_STEPS=16 \
 MAX_ITERS=2000 \
 TRAIN_RUN_NAME=hsa_cag_2k \
 bash scripts/run_npu_hsa_cag_training.sh
@@ -60,8 +62,10 @@ bash scripts/run_npu_hsa_cag_training.sh
 改变卡数后，FSDP 会将完整 Optimizer State 重新分片，因此可以继续训练；但样本到 Rank 的分配和各 Rank 随机数流会改变，不能保证与原布局逐样本、逐位一致。启动脚本还会记录配置文件、解析后的配置、完整日志和实际使用端口。有效全局 Batch Size 为：
 
 ```text
-NPROC_PER_NODE * batch_size * GRADIENT_ACCUMULATION_STEPS
+(NPROC_PER_NODE / SP_SIZE) * batch_size * GRADIENT_ACCUMULATION_STEPS
 ```
+
+因此默认 `SP4 x DP4`、单卡 Batch Size 1、累积 16 次时，有效全局 Batch Size 为 64。Smoke Test 使用累积 1 时，有效 Batch Size 为 4。SP Rank 不代表额外样本，不能计入有效 Batch Size。
 
 ## 合并与评测
 
@@ -121,9 +125,9 @@ bash scripts/run_msprof.sh 32s
 | `keep_sink` | 始终可被选中的最早历史帧数量 | `1` |
 | `keep_near` | 始终可被选中的最近历史帧数量 | `2` |
 | `dense_current` | 当前 Chunk 是否保持 Dense | `true` |
-| `query_block_batch` | 单次 SDPA 合并处理的 Query Block 数量 | `2` |
+| `query_block_batch` | 单次 SDPA 合并处理的 Query Block 数量 | `1` |
 
-在 `44x80` Grid 下，每个 Latent Frame 包含 `880` 个 Token，因此 Block 大小必须能整除 `880`。增大 `query_block_batch` 可以减少 Kernel Launch 次数，但会增加临时 Gather Tensor 的显存占用。建议在昇腾上从 `2` 开始，并在修改稀疏率之前通过 msprof 对比 `1/2/4`。
+在 `44x80` Grid 下，每个 Latent Frame 包含 `880` 个 Token，因此 Block 大小必须能整除 `880`。增大 `query_block_batch` 可以减少 Kernel Launch 次数，但会增加临时 Gather Tensor 的显存占用。训练默认从 `1` 开始，稳定后再通过 msprof 对比 `1/2/4`。
 
 ## 范围与限制
 

@@ -1,8 +1,6 @@
 # Copyright 2024-2025 LongLive Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""
-Ulysses-style sequence-parallel primitives for Wan2.2-TI2V-5B inference.
-"""
+"""Ulysses-style sequence-parallel primitives for Wan2.2-TI2V-5B."""
 
 from typing import Optional
 import time
@@ -97,11 +95,10 @@ def sp_all_gather(tensor: torch.Tensor, dim: int = 1) -> torch.Tensor:
         return tensor
     global _SP_COMM_STATS, _SP_PROFILING_ENABLED
     world_size = get_sp_world_size()
-    tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
     if _SP_PROFILING_ENABLED:
         synchronize()
         start_time = time.perf_counter()
-    dist.all_gather(tensor_list, tensor, group=get_sp_group())
+    output = _AllGatherWithGrad.apply(tensor, dim, get_sp_group())
     if _SP_PROFILING_ENABLED:
         synchronize()
         elapsed = time.perf_counter() - start_time
@@ -110,7 +107,7 @@ def sp_all_gather(tensor: torch.Tensor, dim: int = 1) -> torch.Tensor:
         _SP_COMM_STATS["all_gather_bytes"] += (
             tensor.numel() * tensor.element_size() * (world_size - 1)
         )
-    return torch.cat(tensor_list, dim=dim)
+    return output
 
 
 def sp_scatter(tensor: torch.Tensor, dim: int = 1) -> torch.Tensor:
@@ -128,21 +125,73 @@ def sp_all_to_all(tensor: torch.Tensor, scatter_dim: int, gather_dim: int) -> to
     if _SP_PROFILING_ENABLED:
         synchronize()
         start_time = time.perf_counter()
-    scatter_chunks = [
-        chunk.contiguous() for chunk in torch.chunk(tensor, world_size, dim=scatter_dim)
-    ]
-    recv_chunks = [torch.empty_like(scatter_chunks[0]) for _ in range(world_size)]
-    dist.all_to_all(recv_chunks, scatter_chunks, group=get_sp_group())
-    output = torch.cat(recv_chunks, dim=gather_dim)
+    output = _AllToAllWithGrad.apply(
+        tensor, scatter_dim, gather_dim, get_sp_group()
+    )
     if _SP_PROFILING_ENABLED:
         synchronize()
         elapsed = time.perf_counter() - start_time
         _SP_COMM_STATS["all_to_all_time"] += elapsed
         _SP_COMM_STATS["all_to_all_count"] += 1
         _SP_COMM_STATS["all_to_all_bytes"] += (
-            scatter_chunks[0].numel() * tensor.element_size() * (world_size - 1) * 2
+            tensor.numel() * tensor.element_size() * (world_size - 1) * 2 // world_size
         )
     return output
+
+
+def _all_to_all_impl(tensor, scatter_dim, gather_dim, group):
+    world_size = dist.get_world_size(group)
+    inputs = [chunk.contiguous() for chunk in torch.chunk(tensor, world_size, dim=scatter_dim)]
+    if len(inputs) != world_size or any(chunk.shape != inputs[0].shape for chunk in inputs):
+        raise ValueError(
+            f"dimension {scatter_dim} with size {tensor.shape[scatter_dim]} must be "
+            f"evenly divisible by SP size {world_size}"
+        )
+    outputs = [torch.empty_like(inputs[0]) for _ in range(world_size)]
+    dist.all_to_all(outputs, inputs, group=group)
+    return torch.cat(outputs, dim=gather_dim).contiguous()
+
+
+class _AllToAllWithGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, scatter_dim, gather_dim, group):
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+        ctx.group = group
+        return _all_to_all_impl(tensor, scatter_dim, gather_dim, group)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return (
+            _all_to_all_impl(
+                grad_output, ctx.gather_dim, ctx.scatter_dim, ctx.group
+            ),
+            None,
+            None,
+            None,
+        )
+
+
+class _AllGatherWithGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, dim, group):
+        ctx.dim = dim
+        ctx.group = group
+        ctx.rank = dist.get_rank(group)
+        ctx.world_size = dist.get_world_size(group)
+        tensor = tensor.contiguous()
+        outputs = [torch.empty_like(tensor) for _ in range(ctx.world_size)]
+        dist.all_gather(outputs, tensor, group=group)
+        return torch.cat(outputs, dim=dim).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # The gathered output is consumed on every SP rank. Sum those gradient
+        # contributions before returning the shard owned by this rank.
+        grad_output = grad_output.contiguous().clone()
+        dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=ctx.group)
+        chunks = torch.chunk(grad_output, ctx.world_size, dim=ctx.dim)
+        return chunks[ctx.rank].contiguous(), None, None
 
 
 def ulysses_seq_to_head(tensor: torch.Tensor) -> torch.Tensor:

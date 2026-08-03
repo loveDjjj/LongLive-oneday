@@ -58,6 +58,7 @@ class BaseModel(nn.Module):
         )
         all_causal = getattr(args, "all_causal", False)
         score_is_causal = all_causal
+        sequence_parallel_size = int(getattr(args, "sequence_parallel_size", 1))
 
         model_name, model_root = resolve_model_location(args.model_kwargs)
         if "5B" not in model_name:
@@ -68,7 +69,9 @@ class BaseModel(nn.Module):
 
         # Generator
         generator_is_causal = getattr(args, "generator_is_causal", True)
-        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=generator_is_causal)
+        generator_kwargs = dict(getattr(args, "model_kwargs", {}))
+        generator_kwargs["use_ulysses_sp"] = sequence_parallel_size > 1
+        self.generator = WanDiffusionWrapper(**generator_kwargs, is_causal=generator_is_causal)
         self.generator.model.requires_grad_(True)
 
         # Real Score

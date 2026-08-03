@@ -3,8 +3,9 @@
 """
 Causal Wan2.2-TI2V-5B model with Ulysses-style sequence parallelism.
 
-This inference-only variant mirrors the regular CausalWanModel parameter layout
-so existing generator checkpoints can be loaded into ``model.*`` keys.
+The parameter layout mirrors the regular CausalWanModel so existing generator
+checkpoints can be loaded into ``model.*`` keys. Collectives are autograd-safe,
+allowing the same implementation to serve cached rollout training and inference.
 """
 
 import math
@@ -261,7 +262,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         kv_cache_size = kv_cache["k"].shape[1]
         global_end_prev = kv_cache["global_end_index"].item()
         local_end_prev = kv_cache["local_end_index"].item()
-        is_recompute = current_end <= global_end_prev and current_start > 0
+        is_recompute = current_end <= global_end_prev
 
         effective_sink, pinned_start, pinned_len, has_pinned = self._effective_sink(kv_cache, frame_seqlen)
         need_roll = (
@@ -270,7 +271,16 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             and s_new + local_end_prev > kv_cache_size
         )
 
-        if need_roll:
+        if is_recompute:
+            # With a non-rolling cache, global and local token offsets match.
+            # This is the SP4 training path (32-frame cache for 32 frames).
+            if self.local_attn_size != -1 and global_end_prev > kv_cache_size:
+                raise RuntimeError(
+                    "gradient checkpoint recomputation with a rolling Ulysses KV "
+                    "cache is not supported; increase num_max_frames"
+                )
+            local_end_new = current_end
+        elif need_roll:
             num_evicted = s_new + local_end_prev - kv_cache_size
             num_rolled = local_end_prev - num_evicted - effective_sink
             if num_rolled > 0:
@@ -295,9 +305,14 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         write_start = max(local_start_new, effective_sink) if is_recompute else local_start_new
         write_offset = max(0, write_start - local_start_new)
         write_len = max(0, local_end_new - write_start)
-        if write_len > 0:
-            kv_cache["k"][:, write_start:local_end_new] = k_new[:, write_offset:write_offset + write_len]
-            kv_cache["v"][:, write_start:local_end_new] = v_new[:, write_offset:write_offset + write_len]
+        if write_len > 0 and not is_recompute:
+            with torch.no_grad():
+                kv_cache["k"][:, write_start:local_end_new].copy_(
+                    k_new[:, write_offset:write_offset + write_len]
+                )
+                kv_cache["v"][:, write_start:local_end_new].copy_(
+                    v_new[:, write_offset:write_offset + write_len]
+                )
 
         if not is_recompute:
             kv_cache["global_end_index"].fill_(current_end)
@@ -347,6 +362,16 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             k_full = kv_cache["k"][:, window_start:local_end_new]
             v_full = kv_cache["v"][:, window_start:local_end_new]
 
+        # Cache entries are state, not graph tensors. Replace the current
+        # chunk at the tail with live projections so gradients reach K/V.
+        live_len = min(s_new, k_full.shape[1])
+        if live_len:
+            k_full = torch.cat(
+                [k_full[:, :-live_len].detach(), k_new[:, -live_len:]], dim=1
+            )
+            v_full = torch.cat(
+                [v_full[:, :-live_len].detach(), v_new[:, -live_len:]], dim=1
+            )
         return k_full, v_full
 
 
@@ -543,6 +568,9 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.self_attn.set_sparse_config(self.sparse_config)
 
+    def _set_gradient_checkpointing(self, module, value=False):
+        self.gradient_checkpointing = value
+
     def forward(self, x, t, context, seq_len, clip_fea=None, y=None,
                 kv_cache=None, crossattn_cache=None, current_start=0,
                 cache_start=0):
@@ -605,6 +633,11 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
             original_seq_len=self.original_seq_len,
             temporal_offset=self.rope_temporal_offset,
         )
+        def create_custom_forward(module):
+            def custom_forward(*inputs, **block_kwargs):
+                return module(*inputs, **block_kwargs)
+            return custom_forward
+
         for block_idx, block in enumerate(self.blocks):
             kwargs.update({
                 "kv_cache": kv_cache[block_idx] if kv_cache else None,
@@ -612,7 +645,15 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
                 "current_start": current_start,
                 "cache_start": cache_start,
             })
-            result = block(x, **kwargs)
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                result = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    x,
+                    use_reentrant=False,
+                    **kwargs,
+                )
+            else:
+                result = block(x, **kwargs)
             x = result[0] if kv_cache is not None and isinstance(result, tuple) else result
 
         x = self.head(
