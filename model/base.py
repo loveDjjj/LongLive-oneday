@@ -8,7 +8,7 @@ import torch
 import math
 
 from pipeline import SelfForcingTrainingPipeline
-from utils.config import section_get
+from utils.config import resolve_model_location, section_get
 from utils.loss import get_denoising_loss
 from utils.wan_5b_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
@@ -59,7 +59,7 @@ class BaseModel(nn.Module):
         all_causal = getattr(args, "all_causal", False)
         score_is_causal = all_causal
 
-        model_name = args.model_kwargs.get("model_name", "Wan2.2-TI2V-5B")
+        model_name, model_root = resolve_model_location(args.model_kwargs)
         if "5B" not in model_name:
             raise ValueError(f"Only Wan2.2-TI2V-5B is supported in this release, got {model_name}")
         if not dist.is_initialized() or dist.get_rank() == 0:
@@ -82,10 +82,16 @@ class BaseModel(nn.Module):
         self.fake_score.model.requires_grad_(True)
 
         # Text Encoder & VAE
-        self.text_encoder = WanTextEncoder()
+        self.text_encoder = WanTextEncoder(
+            model_name=model_name,
+            model_root=model_root,
+        )
         self.text_encoder.requires_grad_(False)
 
-        self.vae = WanVAEWrapper()
+        self.vae = WanVAEWrapper(
+            model_name=model_name,
+            model_root=model_root,
+        )
         self.vae.requires_grad_(False)
 
         self.scheduler = self.generator.get_scheduler()

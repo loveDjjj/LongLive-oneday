@@ -69,6 +69,16 @@ def section_get(config, section_key, key, default=None, aliases=()):
     return default
 
 
+def resolve_model_location(model_kwargs, default_name="Wan2.2-TI2V-5B"):
+    """Return the shared model name/root used by DiT, T5, and VAE wrappers."""
+    if model_kwargs is None:
+        return default_name, None
+    return (
+        model_kwargs.get("model_name", default_name),
+        model_kwargs.get("model_root", None),
+    )
+
+
 def normalize_config(config):
     """Expand grouped release configs into the flat runtime schema.
 

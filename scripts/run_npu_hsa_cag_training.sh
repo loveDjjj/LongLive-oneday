@@ -35,7 +35,15 @@ if (( ${#visible_devices[@]} != NPROC_PER_NODE )); then
     echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE}, but ASCEND_RT_VISIBLE_DEVICES has ${#visible_devices[@]} devices" >&2
     exit 2
 fi
-for required in "${PYTHON}" "${TORCHRUN}" "${CONFIG_PATH}" "${GENERATOR_CKPT}" "${TRAIN_PROMPTS}"; do
+for required in \
+    "${PYTHON}" \
+    "${TORCHRUN}" \
+    "${CONFIG_PATH}" \
+    "${GENERATOR_CKPT}" \
+    "${TRAIN_PROMPTS}" \
+    "${MODEL_ROOT}/models_t5_umt5-xxl-enc-bf16.pth" \
+    "${MODEL_ROOT}/google/umt5-xxl" \
+    "${MODEL_ROOT}/Wan2.2_VAE.pth"; do
     if [[ ! -e "${required}" ]]; then
         echo "[error] required path does not exist: ${required}" >&2
         exit 2

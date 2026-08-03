@@ -7,6 +7,7 @@ import torch
 
 from model.base import BaseModel
 from pipeline import CausalDiffusionInferencePipeline
+from utils.config import resolve_model_location
 from utils.i2v_conditioning import _overwrite_i2v_context, _zero_i2v_context_timestep
 from utils.wan_5b_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
@@ -120,16 +121,22 @@ class CausalDiffusion(BaseModel):
             self.er_skip_block_0 = bool(cfg_dict.get("skip_block_0", False))
 
     def _initialize_models(self, args, device):
-        model_name = getattr(args.model_kwargs, "model_name", "Wan2.2-TI2V-5B")
+        model_name, model_root = resolve_model_location(args.model_kwargs)
         if "5B" not in model_name:
             raise ValueError(f"Only Wan2.2-TI2V-5B is supported in this release, got {model_name}")
         self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
         self.generator.model.requires_grad_(True)
 
-        self.text_encoder = WanTextEncoder()
+        self.text_encoder = WanTextEncoder(
+            model_name=model_name,
+            model_root=model_root,
+        )
         self.text_encoder.requires_grad_(False)
 
-        self.vae = WanVAEWrapper()
+        self.vae = WanVAEWrapper(
+            model_name=model_name,
+            model_root=model_root,
+        )
         self.vae.requires_grad_(False)
 
         self.scheduler = self.generator.get_scheduler()
