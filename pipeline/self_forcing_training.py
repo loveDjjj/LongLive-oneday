@@ -92,17 +92,7 @@ class SelfForcingTrainingPipeline:
         ])
 
     def generate_and_sync_list(self, num_blocks, num_denoising_steps, device):
-        group = None
         rank = dist.get_rank() if dist.is_initialized() else 0
-        src = 0
-        if dist.is_initialized():
-            from wan_5b.distributed.sp_ulysses_inference import (
-                get_sp_group, get_sp_rank, is_sp_enabled,
-            )
-            if is_sp_enabled():
-                group = get_sp_group()
-                rank = get_sp_rank()
-                src = (dist.get_rank() // dist.get_world_size(group)) * dist.get_world_size(group)
 
         if rank == 0:
             # Generate random indices
@@ -117,7 +107,11 @@ class SelfForcingTrainingPipeline:
         else:
             indices = torch.empty(num_blocks, dtype=torch.long, device=device)
         if dist.is_initialized():
-            dist.broadcast(indices, src=src, group=group)
+            # The models are FSDP-sharded over WORLD. Every rank must therefore
+            # execute the same number of model forwards in the same order. SP
+            # groups may own different samples, but they cannot independently
+            # choose rollout exit steps while FSDP still uses the WORLD group.
+            dist.broadcast(indices, src=0)
         return indices.tolist()
 
     def generate_chunk_with_cache(
