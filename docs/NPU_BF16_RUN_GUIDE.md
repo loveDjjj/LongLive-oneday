@@ -135,6 +135,10 @@ bash scripts/run_vbench.sh wan22_standard_full
 seed 0 到 4。脚本会逐个 seed 生成、转换为 VBench 命名，最后执行一次
 AISBench。修改布局、帧数或 seeds 时只编辑 YAML。
 
+生成阶段会在终端显示全部 seeds 的视频进度、耗时、ETA 和平均生成时间；
+AISBench 阶段会显示 16 个 VBench dimension 的完成进度。推理和评测的原始
+输出分别保存在 `seed_<seed>.log` 和 `aisbench.log`，不会与动态进度条混排。
+
 如果运行中断，可使用同一个 `RUN_ID` 继续；已经完整生成的 seed 会被跳过：
 
 ```bash
@@ -171,6 +175,7 @@ runs/
     ├── resolved_seed_<seed>.yaml
     ├── seed_<seed>.log
     ├── aisbench.log
+    ├── aisbench/<evaluation-session>/
     └── videos/{raw,prepared}/
 ```
 

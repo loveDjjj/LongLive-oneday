@@ -9,6 +9,7 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8
 export LONGLIVE_VBENCH_DATA_PATH="${LONGLIVE_VBENCH_DATA_PATH:-${REPO_ROOT}/videos/benchmarks/vbench_mini_5s_vbench}"
 export LONGLIVE_VBENCH_FULL_INFO="${LONGLIVE_VBENCH_FULL_INFO:-${REPO_ROOT}/data/benchmarks/vbench_standard/5pct/full_info.json}"
 export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
+export AISBENCH_WORK_DIR="${AISBENCH_WORK_DIR:-${REPO_ROOT}/outputs/default}"
 
 # Restore CANN/HCCL paths before changing the C++ runtime search order.
 CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
@@ -104,4 +105,5 @@ unset MASTER_ADDR MASTER_PORT RANK LOCAL_RANK WORLD_SIZE
 
 ais_bench "${RENDERED_CONFIG}" \
   --mode eval \
+  --work-dir "${AISBENCH_WORK_DIR}" \
   --max-num-workers "${AISBENCH_MAX_WORKERS:-12}"

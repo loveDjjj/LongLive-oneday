@@ -42,7 +42,15 @@ export PATH="${GENERATION_ENV}/bin:${PATH}"
 export LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 metadata_tmp="$(mktemp "${TMPDIR:-/tmp}/longlive_vbench.XXXXXX.json")"
-trap 'rm -f "${metadata_tmp}"' EXIT
+child_pid=""
+cleanup() {
+  if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+    kill "${child_pid}" 2>/dev/null || true
+  fi
+  rm -f "${metadata_tmp}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 "${GENERATION_ENV}/bin/python" scripts/resolve_inference_config.py vbench \
   --config "${CONFIG_PATH}" --preset "${PRESET}" >"${metadata_tmp}"
 
@@ -96,18 +104,73 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 }
 
+count_videos() {
+  local directory="$1"
+  if [[ ! -d "${directory}" ]]; then
+    echo 0
+    return
+  fi
+  find "${directory}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' '
+}
+
+format_duration() {
+  local seconds="$1"
+  printf '%02d:%02d:%02d' \
+    "$((seconds / 3600))" "$(((seconds % 3600) / 60))" "$((seconds % 60))"
+}
+
+draw_progress() {
+  local completed="$1" total="$2" elapsed_seconds="$3" label="$4"
+  local rate_unit="$5" eta_completed="${6:-${completed}}" width=36
+  local filled=$((completed * width / total))
+  local empty=$((width - filled))
+  local done_bar pending_bar elapsed_text eta_text rate_text
+  printf -v done_bar '%*s' "${filled}" ''
+  printf -v pending_bar '%*s' "${empty}" ''
+  elapsed_text="$(format_duration "${elapsed_seconds}")"
+  if ((eta_completed > 0)); then
+    local eta_seconds=$((elapsed_seconds * (total - completed) / eta_completed))
+    eta_text="$(format_duration "${eta_seconds}")"
+    rate_text="$(awk -v elapsed="${elapsed_seconds}" -v count="${eta_completed}" \
+      -v unit="${rate_unit}" 'BEGIN { printf "%.1fs/%s", elapsed / count, unit }')"
+  else
+    eta_text="--:--:--"
+    rate_text="--"
+  fi
+  printf '\r[%s] [%s%s] %d/%d [%s<%s, %s]' \
+    "${label}" "${done_bar// /#}" "${pending_bar// /-}" \
+    "${completed}" "${total}" "${elapsed_text}" "${eta_text}" "${rate_text}"
+}
+
+count_completed_dimensions() {
+  local directory="$1"
+  if [[ ! -d "${directory}" ]]; then
+    echo 0
+    return
+  fi
+  find "${directory}" -type f \
+    -path '*/results/vbench_eval/vbench_*.json' | wc -l | tr -d ' '
+}
+
 echo "[run] task=vbench preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} prompts=${prompt_count}"
 read -r -a seed_array <<<"${seeds}"
+generation_started_at="$(date +%s)"
+total_videos=$((prompt_count * ${#seed_array[@]}))
+new_videos_completed=0
+
 for sample_index in "${!seed_array[@]}"; do
   seed="${seed_array[${sample_index}]}"
   seed_dir="${raw_root}/seed_${seed}"
   raw_log="${run_dir}/seed_${seed}.log"
   resolved_config="${run_dir}/resolved_seed_${seed}.yaml"
   mkdir -p "${seed_dir}"
-  completed="$(find "${seed_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l | tr -d ' ')"
+  completed="$(count_videos "${seed_dir}")"
+  ((completed > prompt_count)) && completed="${prompt_count}"
+  seed_initial_completed="${completed}"
   if [[ "${completed}" -eq "${prompt_count}" ]]; then
     echo "[resume] seed=${seed} already complete (${completed}/${prompt_count})"
+    generation_status=0
   else
     "${GENERATION_ENV}/bin/python" scripts/resolve_inference_config.py vbench \
       --config "${CONFIG_PATH}" --preset "${PRESET}" --seed "${seed}" \
@@ -121,11 +184,47 @@ for sample_index in "${!seed_array[@]}"; do
       --master_port="${seed_port}" \
       "${entrypoint}" \
       --config_path "${resolved_config}" \
-      >"${raw_log}" 2>&1 || {
-        tail -n 100 "${raw_log}" >&2
-        exit 1
-      }
+      >"${raw_log}" 2>&1 &
+    child_pid="$!"
+
+    while kill -0 "${child_pid}" 2>/dev/null; do
+      completed="$(count_videos "${seed_dir}")"
+      ((completed > prompt_count)) && completed="${prompt_count}"
+      global_completed=$((sample_index * prompt_count + completed))
+      current_seed_new=$((completed - seed_initial_completed))
+      ((current_seed_new < 0)) && current_seed_new=0
+      new_completed=$((new_videos_completed + current_seed_new))
+      elapsed_seconds=$(($(date +%s) - generation_started_at))
+      draw_progress "${global_completed}" "${total_videos}" "${elapsed_seconds}" \
+        "generate seed ${seed} ($((sample_index + 1))/${#seed_array[@]}) ${completed}/${prompt_count}" \
+        "video" "${new_completed}"
+      sleep 2
+    done
+
+    set +e
+    wait "${child_pid}"
+    generation_status="$?"
+    set -e
+    child_pid=""
   fi
+
+  completed="$(count_videos "${seed_dir}")"
+  ((completed > prompt_count)) && completed="${prompt_count}"
+  global_completed=$((sample_index * prompt_count + completed))
+  current_seed_new=$((completed - seed_initial_completed))
+  ((current_seed_new < 0)) && current_seed_new=0
+  new_completed=$((new_videos_completed + current_seed_new))
+  elapsed_seconds=$(($(date +%s) - generation_started_at))
+  draw_progress "${global_completed}" "${total_videos}" "${elapsed_seconds}" \
+    "generate seed ${seed} ($((sample_index + 1))/${#seed_array[@]}) ${completed}/${prompt_count}" \
+    "video" "${new_completed}"
+  printf '\n'
+  if [[ "${generation_status}" -ne 0 ]]; then
+    echo "[error] seed ${seed} failed with exit code ${generation_status}; log tail:" >&2
+    tail -n 100 "${raw_log}" >&2
+    exit "${generation_status}"
+  fi
+  new_videos_completed="${new_completed}"
 
   "${GENERATION_ENV}/bin/python" third_party/aisbench_adapter/prepare_vbench_videos.py \
     --benchmark standard \
@@ -138,6 +237,11 @@ done
 
 echo "[evaluate] videos=${prepared_dir}"
 aisbench_log="${run_dir}/aisbench.log"
+eval_session="$(date +%Y%m%d_%H%M%S)"
+aisbench_work_dir="${run_dir}/aisbench/${eval_session}"
+vbench_dimension_count=16
+mkdir -p "${aisbench_work_dir}"
+evaluation_started_at="$(date +%s)"
 env \
   PATH="${AISBENCH_ENV}/bin:${PATH}" \
   CONDA_PREFIX="${AISBENCH_ENV}" \
@@ -148,11 +252,44 @@ env \
   AISBENCH_MAX_WORKERS="${nproc}" \
   ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" \
   CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT}" \
+  AISBENCH_WORK_DIR="${REPO_ROOT}/${aisbench_work_dir}" \
   bash third_party/aisbench_adapter/run_vbench_eval.sh \
-  2>&1 | tee "${aisbench_log}"
+  >"${aisbench_log}" 2>&1 &
+child_pid="$!"
+
+while kill -0 "${child_pid}" 2>/dev/null; do
+  completed_dimensions="$(count_completed_dimensions "${aisbench_work_dir}")"
+  ((completed_dimensions > vbench_dimension_count)) && completed_dimensions="${vbench_dimension_count}"
+  elapsed_seconds=$(($(date +%s) - evaluation_started_at))
+  draw_progress "${completed_dimensions}" "${vbench_dimension_count}" \
+    "${elapsed_seconds}" "evaluate dimensions" "dimension"
+  sleep 2
+done
+
+set +e
+wait "${child_pid}"
+evaluation_status="$?"
+set -e
+child_pid=""
+completed_dimensions="$(count_completed_dimensions "${aisbench_work_dir}")"
+((completed_dimensions > vbench_dimension_count)) && completed_dimensions="${vbench_dimension_count}"
+elapsed_seconds=$(($(date +%s) - evaluation_started_at))
+draw_progress "${completed_dimensions}" "${vbench_dimension_count}" \
+  "${elapsed_seconds}" "evaluate dimensions" "dimension"
+printf '\n'
+
+if [[ "${evaluation_status}" -ne 0 ]]; then
+  echo "[error] AISBench failed with exit code ${evaluation_status}; log tail:" >&2
+  tail -n 100 "${aisbench_log}" >&2
+  exit "${evaluation_status}"
+fi
 
 if grep -q '\[RUNNER-TASK-001\]' "${aisbench_log}"; then
   echo "[error] one or more AISBench tasks failed; inspect ${aisbench_log}" >&2
+  exit 1
+fi
+if [[ "${completed_dimensions}" -ne "${vbench_dimension_count}" ]]; then
+  echo "[error] AISBench completed only ${completed_dimensions}/${vbench_dimension_count} dimensions; inspect ${aisbench_log}" >&2
   exit 1
 fi
 echo "[done] run=${run_dir}"
