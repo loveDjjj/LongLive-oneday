@@ -209,7 +209,7 @@ if triton is not None:
 
 
     @triton.jit
-    def _hsa_sparse_bwd_dkdv(
+    def _hsa_sparse_bwd_dk(
         q_ptr,
         k_ptr,
         v_ptr,
@@ -218,7 +218,6 @@ if triton is not None:
         delta_ptr,
         grad_out_ptr,
         grad_k_ptr,
-        grad_v_ptr,
         scale,
         LQ: tl.constexpr,
         LKV: tl.constexpr,
@@ -248,47 +247,116 @@ if triton is not None:
         k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)
         v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)
         grad_k = tl.zeros([BLOCK_K_PAD, D], tl.float32)
+
+        for query_block in tl.range(0, Q_BLOCKS, num_stages=1):
+            selected = tl.load(
+                sparse_map_ptr + (bh * Q_BLOCKS + query_block) * K_BLOCKS + key_block
+            )
+            q_indices = query_block * BLOCK_Q + q_offsets
+            q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+            q_ptrs = q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
+            grad_out_ptrs = (
+                grad_out_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
+            )
+            q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
+            grad_out = tl.load(grad_out_ptrs, mask=q_mask[:, None], other=0.0)
+            lse = tl.load(
+                lse_ptr + bh * LQ + q_indices,
+                mask=q_mask,
+                other=float("inf"),
+            )
+            delta = tl.load(
+                delta_ptr + bh * LQ + q_indices,
+                mask=q_mask,
+                other=0.0,
+            )
+
+            scores_t = tl.dot(k, tl.trans(q)) * (scale * 1.4426950408889634)
+            probabilities_t = tl.math.exp2(scores_t - lse[None, :])
+            probabilities_t = tl.where(
+                (selected != 0) & k_mask[:, None] & q_mask[None, :],
+                probabilities_t,
+                0.0,
+            )
+            grad_probabilities_t = tl.dot(v, tl.trans(grad_out)).to(tl.float32)
+            grad_scores_t = probabilities_t * (
+                grad_probabilities_t - delta[None, :]
+            )
+            grad_k += tl.dot(grad_scores_t.to(q.dtype), q)
+
+        tl.store(grad_k_ptr + kv_linear_offsets, grad_k * scale, mask=k_mask[:, None])
+
+
+    @triton.jit
+    def _hsa_sparse_bwd_dv(
+        q_ptr,
+        k_ptr,
+        sparse_map_ptr,
+        lse_ptr,
+        grad_out_ptr,
+        grad_v_ptr,
+        scale,
+        LQ: tl.constexpr,
+        LKV: tl.constexpr,
+        D: tl.constexpr,
+        Q_BLOCKS: tl.constexpr,
+        K_BLOCKS: tl.constexpr,
+        BLOCK_Q: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        BLOCK_Q_PAD: tl.constexpr,
+        BLOCK_K_PAD: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        bh = pid // K_BLOCKS
+        key_block = pid - bh * K_BLOCKS
+
+        q_offsets = tl.arange(0, BLOCK_Q_PAD)
+        k_offsets = tl.arange(0, BLOCK_K_PAD)
+        d_offsets = tl.arange(0, D)
+        k_indices = key_block * BLOCK_K + k_offsets
+        k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
+        q_base = bh * LQ * D
+        kv_base = bh * LKV * D
+
+        kv_linear_offsets = kv_base + k_indices[:, None] * D + d_offsets[None, :]
+        k = tl.load(
+            k_ptr + kv_linear_offsets,
+            mask=k_mask[:, None],
+            other=0.0,
+        )
         grad_v = tl.zeros([BLOCK_K_PAD, D], tl.float32)
 
         for query_block in tl.range(0, Q_BLOCKS, num_stages=1):
             selected = tl.load(
                 sparse_map_ptr + (bh * Q_BLOCKS + query_block) * K_BLOCKS + key_block
             )
-            if selected != 0:
-                q_indices = query_block * BLOCK_Q + q_offsets
-                q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
-                q_ptrs = q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
-                grad_out_ptrs = (
-                    grad_out_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
-                )
-                q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
-                grad_out = tl.load(grad_out_ptrs, mask=q_mask[:, None], other=0.0)
-                lse = tl.load(
-                    lse_ptr + bh * LQ + q_indices,
-                    mask=q_mask,
-                    other=float("inf"),
-                )
-                delta = tl.load(
-                    delta_ptr + bh * LQ + q_indices,
-                    mask=q_mask,
-                    other=0.0,
-                )
+            q_indices = query_block * BLOCK_Q + q_offsets
+            q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+            q = tl.load(
+                q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :],
+                mask=q_mask[:, None],
+                other=0.0,
+            )
+            grad_out = tl.load(
+                grad_out_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :],
+                mask=q_mask[:, None],
+                other=0.0,
+            )
+            lse = tl.load(
+                lse_ptr + bh * LQ + q_indices,
+                mask=q_mask,
+                other=float("inf"),
+            )
 
-                scores_t = tl.dot(k, tl.trans(q)) * (scale * 1.4426950408889634)
-                probabilities_t = tl.math.exp2(scores_t - lse[None, :])
-                probabilities_t = tl.where(
-                    k_mask[:, None] & q_mask[None, :], probabilities_t, 0.0
-                )
-                # Keep the branch accumulator rooted in local memory for the
-                # Ascend BiShengHIR control-flow lowering pass.
-                grad_v += tl.dot(probabilities_t.to(grad_out.dtype), grad_out) + 1e-14
-                grad_probabilities_t = tl.dot(v, tl.trans(grad_out)).to(tl.float32)
-                grad_scores_t = probabilities_t * (
-                    grad_probabilities_t - delta[None, :]
-                )
-                grad_k += tl.dot(grad_scores_t.to(q.dtype), q) + 1e-14
+            scores_t = tl.dot(k, tl.trans(q)) * (scale * 1.4426950408889634)
+            probabilities_t = tl.math.exp2(scores_t - lse[None, :])
+            probabilities_t = tl.where(
+                (selected != 0) & k_mask[:, None] & q_mask[None, :],
+                probabilities_t,
+                0.0,
+            )
+            grad_v += tl.dot(probabilities_t.to(grad_out.dtype), grad_out)
 
-        tl.store(grad_k_ptr + kv_linear_offsets, grad_k * scale, mask=k_mask[:, None])
         tl.store(grad_v_ptr + kv_linear_offsets, grad_v, mask=k_mask[:, None])
 
 
@@ -400,7 +468,8 @@ class _AscendSparseAttention(torch.autograd.Function):
             BLOCK_Q_PAD=block_q_pad,
             BLOCK_K_PAD=block_k_pad,
         )
-        _hsa_sparse_bwd_dkdv[(b * heads * k_blocks,)](
+        kv_grid = (b * heads * k_blocks,)
+        _hsa_sparse_bwd_dk[kv_grid](
             q,
             k,
             v,
@@ -409,6 +478,23 @@ class _AscendSparseAttention(torch.autograd.Function):
             delta,
             grad_output,
             grad_k,
+            ctx.scale,
+            LQ=lq,
+            LKV=lkv,
+            D=dim,
+            Q_BLOCKS=q_blocks,
+            K_BLOCKS=k_blocks,
+            BLOCK_Q=block_q,
+            BLOCK_K=block_k,
+            BLOCK_Q_PAD=block_q_pad,
+            BLOCK_K_PAD=block_k_pad,
+        )
+        _hsa_sparse_bwd_dv[kv_grid](
+            q,
+            k,
+            sparse_map,
+            lse,
+            grad_output,
             grad_v,
             ctx.scale,
             LQ=lq,
