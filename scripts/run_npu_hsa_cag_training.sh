@@ -4,6 +4,8 @@ set -euo pipefail
 # ---------- User-editable distributed/runtime settings ----------
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
+export NNODES="${NNODES:-1}"
+export NODE_RANK="${NODE_RANK:-0}"
 export SP_SIZE="${SP_SIZE:-4}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
@@ -39,11 +41,16 @@ if (( ${#visible_devices[@]} != NPROC_PER_NODE )); then
     echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE}, but ASCEND_RT_VISIBLE_DEVICES has ${#visible_devices[@]} devices" >&2
     exit 2
 fi
-if (( NPROC_PER_NODE % SP_SIZE != 0 )); then
-    echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE} must be divisible by SP_SIZE=${SP_SIZE}" >&2
+if (( NNODES <= 0 || NODE_RANK < 0 || NODE_RANK >= NNODES )); then
+    echo "[error] require NNODES > 0 and 0 <= NODE_RANK < NNODES; got NNODES=${NNODES}, NODE_RANK=${NODE_RANK}" >&2
     exit 2
 fi
-DP_SIZE=$((NPROC_PER_NODE / SP_SIZE))
+WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
+if (( WORLD_SIZE % SP_SIZE != 0 )); then
+    echo "[error] WORLD_SIZE=${WORLD_SIZE} must be divisible by SP_SIZE=${SP_SIZE}" >&2
+    exit 2
+fi
+DP_SIZE=$((WORLD_SIZE / SP_SIZE))
 for required in \
     "${PYTHON}" \
     "${TORCHRUN}" \
@@ -78,13 +85,16 @@ fi
 PROMPT_COUNT="$(${PYTHON} -c 'import sys; print(sum(bool(x.strip()) for x in open(sys.argv[1], encoding="utf-8")))' "${TRAIN_PROMPTS}")"
 EFFECTIVE_BATCH=$((DP_SIZE * GRADIENT_ACCUMULATION_STEPS))
 echo "[run] config=${CONFIG_PATH}"
-echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} nproc=${NPROC_PER_NODE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}"
+echo "[run] node=${NODE_RANK}/${NNODES} devices=${ASCEND_RT_VISIBLE_DEVICES} local_nproc=${NPROC_PER_NODE} world=${WORLD_SIZE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}"
 echo "[run] prompts=${PROMPT_COUNT} model_root=${MODEL_ROOT}"
 echo "[run] generator_ckpt=${GENERATOR_CKPT}"
 echo "[run] logs=${LOG_DIR}"
 
 CONFIG_OVERRIDE="${LOG_DIR}/resolved_config.yaml"
-"${PYTHON}" - "${CONFIG_PATH}" "${CONFIG_OVERRIDE}" <<'PY'
+CONFIG_READY="${CONFIG_OVERRIDE}.ready"
+if (( NODE_RANK == 0 )); then
+    rm -f "${CONFIG_READY}"
+    "${PYTHON}" - "${CONFIG_PATH}" "${CONFIG_OVERRIDE}" <<'PY'
 import os
 import sys
 from omegaconf import OmegaConf
@@ -106,8 +116,21 @@ if query_block_batch <= 0:
 config.model_kwargs.sparse_config.query_block_batch = query_block_batch
 OmegaConf.save(config, output)
 PY
+    touch "${CONFIG_READY}"
+else
+    echo "[run] waiting for rank-0 config: ${CONFIG_READY}"
+    for ((attempt = 0; attempt < 600; attempt++)); do
+        [[ -f "${CONFIG_READY}" ]] && break
+        sleep 1
+    done
+    if [[ ! -f "${CONFIG_READY}" ]]; then
+        echo "[error] timed out waiting for rank-0 config: ${CONFIG_READY}" >&2
+        exit 2
+    fi
+fi
 
-MASTER_PORT="$(${PYTHON} - "${MASTER_ADDR}" "${MASTER_PORT}" <<'PY'
+if (( NNODES == 1 )); then
+    MASTER_PORT="$(${PYTHON} - "${MASTER_ADDR}" "${MASTER_PORT}" <<'PY'
 import socket
 import sys
 
@@ -120,7 +143,23 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         print(sock.getsockname()[1])
 PY
-)"
+    )"
+elif (( NODE_RANK == 0 )); then
+    "${PYTHON}" - "${MASTER_ADDR}" "${MASTER_PORT}" <<'PY'
+import socket
+import sys
+
+host, port = sys.argv[1], int(sys.argv[2])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    try:
+        sock.bind((host, port))
+    except OSError as exc:
+        raise SystemExit(
+            f"[error] rendezvous {host}:{port} is unavailable; "
+            "choose the same free MASTER_PORT on both nodes"
+        ) from exc
+PY
+fi
 export MASTER_PORT
 echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
 echo "[run] hsa_backend=${HSA_BACKEND} hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
@@ -131,7 +170,8 @@ if [[ "${DISABLE_WANDB}" == "1" ]]; then
 fi
 
 exec "${TORCHRUN}" \
-    --nnodes=1 \
+    --nnodes="${NNODES}" \
+    --node_rank="${NODE_RANK}" \
     --nproc_per_node="${NPROC_PER_NODE}" \
     --master_addr="${MASTER_ADDR}" \
     --master_port="${MASTER_PORT}" \
