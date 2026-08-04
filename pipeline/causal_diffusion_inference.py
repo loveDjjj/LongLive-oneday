@@ -829,6 +829,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         kv_cache_neg = []
         num_heads = wan_default_config[self.model_name]["num_heads"]
         head_dim = wan_default_config[self.model_name]["head_dim"]
+        from wan_5b.distributed.sp_training import resolve_kv_cache_heads
+        from wan_5b.distributed.sp_ulysses_inference import get_sp_world_size, is_sp_enabled
+        if is_sp_enabled():
+            num_heads = resolve_kv_cache_heads(num_heads, get_sp_world_size())
         if self.local_attn_size != -1:
             # Use the local attention size to compute the KV cache size
             kv_cache_size = self.local_attn_size * self.frame_seq_length

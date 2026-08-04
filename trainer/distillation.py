@@ -643,7 +643,12 @@ class Trainer:
                 print("VAL DATASET SIZE %d" % len(val_dataset))
 
             sampler = torch.utils.data.distributed.DistributedSampler(
-                val_dataset, shuffle=False, drop_last=False)
+                val_dataset,
+                num_replicas=self.data_parallel_size,
+                rank=self.data_parallel_rank,
+                shuffle=False,
+                drop_last=False,
+            )
             val_dataloader = torch.utils.data.DataLoader(
                 val_dataset,
                 batch_size=section_get(config, "evaluation", "val_batch_size", getattr(config, "val_batch_size", 1)),
