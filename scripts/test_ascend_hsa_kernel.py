@@ -69,21 +69,37 @@ def main():
         raise RuntimeError(ascend_triton_unavailable_reason())
     stage(f"backend available; device={args.device}")
 
-    torch.manual_seed(7)
     device = torch.device(args.device)
     shape_q = (1, 2, 80, 128)
     shape_kv = (1, 2, 160, 128)
     block_q = block_k = 40
-    lut = torch.tensor(
+    stage("creating deterministic inputs on CPU")
+    cpu_generator = torch.Generator(device="cpu").manual_seed(7)
+    lut_cpu = torch.tensor(
         [[[[0, 2, 3], [1, 2, 3]], [[0, 1, 3], [0, 2, 3]]]],
-        device=device,
         dtype=torch.long,
     )
+    source_q_cpu = torch.randn(
+        shape_q, generator=cpu_generator, dtype=torch.bfloat16
+    )
+    source_k_cpu = torch.randn(
+        shape_kv, generator=cpu_generator, dtype=torch.bfloat16
+    )
+    source_v_cpu = torch.randn(
+        shape_kv, generator=cpu_generator, dtype=torch.bfloat16
+    )
 
-    stage("allocating BF16 inputs")
-    source_q = torch.randn(shape_q, device=device, dtype=torch.bfloat16)
-    source_k = torch.randn(shape_kv, device=device, dtype=torch.bfloat16)
-    source_v = torch.randn(shape_kv, device=device, dtype=torch.bfloat16)
+    stage(f"initializing selected device {device}")
+    torch.npu.set_device(device)
+    torch.empty(1, device=device)
+    torch.npu.synchronize()
+    stage("selected NPU initialized")
+
+    stage("copying LUT and BF16 inputs to NPU")
+    lut = lut_cpu.to(device)
+    source_q = source_q_cpu.to(device)
+    source_k = source_k_cpu.to(device)
+    source_v = source_v_cpu.to(device)
     triton_inputs = [
         x.detach().clone().requires_grad_(True) for x in (source_q, source_k, source_v)
     ]
@@ -111,7 +127,9 @@ def main():
         raise AssertionError("forward error exceeds BF16 tolerance")
 
     if not args.forward_only:
-        grad = torch.randn_like(actual)
+        grad = torch.randn(
+            actual.shape, generator=cpu_generator, dtype=actual.dtype
+        ).to(device)
         stage("launching Triton backward (first run compiles backward kernels)")
         started_at = time.perf_counter()
         actual.backward(grad)
