@@ -8,6 +8,7 @@ export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export SP_SIZE="${SP_SIZE:-4}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
+export SHARDING_STRATEGY="${SHARDING_STRATEGY:-}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29600}"
 export MAX_ITERS="${MAX_ITERS:-2000}"
@@ -109,6 +110,8 @@ config.data.data_path = os.environ["TRAIN_PROMPTS"]
 config.training.gradient_accumulation_steps = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
 config.training.max_iters = int(os.environ["MAX_ITERS"])
 config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
+if os.environ["SHARDING_STRATEGY"]:
+    config.infra.sharding_strategy = os.environ["SHARDING_STRATEGY"]
 config.model_kwargs.sparse_config.backend = os.environ["HSA_BACKEND"]
 query_block_batch = int(os.environ["HSA_QUERY_BLOCK_BATCH"])
 if query_block_batch <= 0:
@@ -163,6 +166,8 @@ fi
 export MASTER_PORT
 echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
 echo "[run] hsa_backend=${HSA_BACKEND} hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
+echo "[run] sharding_strategy=${SHARDING_STRATEGY:-config default}"
+echo "[run] ascend_launch_blocking=${ASCEND_LAUNCH_BLOCKING:-0} task_queue_enable=${TASK_QUEUE_ENABLE:-default}"
 
 extra_args=()
 if [[ "${DISABLE_WANDB}" == "1" ]]; then
