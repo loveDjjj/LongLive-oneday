@@ -279,12 +279,14 @@ if triton is not None:
                 probabilities_t = tl.where(
                     k_mask[:, None] & q_mask[None, :], probabilities_t, 0.0
                 )
-                grad_v += tl.dot(probabilities_t.to(grad_out.dtype), grad_out)
+                # Keep the branch accumulator rooted in local memory for the
+                # Ascend BiShengHIR control-flow lowering pass.
+                grad_v += tl.dot(probabilities_t.to(grad_out.dtype), grad_out) + 1e-14
                 grad_probabilities_t = tl.dot(v, tl.trans(grad_out)).to(tl.float32)
                 grad_scores_t = probabilities_t * (
                     grad_probabilities_t - delta[None, :]
                 )
-                grad_k += tl.dot(grad_scores_t.to(q.dtype), q)
+                grad_k += tl.dot(grad_scores_t.to(q.dtype), q) + 1e-14
 
         tl.store(grad_k_ptr + kv_linear_offsets, grad_k * scale, mask=k_mask[:, None])
         tl.store(grad_v_ptr + kv_linear_offsets, grad_v, mask=k_mask[:, None])
