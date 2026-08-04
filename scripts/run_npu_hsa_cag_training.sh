@@ -9,6 +9,7 @@ export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29600}"
 export MAX_ITERS="${MAX_ITERS:-2000}"
+export HSA_BACKEND="${HSA_BACKEND:-ascend_triton}"
 export HSA_QUERY_BLOCK_BATCH="${HSA_QUERY_BLOCK_BATCH:-1}"
 export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
 export LLV2_DEVICE="npu"
@@ -58,6 +59,22 @@ for required in \
     fi
 done
 
+if [[ "${HSA_BACKEND}" == "ascend_triton" ]]; then
+    "${PYTHON}" - <<'PY'
+from wan_5b.modules.sparse_attention_ascend import (
+    ascend_triton_available,
+    ascend_triton_unavailable_reason,
+)
+
+if not ascend_triton_available():
+    raise RuntimeError(
+        "HSA_BACKEND=ascend_triton is unavailable: "
+        + ascend_triton_unavailable_reason()
+    )
+print("[run] Ascend Triton HSA backend is available")
+PY
+fi
+
 PROMPT_COUNT="$(${PYTHON} -c 'import sys; print(sum(bool(x.strip()) for x in open(sys.argv[1], encoding="utf-8")))' "${TRAIN_PROMPTS}")"
 EFFECTIVE_BATCH=$((DP_SIZE * GRADIENT_ACCUMULATION_STEPS))
 echo "[run] config=${CONFIG_PATH}"
@@ -82,6 +99,7 @@ config.data.data_path = os.environ["TRAIN_PROMPTS"]
 config.training.gradient_accumulation_steps = int(os.environ["GRADIENT_ACCUMULATION_STEPS"])
 config.training.max_iters = int(os.environ["MAX_ITERS"])
 config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
+config.model_kwargs.sparse_config.backend = os.environ["HSA_BACKEND"]
 query_block_batch = int(os.environ["HSA_QUERY_BLOCK_BATCH"])
 if query_block_batch <= 0:
     raise ValueError("HSA_QUERY_BLOCK_BATCH must be positive")
@@ -105,7 +123,7 @@ PY
 )"
 export MASTER_PORT
 echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
-echo "[run] hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
+echo "[run] hsa_backend=${HSA_BACKEND} hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
 
 extra_args=()
 if [[ "${DISABLE_WANDB}" == "1" ]]; then

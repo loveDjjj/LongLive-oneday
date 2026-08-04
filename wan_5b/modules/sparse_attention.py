@@ -21,6 +21,7 @@ import torch.nn.functional as F
 @dataclass(frozen=True)
 class SparseAttentionConfig:
     enabled: bool = False
+    backend: str = "portable"
     sparsity: float = 0.85
     sparsity_base: float = 0.95
     block_q: int = 40
@@ -45,7 +46,6 @@ class SparseAttentionConfig:
         aliases = {
             "BLKQ": "block_q",
             "BLKK": "block_k",
-            "backend": None,
         }
         normalized: dict[str, Any] = {}
         for key, item in raw.items():
@@ -54,11 +54,24 @@ class SparseAttentionConfig:
                 normalized[key] = item
         if "sparsity_list" in normalized:
             normalized["sparsity_list"] = tuple(float(x) for x in normalized["sparsity_list"])
+        if "backend" in normalized:
+            backend_aliases = {
+                "torch": "portable",
+                "triton": "ascend_triton",
+                "npu_triton": "ascend_triton",
+            }
+            backend = str(normalized["backend"]).lower()
+            normalized["backend"] = backend_aliases.get(backend, backend)
         config = cls(**normalized)
         config.validate()
         return config
 
     def validate(self) -> None:
+        if self.backend not in {"portable", "ascend_triton", "auto"}:
+            raise ValueError(
+                "backend must be one of portable, ascend_triton, or auto; "
+                f"got {self.backend}."
+            )
         for name in ("sparsity", "sparsity_base"):
             value = float(getattr(self, name))
             if not 0.0 <= value < 1.0:
@@ -71,7 +84,7 @@ class SparseAttentionConfig:
             raise ValueError("keep_frames must be positive when HSA is enabled.")
         if self.enabled and not self.dense_current:
             raise ValueError(
-                "The portable HSA backend requires dense_current=true; "
+                "HSA requires dense_current=true; "
                 "sparse current-chunk routing is not implemented."
             )
         if self.keep_sink + self.keep_near > self.keep_frames:
@@ -247,6 +260,88 @@ def _gather_query_blocks(
     )
 
 
+def _portable_sparse_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_lut: torch.Tensor,
+    *,
+    block_q: int,
+    block_k: int,
+    query_block_batch: int,
+    scale: float | None,
+) -> torch.Tensor:
+    """Reference backend that materializes selected K/V blocks."""
+    b, _, heads, dim = q.shape
+    q_count = q.shape[1] // block_q
+    k_count = k.shape[1] // block_k
+    k_blocks = k.reshape(b, k_count, block_k, heads, dim).permute(0, 3, 1, 2, 4)
+    v_blocks = v.reshape(b, k_count, block_k, heads, dim).permute(0, 3, 1, 2, 4)
+    q_heads = q.permute(0, 2, 1, 3)
+    outputs = []
+    for start in range(0, q_count, query_block_batch):
+        end = min(start + query_block_batch, q_count)
+        selected = block_lut[:, :, start:end]
+        selected_k = _gather_query_blocks(k_blocks, selected).flatten(3, 4)
+        selected_v = _gather_query_blocks(v_blocks, selected).flatten(3, 4)
+        q_group = q_heads[:, :, start * block_q : end * block_q].reshape(
+            b, heads, end - start, block_q, dim
+        )
+        batch_heads_queries = b * heads * (end - start)
+        out = F.scaled_dot_product_attention(
+            q_group.reshape(batch_heads_queries, block_q, dim),
+            selected_k.reshape(batch_heads_queries, selected_k.shape[-2], dim),
+            selected_v.reshape(batch_heads_queries, selected_v.shape[-2], dim),
+            scale=scale,
+        )
+        outputs.append(out.reshape(b, heads, (end - start) * block_q, dim))
+    result = torch.cat(outputs, dim=2)[:, :, : q.shape[1]]
+    return result.permute(0, 2, 1, 3).contiguous()
+
+
+def _run_sparse_backend(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_lut: torch.Tensor,
+    config: SparseAttentionConfig,
+) -> torch.Tensor:
+    backend = config.backend
+    if backend in {"auto", "ascend_triton"}:
+        from .sparse_attention_ascend import (
+            ascend_triton_available,
+            ascend_triton_sparse_attention,
+            ascend_triton_unavailable_reason,
+        )
+
+        if ascend_triton_available() and q.device.type == "npu":
+            return ascend_triton_sparse_attention(
+                q.permute(0, 2, 1, 3).contiguous(),
+                k.permute(0, 2, 1, 3).contiguous(),
+                v.permute(0, 2, 1, 3).contiguous(),
+                block_lut,
+                block_q=config.block_q,
+                block_k=config.block_k,
+                scale=config.softmax_scale,
+            ).permute(0, 2, 1, 3).contiguous()
+        if backend == "ascend_triton":
+            reason = ascend_triton_unavailable_reason()
+            if q.device.type != "npu":
+                reason = f"q is on {q.device.type}, not npu"
+            raise RuntimeError(f"Ascend Triton HSA was requested but is unavailable: {reason}")
+
+    return _portable_sparse_attention(
+        q,
+        k,
+        v,
+        block_lut,
+        block_q=config.block_q,
+        block_k=config.block_k,
+        query_block_batch=config.query_block_batch,
+        scale=config.softmax_scale,
+    )
+
+
 def hierarchical_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -256,7 +351,7 @@ def hierarchical_sparse_attention(
     chunk_id: int,
     sparse_config: Mapping[str, Any] | SparseAttentionConfig | None,
 ) -> torch.Tensor:
-    """Apply HSA to BLHD tensors using a portable block-gather backend."""
+    """Apply HSA to cached rectangular BLHD tensors using the configured backend."""
     config = (
         sparse_config
         if isinstance(sparse_config, SparseAttentionConfig)
@@ -311,38 +406,14 @@ def hierarchical_sparse_attention(
         config,
     )
 
-    k_blocks = k_work.reshape(b, k_count, block_k, heads, dim).permute(0, 3, 1, 2, 4)
-    v_blocks = v_work.reshape(b, k_count, block_k, heads, dim).permute(0, 3, 1, 2, 4)
-    q_heads = q_work.permute(0, 2, 1, 3)
-    outputs = []
-    group = config.query_block_batch
-    for start in range(0, q_count, group):
-        end = min(start + group, q_count)
-        group_history = history_ids[:, :, start:end]
-        if config.dense_current:
-            current = current_block_ids.view(1, 1, 1, -1).expand(
-                b, heads, end - start, -1
-            )
-            group_history = torch.cat([group_history, current], dim=-1)
-        selected = torch.sort(group_history, dim=-1).values
-        selected_k = _gather_query_blocks(k_blocks, selected).flatten(3, 4)
-        selected_v = _gather_query_blocks(v_blocks, selected).flatten(3, 4)
-
-        q_start = start * block_q
-        q_end = end * block_q
-        q_group = q_heads[:, :, q_start:q_end].reshape(
-            b, heads, end - start, block_q, dim
+    selected = history_ids
+    if config.dense_current:
+        current = current_block_ids.view(1, 1, 1, -1).expand(
+            b, heads, q_count, -1
         )
-        batch_heads_queries = b * heads * (end - start)
-        out = F.scaled_dot_product_attention(
-            q_group.reshape(batch_heads_queries, block_q, dim),
-            selected_k.reshape(batch_heads_queries, selected_k.shape[-2], dim),
-            selected_v.reshape(batch_heads_queries, selected_v.shape[-2], dim),
-            scale=config.softmax_scale,
-        )
-        outputs.append(out.reshape(b, heads, (end - start) * block_q, dim))
-    result = torch.cat(outputs, dim=2)[:, :, : q.shape[1]]
-    return result.permute(0, 2, 1, 3).contiguous()
+        selected = torch.cat([selected, current], dim=-1)
+    block_lut = torch.sort(selected, dim=-1).values.contiguous()
+    return _run_sparse_backend(q_work, k_work, v_work, block_lut, config)
 
 
 def with_cag_schedule(

@@ -49,6 +49,7 @@ sparsity:
   enabled: false
   method: dense
   options:
+    backend: auto
     sparsity: 0.85
     sparsity_base: 0.95
     block_q: 40

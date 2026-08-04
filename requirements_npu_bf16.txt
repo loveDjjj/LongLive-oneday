@@ -1,6 +1,8 @@
 # Ascend NPU BF16 dependency list.
 # Install torch/torchvision/torch_npu from the Ascend/CANN matching stack first.
 # Do not install CUDA, NVFP4, TransformerEngine, FlashAttention, or TensorRT packages here.
+# HSA's ascend_triton backend additionally requires the Ascend-maintained Triton
+# package matching torch_npu/CANN. Do not install the generic CUDA Triton wheel.
 
 diffusers==0.31.0
 transformers>=4.49.0,<5

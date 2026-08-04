@@ -20,6 +20,7 @@ model_kwargs:
   local_attn_size: 32
   sparse_config: &hsa_config
     enabled: true
+    backend: ascend_triton
     sparsity: 0.85
     sparsity_base: 0.95
     block_q: 40
@@ -29,7 +30,7 @@ model_kwargs:
     keep_near: 2
     dense_current: true
     min_sparse_history_frames: 2
-    # Keep the portable NPU backend memory-bounded during backward recompute.
+    # Used only by the portable fallback; Triton consumes the full LUT directly.
     query_block_batch: 1
     num_output_frames: 32
     num_frame_per_block: 8

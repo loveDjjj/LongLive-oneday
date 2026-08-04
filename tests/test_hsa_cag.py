@@ -115,6 +115,58 @@ def test_hsa_query_block_batching_preserves_output():
     torch.testing.assert_close(batched, unbatched)
 
 
+def test_hsa_auto_backend_falls_back_to_portable_on_cpu():
+    torch.manual_seed(3)
+    q = torch.randn(1, 4, 2, 4)
+    k = torch.randn(1, 12, 2, 4)
+    v = torch.randn(1, 12, 2, 4)
+    config = {
+        "enabled": True,
+        "sparsity": 0.5,
+        "block_q": 2,
+        "block_k": 2,
+        "keep_frames": 2,
+        "keep_sink": 1,
+        "keep_near": 1,
+    }
+    portable = hierarchical_sparse_attention(
+        q, k, v, frame_seq=4, chunk_id=2, sparse_config=config
+    )
+    automatic = hierarchical_sparse_attention(
+        q, k, v, frame_seq=4, chunk_id=2, sparse_config={**config, "backend": "auto"}
+    )
+    torch.testing.assert_close(automatic, portable)
+
+
+def test_hsa_explicit_ascend_backend_rejects_cpu():
+    q = torch.randn(1, 4, 1, 4)
+    k = torch.randn(1, 8, 1, 4)
+    v = torch.randn(1, 8, 1, 4)
+    config = {
+        "enabled": True,
+        "backend": "ascend_triton",
+        "sparsity": 0.5,
+        "block_q": 2,
+        "block_k": 2,
+        "keep_frames": 1,
+        "keep_sink": 1,
+        "keep_near": 0,
+    }
+    try:
+        hierarchical_sparse_attention(
+            q, k, v, frame_seq=4, chunk_id=2, sparse_config=config
+        )
+    except RuntimeError as error:
+        assert "not npu" in str(error)
+    else:
+        raise AssertionError("Expected explicit Ascend backend to reject CPU tensors")
+
+
+def test_hsa_backend_aliases_are_normalized():
+    assert SparseAttentionConfig.from_mapping({"backend": "triton"}).backend == "ascend_triton"
+    assert SparseAttentionConfig.from_mapping({"backend": "torch"}).backend == "portable"
+
+
 def test_hsa_rejects_misaligned_frame_blocks():
     q = torch.randn(1, 4, 1, 2)
     k = torch.randn(1, 8, 1, 2)
