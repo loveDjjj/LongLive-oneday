@@ -22,6 +22,9 @@ class HsaCagSpDpLayoutTest(unittest.TestCase):
     def test_sp4_shards_24_attention_heads(self):
         self.assertEqual(resolve_kv_cache_heads(24, 4), 6)
 
+    def test_sp8_shards_24_attention_heads(self):
+        self.assertEqual(resolve_kv_cache_heads(24, 8), 3)
+
     def test_invalid_layout_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "must be divisible"):
             build_sp_dp_rank_layout(12, 5)

@@ -84,11 +84,11 @@ def validate_sequence_parallel_training_config(config, sp_size, num_frame_per_bl
             f"training latent frames ({train_frames}) must be divisible by "
             f"num_frame_per_block ({num_frame_per_block})."
         )
-    if train_frames % (int(sp_size) * int(num_frame_per_block)) != 0:
+    if int(num_frame_per_block) % int(sp_size) != 0:
         raise ValueError(
-            f"training latent frames ({train_frames}) must be divisible "
-            f"by sequence_parallel_size ({sp_size}) * num_frame_per_block "
-            f"({num_frame_per_block})."
+            f"num_frame_per_block ({num_frame_per_block}) must be divisible "
+            f"by sequence_parallel_size ({sp_size}) so every rollout chunk "
+            "can be sharded evenly."
         )
 
 

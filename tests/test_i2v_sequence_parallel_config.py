@@ -58,6 +58,33 @@ class I2VSequenceParallelConfigTest(unittest.TestCase):
             num_frame_per_block=8,
         )
 
+    def test_t2v_32_frames_supports_sp8_for_8_frame_chunks(self):
+        cfg = SimpleNamespace(
+            i2v=False,
+            independent_first_frame=False,
+            image_or_video_shape=[1, 32, 48, 44, 80],
+        )
+
+        validate_sequence_parallel_training_config(
+            cfg,
+            sp_size=8,
+            num_frame_per_block=8,
+        )
+
+    def test_sequence_parallel_rejects_more_ranks_than_chunk_frames(self):
+        cfg = SimpleNamespace(
+            i2v=False,
+            independent_first_frame=False,
+            image_or_video_shape=[1, 32, 48, 44, 80],
+        )
+
+        with self.assertRaisesRegex(ValueError, r"num_frame_per_block"):
+            validate_sequence_parallel_training_config(
+                cfg,
+                sp_size=16,
+                num_frame_per_block=8,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
