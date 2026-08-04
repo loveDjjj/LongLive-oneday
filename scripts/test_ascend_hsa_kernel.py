@@ -5,20 +5,29 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
+print("[smoke] importing PyTorch", flush=True)
 import torch
 import torch.nn.functional as F
+print(f"[smoke] PyTorch imported: {torch.__version__}", flush=True)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+print("[smoke] importing Ascend Triton backend", flush=True)
 from wan_5b.modules.sparse_attention_ascend import (
     ascend_triton_available,
     ascend_triton_sparse_attention,
     ascend_triton_unavailable_reason,
 )
+print("[smoke] Ascend Triton backend imported", flush=True)
+
+
+def stage(message):
+    print(f"[smoke] {message}", flush=True)
 
 
 def reference_attention(q, k, v, lut, block_q, block_k):
@@ -55,8 +64,10 @@ def main():
     parser.add_argument("--forward-only", action="store_true")
     args = parser.parse_args()
 
+    stage("checking Ascend Triton availability")
     if not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
+    stage(f"backend available; device={args.device}")
 
     torch.manual_seed(7)
     device = torch.device(args.device)
@@ -69,34 +80,58 @@ def main():
         dtype=torch.long,
     )
 
+    stage("allocating BF16 inputs")
     source_q = torch.randn(shape_q, device=device, dtype=torch.bfloat16)
     source_k = torch.randn(shape_kv, device=device, dtype=torch.bfloat16)
     source_v = torch.randn(shape_kv, device=device, dtype=torch.bfloat16)
-    triton_inputs = [x.detach().clone().requires_grad_(True) for x in (source_q, source_k, source_v)]
-    reference_inputs = [x.detach().clone().requires_grad_(True) for x in (source_q, source_k, source_v)]
+    triton_inputs = [
+        x.detach().clone().requires_grad_(True) for x in (source_q, source_k, source_v)
+    ]
+    reference_inputs = [
+        x.detach().clone().requires_grad_(True) for x in (source_q, source_k, source_v)
+    ]
+    torch.npu.synchronize()
 
+    stage("launching Triton forward (first run compiles the kernel)")
+    started_at = time.perf_counter()
     actual = ascend_triton_sparse_attention(
         *triton_inputs, lut, block_q=block_q, block_k=block_k
     )
+    torch.npu.synchronize()
+    stage(f"Triton forward finished in {time.perf_counter() - started_at:.2f}s")
+
+    stage("running portable reference forward")
+    started_at = time.perf_counter()
     expected = reference_attention(*reference_inputs, lut, block_q, block_k)
+    torch.npu.synchronize()
+    stage(f"reference forward finished in {time.perf_counter() - started_at:.2f}s")
     maximum, mean = error_stats(actual, expected)
-    print(f"forward max_abs={maximum:.6f} mean_abs={mean:.6f}")
+    print(f"forward max_abs={maximum:.6f} mean_abs={mean:.6f}", flush=True)
     if maximum > 0.05 or mean > 0.01:
         raise AssertionError("forward error exceeds BF16 tolerance")
 
     if not args.forward_only:
         grad = torch.randn_like(actual)
+        stage("launching Triton backward (first run compiles backward kernels)")
+        started_at = time.perf_counter()
         actual.backward(grad)
+        torch.npu.synchronize()
+        stage(f"Triton backward finished in {time.perf_counter() - started_at:.2f}s")
+
+        stage("running portable reference backward")
+        started_at = time.perf_counter()
         expected.backward(grad)
+        torch.npu.synchronize()
+        stage(f"reference backward finished in {time.perf_counter() - started_at:.2f}s")
         for name, actual_input, expected_input in zip(
             ("dq", "dk", "dv"), triton_inputs, reference_inputs
         ):
             maximum, mean = error_stats(actual_input.grad, expected_input.grad)
-            print(f"{name} max_abs={maximum:.6f} mean_abs={mean:.6f}")
+            print(f"{name} max_abs={maximum:.6f} mean_abs={mean:.6f}", flush=True)
             if maximum > 0.08 or mean > 0.015:
                 raise AssertionError(f"{name} error exceeds BF16 tolerance")
 
-    print("Ascend Triton HSA smoke test passed")
+    print("Ascend Triton HSA smoke test passed", flush=True)
 
 
 if __name__ == "__main__":
