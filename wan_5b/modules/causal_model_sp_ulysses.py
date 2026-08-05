@@ -263,6 +263,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         global_end_prev = kv_cache["global_end_index"].item()
         local_end_prev = kv_cache["local_end_index"].item()
         is_recompute = current_end <= global_end_prev
+        is_gradient_recompute = is_recompute and torch.is_grad_enabled()
 
         effective_sink, pinned_start, pinned_len, has_pinned = self._effective_sink(kv_cache, frame_seqlen)
         need_roll = (
@@ -271,13 +272,13 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             and s_new + local_end_prev > kv_cache_size
         )
 
-        if is_recompute:
+        if is_gradient_recompute:
             # With a non-rolling cache, global and local token offsets match.
             # This is the SP4 training path (32-frame cache for 32 frames).
             if self.local_attn_size != -1 and global_end_prev > kv_cache_size:
                 raise RuntimeError(
-                    "gradient checkpoint recomputation with a rolling Ulysses KV "
-                    "cache is not supported; increase num_max_frames"
+                    "autograd checkpoint recomputation with a rolling Ulysses KV "
+                    "cache is not supported; the training cache must cover the full rollout"
                 )
             local_end_new = current_end
         elif need_roll:
@@ -302,10 +303,11 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             local_end_new = local_end_prev + (current_end - global_end_prev)
 
         local_start_new = local_end_new - s_new
-        write_start = max(local_start_new, effective_sink) if is_recompute else local_start_new
+        protect_sink = is_recompute and current_start > 0
+        write_start = max(local_start_new, effective_sink) if protect_sink else local_start_new
         write_offset = max(0, write_start - local_start_new)
         write_len = max(0, local_end_new - write_start)
-        if write_len > 0 and not is_recompute:
+        if write_len > 0 and not is_gradient_recompute:
             with torch.no_grad():
                 kv_cache["k"][:, write_start:local_end_new].copy_(
                     k_new[:, write_offset:write_offset + write_len]
@@ -362,16 +364,17 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             k_full = kv_cache["k"][:, window_start:local_end_new]
             v_full = kv_cache["v"][:, window_start:local_end_new]
 
-        # Cache entries are state, not graph tensors. Replace the current
-        # chunk at the tail with live projections so gradients reach K/V.
-        live_len = min(s_new, k_full.shape[1])
-        if live_len:
-            k_full = torch.cat(
-                [k_full[:, :-live_len].detach(), k_new[:, -live_len:]], dim=1
-            )
-            v_full = torch.cat(
-                [v_full[:, :-live_len].detach(), v_new[:, -live_len:]], dim=1
-            )
+        if torch.is_grad_enabled():
+            # Cache entries are state, not graph tensors. Replace the current
+            # chunk at the tail with live projections so gradients reach K/V.
+            live_len = min(s_new, k_full.shape[1])
+            if live_len:
+                k_full = torch.cat(
+                    [k_full[:, :-live_len].detach(), k_new[:, -live_len:]], dim=1
+                )
+                v_full = torch.cat(
+                    [v_full[:, :-live_len].detach(), v_new[:, -live_len:]], dim=1
+                )
         return k_full, v_full
 
 
