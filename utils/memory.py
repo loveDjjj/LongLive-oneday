@@ -7,7 +7,6 @@ from utils.device import default_device, empty_cache, free_memory_gb, total_memo
 
 
 cpu = torch.device('cpu')
-gpu = default_device()
 gpu_complete_modules = []
 
 
@@ -71,7 +70,9 @@ def fake_diffusers_current_device(model: torch.nn.Module, target_device: torch.d
 
 
 def get_cuda_free_memory_gb(device=None):
-    return free_memory_gb(gpu if device is None else device)
+    # Resolve the accelerator after torchrun has selected this process's rank.
+    # Resolving it at import time makes every worker initialize logical device 0.
+    return free_memory_gb(default_device() if device is None else device)
 
 
 

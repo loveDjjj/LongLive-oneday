@@ -145,8 +145,8 @@ set -e
 if [[ "${profile_status}" -ne 0 ]] && \
    grep -Eq "DrvFftsProfileStart failed|ADD_TO_LAUNCHER_LIST_AICORE failed|error code is 561103" "${raw_log}"; then
   echo "[error] msprof AICore/FFTS initialization failed before inference started" >&2
-  echo "[hint] keep MSPROF_AI_CORE=false (default), then retry with a new RUN_ID" >&2
-  echo "[hint] only use MSPROF_AI_CORE=true after aligning driver, firmware, CANN, and chip PMU support" >&2
+  echo "[hint] retry once with MSPROF_AI_CORE=false and a new RUN_ID to isolate workload errors from PMU errors" >&2
+  echo "[hint] a PMU-disabled profile is only a task/HCCL baseline and cannot support AICore pipeline conclusions" >&2
   exit "${profile_status}"
 fi
 

@@ -262,13 +262,13 @@ bash scripts/evaluation/run_msprof.sh 32s
 
 脚本始终运行完整 msprof：生成 resolved YAML、用 msprof 包裹 torchrun、恢复/解析 profile、汇总 warmup 后延迟和 FPS，并执行算子、HCCL、通信矩阵、慢卡、free analysis 和 advisor。
 
-默认关闭 AICore PMU，但仍采集 task timeline、AscendCL、Runtime、AICPU、HCCL 和系统内存。部分芯片、驱动、固件与 CANN 组合在 `--ai-core=on` 时会以 `DrvFftsProfileStart failed` 或 `561103` 失败。确认整套版本支持 PMU 后，可显式启用：
+默认开启 AICore PMU 并采集 `PipeUtilization`，用于分析 AICore 流水线利用率。多进程入口会先绑定各自的 `local_rank`，再解析默认 NPU，避免所有 rank 在 profiler 启动期间共同初始化逻辑 `npu:0`。
 
 ```bash
 MSPROF_AI_CORE=true bash scripts/evaluation/run_msprof.sh 32s
 ```
 
-若出现上述 FFTS 初始化错误，应使用新的 `RUN_ID` 并保持默认 `MSPROF_AI_CORE=false` 重跑；失败运行产生的 `PROF_*` 仅包含不完整初始化数据，不能用于性能结论。
+部分芯片、驱动、固件与 CANN 组合仍可能在 PMU 初始化阶段报 `DrvFftsProfileStart failed` 或 `561103`。此时可使用新的 `RUN_ID` 并设置 `MSPROF_AI_CORE=false` 重跑一次，以区分模型执行问题和 PMU 环境问题。关闭 PMU 的结果只有 task timeline、AscendCL、Runtime、AICPU、HCCL 和系统内存数据，可用于定位耗时与通信，但不能用于 AICore 流水线利用率结论；正式性能报告仍必须在版本匹配的环境中启用 PMU。失败运行产生的 `PROF_*` 仅包含不完整初始化数据，也不能用于性能结论。
 
 终端关键输出：
 

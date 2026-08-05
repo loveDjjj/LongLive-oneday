@@ -68,4 +68,4 @@ def test_msprof_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
     assert sparse.enabled is True
     assert sparse.backend == "ascend_triton"
     assert metadata["sparsity_method"] == "hsa_cag"
-    assert metadata["msprof"]["ai_core"] is False
+    assert metadata["msprof"]["ai_core"] is True
