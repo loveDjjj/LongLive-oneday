@@ -171,7 +171,18 @@ RUN_ID=hsa_cag_2k_dense_augmented_5pct \
 bash scripts/evaluation/run_vbench.sh longlive2_augmented_5pct
 ```
 
-### 5.5 Wan2.2 原生模型
+### 5.5 HSA+CAG 20% 串行评测
+
+标准 20% 和 Augmented 20% 可使用同一合并权重串行执行 HSA+CAG 评测。第一项失败时脚本立即停止；`RUN_ID_PREFIX` 可选，默认包含启动时间：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+RUN_ID_PREFIX=hsa_cag_step100_20pct \
+bash scripts/evaluation/run_vbench_hsa_cag_20pct.sh \
+  runs/merged/longlive2_hsa_cag_step100.pt
+```
+
+### 5.6 Wan2.2 原生模型
 
 ```bash
 LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B \
@@ -181,7 +192,7 @@ bash scripts/evaluation/run_vbench.sh wan22_standard_5pct
 
 不要给 `wan22_*` 命令设置 `LONGLIVE_SPARSE_METHOD=hsa_cag`。
 
-### 5.6 扩大评测规模
+### 5.7 扩大评测规模
 
 先用 5% 验证链路，再切换：
 
