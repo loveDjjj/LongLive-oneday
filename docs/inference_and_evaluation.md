@@ -262,6 +262,14 @@ bash scripts/evaluation/run_msprof.sh 32s
 
 脚本始终运行完整 msprof：生成 resolved YAML、用 msprof 包裹 torchrun、恢复/解析 profile、汇总 warmup 后延迟和 FPS，并执行算子、HCCL、通信矩阵、慢卡、free analysis 和 advisor。
 
+默认关闭 AICore PMU，但仍采集 task timeline、AscendCL、Runtime、AICPU、HCCL 和系统内存。部分芯片、驱动、固件与 CANN 组合在 `--ai-core=on` 时会以 `DrvFftsProfileStart failed` 或 `561103` 失败。确认整套版本支持 PMU 后，可显式启用：
+
+```bash
+MSPROF_AI_CORE=true bash scripts/evaluation/run_msprof.sh 32s
+```
+
+若出现上述 FFTS 初始化错误，应使用新的 `RUN_ID` 并保持默认 `MSPROF_AI_CORE=false` 重跑；失败运行产生的 `PROF_*` 仅包含不完整初始化数据，不能用于性能结论。
+
 终端关键输出：
 
 ```text

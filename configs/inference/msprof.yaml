@@ -47,6 +47,10 @@ msprof:
   output_type: db
   storage_limit: 50000MB
   task_time: "on"
+  # AICore PMU 依赖芯片、驱动、固件和 CANN 的严格匹配。默认关闭仍保留
+  # task timeline、AscendCL、Runtime、AICPU、HCCL 和系统内存数据。
+  ai_core: false
+  aic_mode: task-based
   aic_metrics: PipeUtilization
   recover_parse: auto
 

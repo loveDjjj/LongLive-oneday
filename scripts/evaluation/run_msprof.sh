@@ -67,8 +67,14 @@ json_nested() {
 output_type="$(json_nested msprof output_type)"
 storage_limit="$(json_nested msprof storage_limit)"
 task_time="$(json_nested msprof task_time)"
+ai_core="${MSPROF_AI_CORE:-$(json_nested msprof ai_core)}"
+aic_mode="$(json_nested msprof aic_mode)"
 aic_metrics="$(json_nested msprof aic_metrics)"
 recover_parse="$(json_nested msprof recover_parse)"
+if [[ "${ai_core}" != "true" && "${ai_core}" != "false" ]]; then
+  echo "[error] MSPROF_AI_CORE/msprof.ai_core must be true or false, got ${ai_core}" >&2
+  exit 1
+fi
 
 visible_count="$(awk -F, '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
 if [[ "${visible_count}" -ne "${required_devices}" ]]; then
@@ -101,22 +107,30 @@ cp "${metadata_tmp}" "${run_dir}/manifest.json"
 echo "[run] task=msprof preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
 echo "[run] config=${resolved_config} profile=${profile_dir}"
+echo "[run] msprof_ai_core=${ai_core} task_time=${task_time}"
+
+profiler_args=(
+  --output="${profile_dir}"
+  --type="${output_type}"
+  --storage-limit="${storage_limit}"
+  --ascendcl=on
+  --model-execution=on
+  --runtime-api=on
+  --task-time="${task_time}"
+  --aicpu=on
+  --sys-hardware-mem=on
+  --hccl=on
+)
+if [[ "${ai_core}" == "true" ]]; then
+  profiler_args+=(
+    --ai-core=on
+    --aic-mode="${aic_mode}"
+    --aic-metrics="${aic_metrics}"
+  )
+fi
 
 set +e
-LLV2_DEVICE=npu msprof \
-  --output="${profile_dir}" \
-  --type="${output_type}" \
-  --storage-limit="${storage_limit}" \
-  --ascendcl=on \
-  --model-execution=on \
-  --runtime-api=on \
-  --task-time="${task_time}" \
-  --ai-core=on \
-  --aic-mode=task-based \
-  --aic-metrics="${aic_metrics}" \
-  --aicpu=on \
-  --sys-hardware-mem=on \
-  --hccl=on \
+LLV2_DEVICE=npu msprof "${profiler_args[@]}" \
   "${GENERATION_ENV}/bin/torchrun" \
     --nnodes=1 \
     --nproc_per_node="${nproc}" \
@@ -127,6 +141,14 @@ LLV2_DEVICE=npu msprof \
   2>&1 | tee "${raw_log}"
 profile_status="${PIPESTATUS[0]}"
 set -e
+
+if [[ "${profile_status}" -ne 0 ]] && \
+   grep -Eq "DrvFftsProfileStart failed|ADD_TO_LAUNCHER_LIST_AICORE failed|error code is 561103" "${raw_log}"; then
+  echo "[error] msprof AICore/FFTS initialization failed before inference started" >&2
+  echo "[hint] keep MSPROF_AI_CORE=false (default), then retry with a new RUN_ID" >&2
+  echo "[hint] only use MSPROF_AI_CORE=true after aligning driver, firmware, CANN, and chip PMU support" >&2
+  exit "${profile_status}"
+fi
 
 mapfile -t prof_dirs < <(find "${profile_dir}" -type d -name 'PROF_*' | sort)
 if [[ "${#prof_dirs[@]}" -eq 0 ]]; then
