@@ -107,9 +107,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         self.crossattn_cache_neg = None
         self.args = args
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
-        self.quantize_kv = getattr(args, "kv_quant", False)
-        self.kv_quant_scale_rule = getattr(args, "kv_quant_scale_rule", "mse")
-        self.kv_quant_backend = getattr(args, "kv_quant_backend", "cuda")
+        self.quantize_kv = bool(getattr(args, "kv_quant", False))
+        if self.quantize_kv:
+            raise NotImplementedError("The maintained BF16 pipeline requires kv_quant=false")
         self.independent_first_frame = section_get(args, "inference", "independent_first_frame", False)
         self.local_attn_size = section_get(
             args, "inference", "local_attn_size", -1, aliases=("inference_local_attn_size",)
@@ -142,16 +142,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         vae_device = section_get(args, "inference", "vae_device", getattr(args, "vae_device", None))
         self.vae_device = torch.device(vae_device) if vae_device else None
 
-        if self.quantize_kv:
-            from utils.quant import LongLiveQuantizationConfig
-
-            self.kv_quant_config = LongLiveQuantizationConfig(
-                scale_rule=self.kv_quant_scale_rule,
-                backend=self.kv_quant_backend,
-                type="kv",
-            )
-        else:
-            self.kv_quant_config = None
+        self.kv_quant_config = None
         self._dit_model.kv_quant_config = self.kv_quant_config
 
         if self.streaming_vae and self.vae_device is not None:
@@ -843,75 +834,22 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         block_token_size = self.num_frame_per_block * self.frame_seq_length
         max_blocks = kv_cache_size // block_token_size
 
-        if self.quantize_kv:
-            from utils.quant import clone_quantized_tensor, quantize_to_fp4
-
-            print(
-                f"[KV Cache] Quantized (nvfp4): block_token_size={block_token_size}, "
-                f"max_blocks={max_blocks}, num_heads={num_heads}, layers={self.num_transformer_blocks}"
-            )
-            zero_block = torch.zeros(
-                [block_token_size * num_heads, head_dim],
-                dtype=dtype,
-                device=device,
-            )
-            zero_qt = quantize_to_fp4(zero_block, self.kv_quant_config)
-
         for _ in range(self.num_transformer_blocks):
-            if self.quantize_kv:
-                kv_cache_pos.append({
-                    "k": [clone_quantized_tensor(zero_qt) for _ in range(max_blocks)],
-                    "v": [clone_quantized_tensor(zero_qt) for _ in range(max_blocks)],
-                    "quantized": True,
-                    "block_token_size": block_token_size,
-                    "max_blocks": max_blocks,
-                    "num_heads": num_heads,
-                    "num_filled_blocks": 0,
-                    "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
-                    "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
-                })
-                kv_cache_neg.append({
-                    "k": [clone_quantized_tensor(zero_qt) for _ in range(max_blocks)],
-                    "v": [clone_quantized_tensor(zero_qt) for _ in range(max_blocks)],
-                    "quantized": True,
-                    "block_token_size": block_token_size,
-                    "max_blocks": max_blocks,
-                    "num_heads": num_heads,
-                    "num_filled_blocks": 0,
-                    "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
-                    "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
-                })
-            else:
-                kv_cache_pos.append({
-                    "k": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
-                    "v": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
-                    "quantized": False,
-                    "block_token_size": block_token_size,
-                    "max_blocks": max_blocks,
-                    "num_heads": num_heads,
-                    "num_filled_blocks": 0,
-                    "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
-                    "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
-                })
-                kv_cache_neg.append({
-                    "k": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
-                    "v": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
-                    "quantized": False,
-                    "block_token_size": block_token_size,
-                    "max_blocks": max_blocks,
-                    "num_heads": num_heads,
-                    "num_filled_blocks": 0,
-                    "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                    "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
-                    "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
-                })
+            cache = {
+                "k": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
+                "quantized": False,
+                "block_token_size": block_token_size,
+                "max_blocks": max_blocks,
+                "num_heads": num_heads,
+                "num_filled_blocks": 0,
+                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
+                "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
+            }
+            kv_cache_pos.append(cache)
+            kv_cache_neg.append({key: value.clone() if torch.is_tensor(value) else value for key, value in cache.items()})
 
         self.kv_cache_pos = kv_cache_pos  # always store the clean cache
         self.kv_cache_neg = kv_cache_neg  # always store the clean cache

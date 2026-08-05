@@ -1,9 +1,111 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
+
+
+def list_training_checkpoints(output_dir):
+    """Return one checkpoint per step, preferring the current layout."""
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return []
+
+    checkpoints = {}
+    for checkpoint_file in output_dir.glob("checkpoint_model_*/model.pt"):
+        try:
+            step = int(checkpoint_file.parent.name.removeprefix("checkpoint_model_"))
+        except ValueError:
+            continue
+        checkpoints[step] = (
+            step,
+            str(checkpoint_file.parent),
+            checkpoint_file.parent.name,
+            str(checkpoint_file),
+        )
+
+    for checkpoint_file in (output_dir / "checkpoints").glob("step_*/train_state.pt"):
+        try:
+            step = int(checkpoint_file.parent.name.removeprefix("step_"))
+        except ValueError:
+            continue
+        checkpoints[step] = (
+            step,
+            str(checkpoint_file.parent),
+            checkpoint_file.parent.name,
+            str(checkpoint_file),
+        )
+
+    return [checkpoints[step] for step in sorted(checkpoints)]
+
+
+def find_latest_training_checkpoint(output_dir):
+    checkpoints = list_training_checkpoints(output_dir)
+    return checkpoints[-1][3] if checkpoints else None
+
+
+def resume_samples_per_rank(
+    checkpoint,
+    *,
+    step,
+    current_data_parallel_size,
+    current_sequence_parallel_size,
+    current_batch_size,
+    current_accumulation_steps,
+):
+    """Convert a global checkpoint cursor into samples consumed by each DP rank."""
+    saved_world_size = int(
+        checkpoint.get(
+            "world_size",
+            current_data_parallel_size * current_sequence_parallel_size,
+        )
+    )
+    inferred_sp_size = "sequence_parallel_size" not in checkpoint
+    saved_sp_size = int(
+        checkpoint.get("sequence_parallel_size", current_sequence_parallel_size)
+    )
+    saved_dp_size = int(
+        checkpoint.get(
+            "data_parallel_size",
+            saved_world_size // max(saved_sp_size, 1),
+        )
+    )
+    saved_batch_size = int(checkpoint.get("batch_size", current_batch_size))
+    saved_accumulation = int(
+        checkpoint.get(
+            "gradient_accumulation_steps", current_accumulation_steps
+        )
+    )
+
+    # Version-2 checkpoints counted SP workers as independent samples. Rebuild
+    # their cursor from the saved logical DP layout instead of trusting it.
+    if "data_parallel_size" in checkpoint:
+        global_samples = int(
+            checkpoint.get(
+                "global_samples_consumed",
+                step * saved_dp_size * saved_batch_size * saved_accumulation,
+            )
+        )
+    else:
+        global_samples = (
+            step * saved_dp_size * saved_batch_size * saved_accumulation
+        )
+
+    denominator = current_data_parallel_size * current_batch_size
+    samples, remainder = divmod(global_samples, denominator)
+    metadata = {
+        "global_samples": global_samples,
+        "remainder": remainder,
+        "saved_world_size": saved_world_size,
+        "saved_data_parallel_size": saved_dp_size,
+        "saved_sequence_parallel_size": saved_sp_size,
+        "inferred_sequence_parallel_size": inferred_sp_size,
+        "saved_batch_size": saved_batch_size,
+        "saved_accumulation_steps": saved_accumulation,
+    }
+    return samples * current_batch_size, metadata
 
 
 def restore_fsdp_optimizer_state(fsdp_cls, model, optimizer, full_state_dict):

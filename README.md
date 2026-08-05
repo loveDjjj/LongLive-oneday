@@ -1,182 +1,114 @@
-<p align="center" style="border-radius: 10px">
-  <img src="assets/longlive2/logo.png" width="100%" alt="LongLive2.0 logo"/>
-</p>
+# LongLive2.0 昇腾 HSA+CAG
 
-# 🎬 LongLive 2.0: An NVFP4 Parallel Infrastructure for Long Video Generation
+本仓库维护 LongLive2.0-5B 在昇腾 NPU 上的 BF16 稀疏后训练、推理和评测流程。当前唯一训练目标是提示词驱动的 DMD 后训练：Generator 使用 HSA+CAG 稀疏注意力，Real Teacher 和 Fake Critic 使用稠密注意力，Generator 与 Critic 均通过 LoRA 更新。
 
-[![Paper](https://img.shields.io/badge/Paper-LongLive_2.0-brown)](https://arxiv.org/abs/2605.18739)
-[![Paper](https://img.shields.io/badge/Paper-LongLive_1.0-orange)](https://github.com/NVlabs/LongLive/tree/v1.0)
-[![Paper](https://img.shields.io/badge/Paper-LongLive_RAG-yellow)](https://github.com/qixinhu11/LongLive-RAG)
-[![Video](https://img.shields.io/badge/YouTube-Video-red)](https://www.youtube.com/watch?v=7oQALy32fiU)
-[![Code](https://img.shields.io/badge/GitHub-Code-blue)](https://github.com/NVlabs/LongLive)
-[![Demo](https://img.shields.io/badge/Demo-Page-green)](https://nvlabs.github.io/LongLive/LongLive2/)
-[![Docs](https://img.shields.io/badge/Full-Documentation-brightgreen)](https://nvlabs.github.io/LongLive/LongLive2/docs/)
+## 当前范围
 
+- 模型：`Wan2.2-TI2V-5B` 与 LongLive2.0 合并后的 Generator。
+- 训练：纯提示词、32 latent 帧、每块 8 帧、4 步 backward simulation。
+- 并行：FSDP + Ulysses SP + DP，支持单机和多机。
+- 稀疏后端：`ascend_triton` 为正式路径，`portable` 仅用于正确性对照。
+- 推理：BF16 Ulysses SP，支持稠密和 HSA+CAG 对照。
+- 评测：VBench Standard 与 msprof。
 
-<div align="center">
+不再维护源仓库的 AR、I2V、NVFP4、FourOverSix、CUDA/Hopper 和非 SP 推理入口。配置若启用这些能力会在启动阶段直接失败。
 
-<!-- TODO: replace this text block with the final project-page video/demo embed. -->
+## 目录规范
 
-[![Watch the video](assets/longlive2/first-video-frame.png)](https://www.youtube.com/watch?v=7oQALy32fiU)
+```text
+configs/
+  train/hsa_cag.yaml               # 唯一训练源配置
+  inference/                        # VBench 和 msprof 紧凑预设
+scripts/                            # 按 data/training/evaluation/checkpoints 分组
+data/train/                         # 训练提示词与数据 manifest
+runs/                               # checkpoint、配置、manifest、视频和评测产物
+logs/                               # 仅保存文本日志和 JSONL 指标
+docs/                               # 中文操作文档
+```
 
-</div>
+一次训练运行的产物如下：
 
-## 💡 TLDR: Infra with NVFP4 and parallelism for both training and inference
+```text
+runs/training/<run-name>/
+  config.source.yaml
+  config.resolved.yaml
+  manifest.json
+  checkpoints/step_0000010/train_state.pt
 
-<p align="center" style="border-radius: 10px">
-  <img src="assets/longlive2/teaser.jpg" width="100%" alt="LongLive2.0 teaser"/>
-</p>
+logs/training/<run-name>/
+  node_0.log
+  metrics.jsonl
+```
 
-## News
-- 🔥 [2026.06.01] We released [LongLive-RAG](https://github.com/qixinhu11/LongLive-RAG), a general retrieval-augmented framework for long video gen.
-- 🔥 [2026.05.30] LongLive2.0 now supports I2V AR teacher-forcing training and I2V DMD distillation for Wan2.2-TI2V-5B.
-- ⚡ [2026.05.25] We optimized the NVFP4 inference path with fused Triton RoPE/adaLN kernels, reduced KV-cache synchronization overhead, in-place quantized KV-cache updates, faster FP4 KV dequantization, pinned VAE transfers, and safer LoRA-before-quantization setup, improving overall throughput by **18.6%**.
-- 🔥 [2026.05.13] We release **LongLive 2.0**, infra with NVFP4, parallelism and multi-shot for AR training, DMD distillation, and inference (⚡45.7 FPS). The original LongLive 1.0 is now in the [v1.0](https://github.com/NVlabs/LongLive/tree/v1.0) branch.
-- 🔥 [2026.04.12] LongLive supports kv cache compression with [TriAttention](https://github.com/WeianMao/triattention), with 50% KV reduction and no quality drop. Check it [here](https://github.com/WeianMao/triattention/tree/main/longlive)
-- 🎉 [2026.1.27] LongLive is accepted by **ICLR-2026**.
-- 🔥 [2026.1.11] LongLive supports adapting LongLive's original RoPE into KV-cache relative RoPE and generates infinite long videos!
-- 🔥 [2025.11.3] We implement LongLive on linear attention model [SANA-Video](https://nvlabs.github.io/Sana/Video/)! Now SANA-Video can generate 60s interactive videos in real-time.
-- 🔥 [2025.9.29] We release [Paper](https://arxiv.org/abs/2509.22622), this GitHub repo [LongLive](https://github.com/NVlabs/LongLive) with all training and inference code, the model weight [LongLive-1.3B](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B), and demo page [Website](https://nvlabs.github.io/LongLive).
+## 快速开始
 
-## Introduction
-
-**LongLive 1.0**: Real-time Interactive Long Video Generation. [You can find it here](https://github.com/NVlabs/LongLive/tree/v1.0) in our V1.0 branch.
-
-**LongLive 2.0**: an NVFP4 Parallel Infrastructure for Long Video Generation
-- For training, it supports
-  - [x] Balanced sequence parallel for T2V/I2V AR training (teacher-forcing).
-  - [x] T2V/I2V AR training on multi-shot (or single-shot) videos.
-  - [x] NVFP4 (or BF16) for both AR training and few-step distillation.
-- For inference, it supports
-  - [x] NVFP4 inference (W4A4) and NVFP4 KV Cache.
-  - [x] Multi-shot attention sink.
-  - [x] Sequence parallel inference.
-  - [x] Async decoding.
-
-
-<p align="left" style="border-radius: 10px">
-  <img src="assets/longlive2/fig_framework_overview.png" width="80%" alt="LongLive2.0 framework overview"/>
-</p>
-
-
-**LongLive 1.0**: Real-time Interactive Long Video Generation. It accepts sequential user prompts and generates corresponding videos in real time, enabling user-guided long video generation. The key insights are attention sink, KV-recache, and streaming long tuning. 
-
-
-<p align="left" style="border-radius: 10px">
-  <img src="assets/longlive2/LongLive1_teaser.png" width="80%" alt="LongLive1.0 framework overview"/>
-</p>
-
-## Getting Started
-- [Full Documentation](https://nvlabs.github.io/LongLive/LongLive2/docs/)
-- [Installation](https://nvlabs.github.io/LongLive/LongLive2/docs/#installation)
-- [NVFP4 Setup](https://nvlabs.github.io/LongLive/LongLive2/docs/#nvfp4-installation)
-- [Training Modes](https://nvlabs.github.io/LongLive/LongLive2/docs/#training)
-- [Inference](https://nvlabs.github.io/LongLive/LongLive2/docs/#inference)
-- [Data Organization](https://nvlabs.github.io/LongLive/LongLive2/docs/#training-data)
-
-
-The default git clone fetches objects from all branches, including our demopage branch, which contains large assets. For normal use, only the main branch is needed. Please clone only main with:
-
-```git clone --single-branch --branch main --depth 1 https://github.com/NVlabs/LongLive.git```
-
-### Quick Start
-
-The `npu` branch maintains two Ascend BF16 inference workflows:
+1. 按 [环境安装指南](docs/getting_started.md) 配置 CANN、PyTorch、`torch_npu` 和 Ascend Triton。
+2. 准备提示词：
 
 ```bash
-bash scripts/run_msprof.sh 32s
-bash scripts/run_vbench.sh longlive2_standard_20pct
+bash scripts/data/prepare_training_data.sh
 ```
 
-Runtime presets live in `configs/inference/`. See
-[`docs/NPU_BF16_RUN_GUIDE.md`](docs/NPU_BF16_RUN_GUIDE.md) for device layout,
-environment variables, datasets, output naming, and profiler semantics. NVFP4
-configs are intentionally not shipped on this Ascend-only branch.
-
-## Training Modes
-
-LongLive2.0 supports both T2V and I2V training. Each modality follows the same two-stage recipe: AR teacher-forcing training first, then DMD distillation from the AR checkpoint.
-
-The Ascend HSA+CAG sparse-attention adaptation, prompt preparation, DMD recipe,
-and dense/sparse evaluation procedure are documented in
-[`docs/hsa_cag_training.md`](docs/hsa_cag_training.md).
-
-### T2V Training
+3. 验证 Ascend Triton 前向和反向：
 
 ```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
-  --config_path configs/train_ar.yaml \
-  --logdir logs/train_ar \
-  --wandb-save-dir wandb \
-  --disable-wandb
-
-torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
-  --config_path configs/train_dmd.yaml \
-  --logdir logs/train_dmd \
-  --wandb-save-dir wandb \
-  --disable-wandb
+ASCEND_RT_VISIBLE_DEVICES=15 PYTHONUNBUFFERED=1 \
+python tests/npu/ascend_hsa_kernel_smoke.py --device npu:0
 ```
 
-### I2V Training
+4. 运行 12 卡单步训练烟测：
 
 ```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
-  --config_path configs/train_i2v_ar.yaml \
-  --logdir logs/train_i2v_ar \
-  --wandb-save-dir wandb \
-  --disable-wandb
-
-torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
-  --config_path configs/train_i2v_dmd.yaml \
-  --logdir logs/train_i2v_dmd \
-  --wandb-save-dir wandb \
-  --disable-wandb
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+MAX_ITERS=1 TRAIN_RUN_NAME=hsa_cag_smoke \
+VIS_INTERVAL=0 \
+bash scripts/training/run_hsa_cag.sh
 ```
 
-For I2V configs, set `algorithm.i2v: true` and `algorithm.independent_first_frame: true`. `data.image_or_video_shape[1]` is the full latent sequence length, for example `96`, not `96 + 1`: the clean image latent replaces the first latent during denoising and that first latent is masked out of the training loss. For I2V DMD, set `checkpoints.generator_ckpt` to the I2V AR checkpoint used to initialize the student.
+5. 正式训练时复用同一脚本并明确设置步数和梯度累积。完整命令、批量含义、恢复规则和双节点示例见 [HSA+CAG 训练指南](docs/hsa_cag_training.md)。
 
-## Models
+## 推理与评测
 
-| Model | FPS ↑ | Params | VBench ↑ | Multi-shot |
-| --- | ---: | ---: | ---: | :---: |
-| [LongLive-1.3B](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B) | 20.7 | 1.3B | 84.87 |  |
-| [LongLive-2.0-5B](https://huggingface.co/Efficient-Large-Model/LongLive-2.0-5B) | 24.8 | 5B | 85.06 | ✅ |
-| [LongLive-2.0-5B-NVFP4-4Step](https://huggingface.co/Efficient-Large-Model/LongLive-2.0-5B-NVFP4-S4) | 29.7 | 5B | 84.51 | ✅ |
-| [LongLive-2.0-5B-NVFP4-2Step](https://huggingface.co/Efficient-Large-Model/LongLive-2.0-5B-NVFP4-S2) | 45.7 | 5B | 83.14 | ✅ |
+训练 checkpoint 保存的是 LoRA 和恢复状态。先合并 Generator LoRA：
 
-## License
-This repository is released under the Apache 2.0 license. See [LICENSE](LICENSE) for details.
-
-## Citation
-Please consider citing our work if you find them useful:
-
-```bibtex
-@article{longlive_2.0,
-  title={LongLive2.0: An NVFP4 Parallel Infrastructure for Long Video Generation},
-  author={Chen, Yukang and Wang, Luozhou and Huang, Wei and Yang, Shuai and Zhang, Bohan and Xiao, Yicheng and Chu, Ruihang and Mao, Weian and Hu, Qixin and Liu, Shaoteng and Zhao, Yuyang and Mao, Huizi and Chen, Ying-Cong and Xie, Enze and Qi, Xiaojuan and Han, Song},
-  journal={arXiv preprint arXiv: 2605.18739},
-  year={2026}
-}
+```bash
+python scripts/checkpoints/merge_lora.py \
+  --config_path configs/train/hsa_cag.yaml \
+  --generator_ckpt /path/to/longlive2_merged_generator.pt \
+  --lora_ckpt runs/training/<run-name>/checkpoints/step_0002000/train_state.pt \
+  --output_path runs/merged/longlive2_hsa_cag_2k.pt \
+  --device npu:0
 ```
 
-```bibtex
-@inproceedings{longlive,
-    title={Longlive: Real-time interactive long video generation}, 
-    author={Yang, Shuai and Huang, Wei and Chu, Ruihang and Xiao, Yicheng and Zhao, Yuyang and Wang, Xianbang and Li, Muyang and Xie, Enze and Chen, Yingcong and Lu, Yao and others},
-    booktitle={ICLR},
-    year={2026},
-}
+再使用同一权重运行稠密对照和稀疏实验：
+
+```bash
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
+RUN_ID=hsa_cag_dense \
+bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
+
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=hsa_cag RUN_ID=hsa_cag_sparse \
+bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
 ```
 
-```bibtex
-@article{longlive_rag,
-  title         = {LongLive-RAG: A General Retrieval-Augmented Framework for Long Video Generation},
-  author        = {Hu, Qixin and Yang, Shuai and Huang, Wei and Han, Song and Chen, Yukang},
-  journal       = {arXiv preprint arXiv:2606.02553},
-  year          = {2026}
-}
+性能采集：
+
+```bash
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=hsa_cag \
+bash scripts/evaluation/run_msprof.sh 32s
 ```
 
-## Acknowledgement
-- [Self-Forcing](https://github.com/guandeh17/Self-Forcing): the AR training codebase and formulation we build upon.
-- [Wan2.2](https://github.com/Wan-Video/Wan2.2): the base video diffusion model components used in this release.
+推理预设、设备数量和输出格式见 [推理与评测指南](docs/inference_and_evaluation.md)。
+
+## 文档
+
+- [环境安装、依赖检查与烟测](docs/getting_started.md)
+- [训练、数据集、日志、checkpoint 与恢复](docs/hsa_cag_training.md)
+- [推理、VBench、msprof 与评测产物](docs/inference_and_evaluation.md)
+
+## 上游项目
+
+本项目基于 NVIDIA LongLive2.0 代码演进，并保留原项目适用的许可证和版权声明。论文与上游实现请参考 [NVlabs/LongLive](https://github.com/NVlabs/LongLive)。

@@ -40,5 +40,3 @@ agent/profiles/
 *.egg-info/
 build/
 dist/
-fouroversix/build/
-utils/kernel/build/

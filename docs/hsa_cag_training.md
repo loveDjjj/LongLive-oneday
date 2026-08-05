@@ -1,138 +1,322 @@
-# 昇腾 NPU 上的 LongLive2 HSA+CAG
+# HSA+CAG 训练指南
 
-本分支新增了与 Light Forcing 类似的稀疏后训练和推理路径，同时保留 LongLive 现有的因果 KV Cache、Ulysses SP、检查点格式和异步 VAE 实现。
+本文是当前唯一训练流程的权威说明，覆盖训练目标、数据集、并行布局、启动命令、终端输出、日志、checkpoint、恢复和 LoRA 合并。环境安装与 kernel 测试见 [环境安装与测试](getting_started.md)，质量和性能评测见 [推理与评测指南](inference_and_evaluation.md)。
 
-## 已实现功能
+## 1. 训练范围
 
-- CAG Chunk 稀疏率：第一个 Chunk 保持 Dense，后续 Chunk 的历史 KV 稀疏率按 `base - beta / sqrt(frames)` 增长，并满足配置的平均历史稀疏率目标。
-- HSA 帧级路由：保留 Sink 帧、最近帧，以及与当前 Query 最相关的中间历史帧。
-- HSA Block 级路由：在选中的历史帧内继续筛选 Token Block，当前 Chunk 始终保持完整可见。
-- 昇腾执行后端：先 Gather 选中的 K/V，再调用 PyTorch SDPA；支持 Query Block 批处理。路由选择本身不可微，但梯度可以通过被选中的 Q/K/V 传播。
-- 训练：仅使用 Prompt 的 DMD 后训练，包含稀疏 Generator、Dense Real Teacher 和 Fake Critic。
-- 推理：普通推理和 Ulysses SP 的 Cached Attention 路径均支持 HSA+CAG。
+当前训练是 LongLive2.0-5B 的提示词驱动稀疏 DMD 后训练，不读取真实视频，也不维护 AR、I2V、teacher forcing、NVFP4 或非 causal 分支：
 
-当前 NPU 后端优先保证正确性和可训练性，并不是 Light Forcing 中融合后的 Triton/FA4 Kernel。它会真实减少参与注意力计算的历史 K/V Token，但最终加速效果仍需通过 msprof 验证，不能仅根据理论稀疏率判断。
+1. HSA+CAG Generator 从噪声在线生成 32 个 latent 帧。
+2. 32 帧按每块 8 帧分成 4 个因果时间块，使用 4 步采样。
+3. Dense Real Teacher 和 Dense Fake Critic 对 Generator 中间状态计算 score。
+4. Critic 每个 optimizer step 更新；Generator 默认每 5 步更新一次。
+5. Generator 与 Fake Critic 只更新 LoRA，基础参数冻结；Real Teacher 不更新。
 
-本实现相对原版 Light Forcing 做了以下适配：
+四个时间块属于同一个视频样本，和 DP 数量无关。Generator 使用稀疏自注意力，Teacher/Critic 保持稠密，避免监督目标同时引入稀疏偏差。
 
-- 原论文使用因果 Wan2.1 Student，并使用非因果 Wan2.1-14B 提供 Score；本项目使用全因果 Wan2.2-TI2V-5B Teacher/Critic，以兼容现有 LongLive2 检查点和训练代码。
-- 保留项目原生的 8 帧 Latent Chunk 和 `44x80` Token Grid。
-- 默认平均历史稀疏率和末期基础稀疏率分别设为 `0.85`、`0.95`，比论文中的 `0.88`、`0.98` 更保守，便于先验证 NPU 稳定性和质量。
+## 2. HSA+CAG 行为
 
-## 训练数据
+- CAG 根据 rollout 位置调整历史 KV 稀疏率；没有历史 KV 的第一块保持稠密。
+- HSA 先选择历史帧，再选择帧内 token block。
+- Sink、最近历史和当前块按配置强制保留，`dense_current=true`。
+- 正式训练使用 `ascend_triton`，kernel 直接消费 block LUT 并支持前向和反向。
+- 路由索引不可微，但被选中的 Q/K/V 保持梯度传播。
 
-训练只需要 Prompt，不需要读取真实视频或预先保存的 VAE Latent。Student 从纯噪声开始在线生成中间状态，DMD Loss 比较 Real Teacher 与 Fake Critic 在这些状态上的 Score。
+默认空间网格是 `44 x 80`，每帧在 SP 分片前对应 3520 个 token。每 rank 的 token 数为 `3520 / SP_SIZE`；默认 SP4 是 880，SP8 是 440。`block_q` 和 `block_k` 必须整除当前布局的每 rank token 数，默认 40 对 SP1/2/4/8 都合法。
 
-准备数据：
+## 3. 训练数据集
 
-```bash
-bash scripts/prepare_hsa_training_data.sh
-```
+### 3.1 数据契约
 
-脚本默认离线运行。如果已存在并通过 SHA256 和数量校验的 `prompts_train.txt`，会直接复用且不会发起任何网络请求；否则会查找本地 `source_prompts.txt` 或 `vidprom_filtered_extended.txt`，完成去重并移除与 VBench Prompt 规范化后完全相同的样本。也可以通过 `SOURCE_FILE=/path/to/vidprom_filtered_extended.txt` 指定本地文件。只有显式设置 `ALLOW_DOWNLOAD=1` 时才会访问 Hugging Face。预期得到 `248217` 条训练 Prompt。数据来源和过滤规则见 `data/train/README.md`。
-
-## 启动训练
-
-先运行 10 Iteration 的 Smoke Test。默认使用 16 张卡组成 `SP4 x DP4`：每 4 张卡通过 Ulysses 将生成器的 Sequence/Attention Head 互换，4 个 SP 组分别处理不同 Prompt。Dense Teacher 和 Critic 仍保持原 DMD 计算路径，所有模型继续由 FSDP 分片参数。
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-NPROC_PER_NODE=16 \
-SP_SIZE=4 \
-GRADIENT_ACCUMULATION_STEPS=1 \
-MAX_ITERS=10 \
-TRAIN_RUN_NAME=hsa_cag_smoke \
-bash scripts/run_npu_hsa_cag_training.sh
-```
-
-Smoke Test 通过后启动正式训练：
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-NPROC_PER_NODE=16 \
-SP_SIZE=4 \
-GRADIENT_ACCUMULATION_STEPS=16 \
-MAX_ITERS=2000 \
-TRAIN_RUN_NAME=hsa_cag_2k \
-bash scripts/run_npu_hsa_cag_training.sh
-```
-
-复用同一个 `TRAIN_RUN_NAME` 会从该目录中最新的检查点继续训练。新版 LoRA 检查点会完整保存 Generator/Critic LoRA、两套 AdamW Optimizer State、训练 Step、全局样本游标和各 Rank 的随机数状态。相同卡数、单卡 Batch Size 和梯度累积配置下可以无损恢复；旧版仅包含 LoRA 权重和 Step 的检查点仍可加载，但会输出 AdamW State 缺失警告。
-
-改变卡数后，FSDP 会将完整 Optimizer State 重新分片，因此可以继续训练；但样本到 Rank 的分配和各 Rank 随机数流会改变，不能保证与原布局逐样本、逐位一致。启动脚本还会记录配置文件、解析后的配置、完整日志和实际使用端口。有效全局 Batch Size 为：
+训练只接受 UTF-8 文本：
 
 ```text
-(NPROC_PER_NODE / SP_SIZE) * batch_size * GRADIENT_ACCUMULATION_STEPS
+一条非空行 = 一个训练样本
 ```
 
-因此默认 `SP4 x DP4`、单卡 Batch Size 1、累积 16 次时，有效全局 Batch Size 为 64。Smoke Test 使用累积 1 时，有效 Batch Size 为 4。SP Rank 不代表额外样本，不能计入有效 Batch Size。
+空行会被忽略。`PromptDataset` 为每条提示词返回同一提示词组成的四块时间序列：
 
-## 合并与评测
+```python
+{
+    "idx": 17,
+    "prompt": "A paper boat floats along a narrow stream.",
+    "prompts": ["A paper boat floats along a narrow stream."] * 4,
+}
+```
 
-训练检查点同时包含 Generator LoRA 和 Critic LoRA。评测前只需将 Generator LoRA 合并到 LongLive2 Generator：
+这里的 4 是 `32 latent frames / 8 frames per block`，不是四条独立样本。
+
+### 3.2 准备 VidProM 衍生提示词
+
+默认脚本离线运行，优先复用已经通过数量与 SHA256 校验的文件：
 
 ```bash
-/mnt/share/r50063443/conda_envs/longlive/bin/python \
-  scripts/merge_lora_generator.py \
-  --config_path configs/train_dmd_hsa_cag_npu_bf16.yaml \
+bash scripts/data/prepare_training_data.sh
+```
+
+指定本地源文件：
+
+```bash
+SOURCE_FILE=/path/to/vidprom_filtered_extended.txt \
+bash scripts/data/prepare_training_data.sh
+```
+
+只有明确允许联网时才启用下载：
+
+```bash
+ALLOW_DOWNLOAD=1 bash scripts/data/prepare_training_data.sh
+```
+
+输入目标是 248221 条非空提示词：
+
+```text
+SHA256 7896742f468bc8aef9e4547424d1ce0a951acdb2a82233790155401a99bf5aa5
+```
+
+准备脚本会按规范化文本去重，并排除与完整 VBench Standard/Augmented 重合的提示词。输出：
+
+```text
+data/train/vidprom_filtered_extended/
+├── prompts_train.txt       # 248217 条
+└── manifest.json           # 来源、hash、去重数和评测集排除数
+```
+
+输出 SHA256：
+
+```text
+c5ca345c5cb83db295dee0dda0f06530032e5ea2fe0e83c6fe686a4111b02623
+```
+
+VidProM 衍生数据按 CC BY-NC 4.0 的适用范围使用。训练启动器只校验文件存在和非空行数量；标准数据准备脚本额外校验固定 SHA256。
+
+## 4. SP、DP、step 和样本数
+
+```text
+world_size = NNODES x NPROC_PER_NODE
+DP = world_size / SP_SIZE
+有效 batch = DP x batch_size x GRADIENT_ACCUMULATION_STEPS
+```
+
+当前 `batch_size` 固定为 1。模型有 24 个 attention head，每个时间块有 8 个 latent 帧，因此合法 `SP_SIZE` 为 `1/2/4/8`。
+
+| 卡数 | 推荐布局 | 累积为 1 时每 step 的提示词数 |
+| ---: | --- | ---: |
+| 1 | SP1 x DP1 | 1 |
+| 12 | SP4 x DP3 | 3 |
+| 16 | SP4 x DP4 或 SP8 x DP2 | 4 或 2 |
+| 24，双节点各 12 卡 | SP4 x DP6 | 6 |
+| 32，双节点各 16 卡 | SP8 x DP4 或 SP4 x DP8 | 4 或 8 |
+
+一个 `step` 是一次 optimizer 更新，不是一条样本或一个时间块。12 卡 SP4、DP3、累积 16 时每步抽样 48 条提示词；2000 步约 96000 次抽样，相当于 248217 条训练集的约 0.387 epoch。
+
+增加 SP 主要改变单样本的分片和通信；增加 DP 主要提高总吞吐。跨节点 SP 会增加 HCCL 开销，推荐让每个 SP 组完整位于单节点。
+
+## 5. 配置和启动变量
+
+唯一源配置：
+
+```text
+configs/train/hsa_cag.yaml
+```
+
+启动器把环境覆盖写到 `runs/training/<run-name>/config.resolved.yaml`，训练进程只读取 resolved 配置。
+
+| 环境变量 | 含义 | 默认值 |
+| --- | --- | --- |
+| `ASCEND_RT_VISIBLE_DEVICES` | 当前节点可见 NPU | `0,...,15` |
+| `NPROC_PER_NODE` | 每节点 worker 数 | 16 |
+| `NNODES` / `NODE_RANK` | 节点数 / 当前节点编号 | 1 / 0 |
+| `MASTER_ADDR` / `MASTER_PORT` | rendezvous 地址 | `127.0.0.1:29600` |
+| `SP_SIZE` | Ulysses SP 大小 | 4 |
+| `GRADIENT_ACCUMULATION_STEPS` | 梯度累积次数 | 16 |
+| `MAX_ITERS` | 训练结束时的目标 step | 2000 |
+| `SAVE_INTERVAL` | checkpoint 间隔 | 10 |
+| `VIS_INTERVAL` | 训练内验证间隔，0 关闭 | 100 |
+| `MAX_CHECKPOINTS` | 保留的 checkpoint 数 | 20 |
+| `HSA_BACKEND` | 稀疏后端 | `ascend_triton` |
+| `HSA_QUERY_BLOCK_BATCH` | portable Query block 合并数 | 1 |
+| `SHARDING_STRATEGY` | 可选 FSDP 策略覆盖 | 空，使用 YAML |
+| `TRAIN_RUN_NAME` | 运行目录与自动恢复标识 | 时间戳名称 |
+| `DISABLE_WANDB` | 1 禁用 W&B | 1 |
+| `LLV2_TRAIN_PROGRESS` | 1 显示 tqdm 进度 | 1 |
+
+路径变量：`LONGLIVE_ROOT`、`GENERATION_ENV`、`MODEL_ROOT`、`GENERATOR_CKPT`、`TRAIN_PROMPTS`、`CONFIG_PATH`。启动器会在分配模型前校验 Python、torchrun、模型文件、Generator checkpoint 和提示词文件。
+
+## 6. 常用训练命令
+
+### 6.1 单卡功能检查
+
+5B Generator、Teacher、Critic 可能超过单卡 HBM；该命令主要检查初始化与小环境：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 SP_SIZE=1 GRADIENT_ACCUMULATION_STEPS=1 \
+MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 \
+VIS_INTERVAL=0 TRAIN_RUN_NAME=hsa_cag_1card_smoke \
+bash scripts/training/run_hsa_cag.sh
+```
+
+### 6.2 12 卡单步烟测
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 \
+VIS_INTERVAL=0 TRAIN_RUN_NAME=hsa_cag_12card_smoke \
+bash scripts/training/run_hsa_cag.sh
+```
+
+### 6.3 12 卡正式训练
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=16 \
+MAX_ITERS=2000 SAVE_INTERVAL=10 MAX_CHECKPOINTS=20 \
+VIS_INTERVAL=100 TRAIN_RUN_NAME=hsa_cag_12card_2k \
+bash scripts/training/run_hsa_cag.sh
+```
+
+有效 batch 是 48。累积 16 会执行 16 个 micro-batch，墙钟时间近似随累积增加；改变有效 batch 后应重新评估学习率和总样本数。
+
+### 6.4 双节点 24 卡
+
+两台机器使用相同代码、环境、共享路径、`TRAIN_RUN_NAME`、`MASTER_ADDR` 和 `MASTER_PORT`。
+
+节点 0：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+NNODES=2 NODE_RANK=0 NPROC_PER_NODE=12 \
+MASTER_ADDR=10.0.0.10 MASTER_PORT=29600 \
+SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=8 MAX_ITERS=2000 \
+TRAIN_RUN_NAME=hsa_cag_24card_2k \
+bash scripts/training/run_hsa_cag.sh
+```
+
+节点 1 运行同一命令，只将 `NODE_RANK=1`。该布局为 SP4 x DP6，有效 batch 为 48。
+
+### 6.5 双节点 32 卡
+
+每节点 16 卡可用 SP8，使 SP 组不跨节点：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+NNODES=2 NODE_RANK=<0或1> NPROC_PER_NODE=16 \
+MASTER_ADDR=10.0.0.10 MASTER_PORT=29600 \
+SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=12 MAX_ITERS=2000 \
+TRAIN_RUN_NAME=hsa_cag_32card_2k \
+bash scripts/training/run_hsa_cag.sh
+```
+
+该布局为 SP8 x DP4，有效 batch 为 48。
+
+## 7. 终端输出和指标
+
+启动阶段应看到实际布局、路径和后端：
+
+```text
+[launch] time=... node=0/1 run=hsa_cag_12card_2k
+[run] Ascend Triton HSA backend is available
+[run] node=0/1 devices=... world=12 SP=4 DP=3 effective_batch=48
+[run] prompts=248217 model_root=...
+[run] generator_ckpt=...
+[run] save_interval=10 vis_interval=100 max_checkpoints=20
+```
+
+训练 tqdm 的 postfix 会依次显示 text encoding、rollout/loss、backward、optimizer。Generator 更新步输出：
+
+```text
+step 1, per iteration time ..., generator_loss ..., generator_grad_norm ...,
+dmdtrain_gradient_norm ..., critic_loss ..., critic_grad_norm ...
+```
+
+其他步只输出 critic 字段。检查 loss/grad norm 是否有限、迭代时间是否突增，以及所有 rank 是否停在同一阶段。
+
+`logs/training/<run-name>/metrics.jsonl` 每行是独立 JSON：
+
+```json
+{"critic_grad_norm": 0.0, "critic_loss": 0.0, "iteration_seconds": 0.0, "step": 1}
+```
+
+Generator 更新步额外包含 `generator_loss`、`generator_grad_norm`、`dmdtrain_gradient_norm`。第一步 `iteration_seconds` 固定为 0；不要把 JSONL 改成多行 JSON 数组。W&B 默认禁用，设置 `DISABLE_WANDB=0` 才会上报。
+
+## 8. 保存数据和目录
+
+```text
+runs/training/<run-name>/
+├── config.source.yaml
+├── config.resolved.yaml
+├── manifest.json
+├── wandb/
+└── checkpoints/
+    └── step_0000100/
+        └── train_state.pt
+
+logs/training/<run-name>/
+├── node_0.log
+├── node_1.log                 # 多节点时存在
+└── metrics.jsonl
+```
+
+`manifest.json` 记录 Git commit/dirty 状态、Python 和 torch/torch_npu/triton 版本、world/SP/DP、有效 batch、配置和数据 SHA256 以及关键环境变量。`node_<rank>.log` 追加保存 launcher 和本节点所有 worker 输出。
+
+## 9. Checkpoint 格式和恢复
+
+当前 `train_state.pt` 格式版本为 3：
+
+```python
+{
+    "generator_lora": ...,
+    "critic_lora": ...,
+    "generator_optimizer": ...,
+    "critic_optimizer": ...,
+    "step": ...,
+    "checkpoint_format_version": 3,
+    "world_size": ...,
+    "sequence_parallel_size": ...,
+    "data_parallel_size": ...,
+    "batch_size": 1,
+    "gradient_accumulation_steps": ...,
+    "global_samples_consumed": ...,
+    "rng_states": ...,
+}
+```
+
+复用同一 `TRAIN_RUN_NAME` 会同时扫描当前 `checkpoints/step_*/train_state.pt` 和旧 `checkpoint_model_*/model.pt`，按最大 step 自动恢复；同一步优先当前格式。
+
+旧 HSA+CAG LoRA `model.pt` 若包含 `generator_lora` 和 `critic_lora` 可以恢复。缺 optimizer 时 LoRA 和 step 会加载，但 AdamW 从头开始；缺 RNG 时按 rank seed 继续。v2 缺 SP/DP 元数据时按当前 SP 推断，保持原布局最可靠。
+
+`MAX_ITERS` 是最终目标 step。例如 checkpoint 已到 100，设置 `MAX_ITERS=2000` 会继续到 2000，不是额外训练 2000 步。改变 SP/DP/卡数后 optimizer 可重分片，但数据分配和 RNG 不保证逐位一致。
+
+## 10. 合并 Generator LoRA
+
+训练 checkpoint 不是完整模型。VBench/msprof 使用前，将 `generator_lora` 合并到训练时使用的同一个 LongLive 基础 Generator：
+
+```bash
+python scripts/checkpoints/merge_lora.py \
+  --config_path configs/train/hsa_cag.yaml \
   --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
-  --lora_ckpt logs/training/hsa_cag_2k/checkpoint_model_002000/model.pt \
-  --output_path checkpoints/longlive2_hsa_cag_2k_merged.pt \
+  --lora_ckpt runs/training/hsa_cag_12card_2k/checkpoints/step_0002000/train_state.pt \
+  --output_path runs/merged/longlive2_hsa_cag_2k.pt \
   --device npu:0
 ```
 
-使用同一个合并后的检查点分别运行 Dense 对照组和 Sparse 实验组：
+旧格式也可直接传入：
 
-```bash
-LONGLIVE_GENERATOR_CKPT=checkpoints/longlive2_hsa_cag_2k_merged.pt \
-RUN_ID=hsa_cag_dense_control \
-bash scripts/run_vbench.sh longlive2_standard_20pct
-
-LONGLIVE_GENERATOR_CKPT=checkpoints/longlive2_hsa_cag_2k_merged.pt \
-LONGLIVE_SPARSE_METHOD=hsa_cag \
-RUN_ID=hsa_cag_sparse \
-bash scripts/run_vbench.sh longlive2_standard_20pct
+```text
+--lora_ckpt runs/training/<run-name>/checkpoint_model_000100/model.pt
 ```
 
-使用相同稀疏设置进行 32 秒 msprof 测试：
+脚本只合并 `generator_lora`；`critic_lora` 只用于训练恢复。输出是 `{"generator": state_dict, ...}` 的完整 BF16 checkpoint。不要把 LoRA 合并到原始 Wan 权重，必须使用训练配置中的 `longlive2_merged_generator.pt`。
 
-```bash
-LONGLIVE_GENERATOR_CKPT=checkpoints/longlive2_hsa_cag_2k_merged.pt \
-LONGLIVE_SPARSE_METHOD=hsa_cag \
-bash scripts/run_msprof.sh 32s
-```
+## 11. 验收和故障检查
 
-重点比较以下指标：
+最低验收：
 
-- VBench Total、Quality 和 Semantic 分数。
-- 无 Profiling 时的生成延迟与 FPS。
-- 峰值 HBM 占用。
-- FlashAttention/SDPA 算子耗时。
-- HCCL 通信耗时。
+- Ascend Triton HSA 前向/反向 smoke test 通过。
+- resolved 配置中的 SP、累积、路径和 `backend` 符合预期。
+- loss 与 grad norm 无 NaN/Inf。
+- checkpoint 能恢复 step、LoRA、optimizer 和数据游标。
+- 使用同一合并权重完成 dense/HSA VBench 对照和 msprof 性能采集。
 
-建议的第一阶段验收标准是：VBench Total 下降小于 `0.5`，同时在多次无 Profiling 测试中获得可复现的端到端加速。
-
-## 参数调优
-
-主要参数位于配置文件的 `sparse_config` 和 `sparsity.options`：
-
-| 参数 | 含义 | 默认值 |
-| --- | --- | --- |
-| `sparsity` | 后续 Chunk 的平均历史 KV 稀疏率目标 | `0.85` |
-| `sparsity_base` | CAG 后期的基础稀疏率 | `0.95` |
-| `block_q`、`block_k` | 路由和注意力使用的 Token Block 大小 | `40` |
-| `keep_frames` | 进入第二阶段路由的历史帧数量 | `6` |
-| `keep_sink` | 始终可被选中的最早历史帧数量 | `1` |
-| `keep_near` | 始终可被选中的最近历史帧数量 | `2` |
-| `dense_current` | 当前 Chunk 是否保持 Dense | `true` |
-| `query_block_batch` | 单次 SDPA 合并处理的 Query Block 数量 | `1` |
-
-在 `44x80` Grid 下，每个 Latent Frame 包含 `880` 个 Token，因此 Block 大小必须能整除 `880`。增大 `query_block_batch` 可以减少 Kernel Launch 次数，但会增加临时 Gather Tensor 的显存占用。训练默认从 `1` 开始，稳定后再通过 msprof 对比 `1/2/4`。
-
-## 范围与限制
-
-- HSA+CAG 支持零训练直接推理。DMD 后训练用于补偿稀疏注意力带来的分布偏移，是推荐步骤，但不是启用稀疏推理的必要条件。
-- 当前 Chunk 保持 Dense，因此端到端 FLOPs 存在下限；稀疏主要作用于历史 KV。
-- 当前使用 Mean-pooled Q/K 和 Top-K 完成路由，路由索引不可微。
-- 训练阶段使用 FSDP 数据并行，不使用 Ulysses Sequence Parallel；推理阶段支持 Ulysses HSA。
-- 如果 msprof 显示 Gather 和 SDPA 成为主要瓶颈，下一步应实现昇腾自定义融合 Block-Sparse 算子。
+训练卡住时先检查所有节点日志中最早的错误。`ASCEND_LAUNCH_BLOCKING=1` 仅用于单步定位；长期开启会显著降低速度。若不同节点共享目录不可见，非 rank-0 节点会等待 `config.resolved.yaml.ready` 最多 600 秒后失败。

@@ -1,8 +1,8 @@
-# Ascend NPU BF16 dependency list.
-# Install torch/torchvision/torch_npu from the Ascend/CANN matching stack first.
-# Do not install CUDA, NVFP4, TransformerEngine, FlashAttention, or TensorRT packages here.
-# HSA's ascend_triton backend additionally requires the Ascend-maintained Triton
-# package matching torch_npu/CANN. Do not install the generic CUDA Triton wheel.
+# 昇腾 NPU BF16 依赖列表。
+# 请先安装与 Ascend/CANN 匹配的 torch、torchvision 和 torch_npu。
+# 此环境不要安装 CUDA、NVFP4、TransformerEngine、FlashAttention 或 TensorRT 包。
+# HSA 的 ascend_triton 后端还需要与 torch_npu/CANN 匹配的昇腾 Triton，
+# 不要安装通用 CUDA Triton wheel。
 
 diffusers==0.31.0
 transformers>=4.49.0,<5
@@ -23,7 +23,7 @@ opencv-python>=4.9.0.80
 pydantic==2.10.6
 huggingface_hub[cli]
 
-# Needed for training/data workflows, not required for the default txt-prompt inference.
+# 以下依赖用于训练和数据流程，默认纯文本提示词推理不需要全部安装。
 datasets
 wandb
 lmdb

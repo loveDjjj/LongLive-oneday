@@ -3,7 +3,7 @@
 This directory contains prompt metadata only. Generated videos and evaluator
 checkpoints are not committed.
 
-- `performance/`: ten fixed prompts used only by `scripts/run_msprof.sh`.
+- `performance/`: ten fixed prompts used only by `scripts/evaluation/run_msprof.sh`.
 - `vbench_standard/full/`: VBench Standard, 946 metadata records and 944 unique prompts.
 - `vbench_standard/5pct/`: AISBench K-Means Mini, 43 unique prompts.
 - `vbench_standard/20pct/`: independent K-Means subset, 186 unique prompts.
@@ -16,4 +16,4 @@ The 5% and 20% sets were sampled independently from Full Standard. The 5% set
 is not a subset of the 20% set.
 
 Sources are documented in the per-dataset README files and in
-`docs/NPU_BF16_RUN_GUIDE.md`.
+`docs/inference_and_evaluation.md`.

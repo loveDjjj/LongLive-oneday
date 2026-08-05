@@ -1,5 +1,5 @@
-# Ascend VBench Standard presets. VBench-Long remains a separate, future
-# protocol because its evaluator is not yet adapted to Ascend.
+# 昇腾 VBench 标准评测预设。VBench-Long 的评测器尚未完成昇腾适配，因此不在当前维护范围内。
+# 模型路径可通过 LONGLIVE_MODEL_ROOT 和 LONGLIVE_GENERATOR_CKPT 环境变量覆盖。
 models:
   longlive2:
     entrypoint: inference_sp.py
@@ -25,6 +25,7 @@ models:
     width: 1280
     height: 704
 
+# 每个数据集同时声明生成提示词、命名提示词和 VBench 元数据，解析时会校验数量一致。
 datasets:
   standard:
     full:
@@ -53,6 +54,7 @@ datasets:
       naming_prompts: data/benchmarks/vbench_standard/20pct/prompts.txt
       full_info: data/benchmarks/vbench_standard/20pct/full_info.json
 
+# 预设未覆盖时使用以下并行规模、帧率和随机种子。
 defaults:
   pixel_frames: 125
   fps: 24
@@ -60,6 +62,7 @@ defaults:
   dp_size: 6
   seeds: [0, 1, 2, 3, 4]
 
+# 命令行只接受这里列出的预设名称。
 presets:
   longlive2_standard_full: {engine: longlive2, category: standard, subset: full}
   longlive2_standard_5pct: {engine: longlive2, category: standard, subset: 5pct}
@@ -74,11 +77,13 @@ presets:
   wan22_augmented_5pct: {engine: wan22, category: augmented, subset: 5pct}
   wan22_augmented_20pct: {engine: wan22, category: augmented, subset: 20pct}
 
+# 默认运行稠密对照；设置 LONGLIVE_SPARSE_METHOD=hsa_cag 可启用同一检查点的稀疏评测。
 sparsity:
   enabled: false
   method: dense
   options:
-    backend: auto
+    # 正式质量/性能对照必须执行 Ascend Triton；不可用时直接失败，避免静默回退 portable。
+    backend: ascend_triton
     sparsity: 0.85
     sparsity_base: 0.95
     block_q: 40

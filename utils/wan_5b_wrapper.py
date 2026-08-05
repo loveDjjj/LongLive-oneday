@@ -574,14 +574,8 @@ class WanDiffusionWrapper(torch.nn.Module):
         self.get_scheduler()
 
 
-_MG_LIGHTVAE_DEFAULT_PATHS = {
-    "mg_lightvae": os.path.join("wan_models", "Matrix-Game-3.0", "MG-LightVAE.pth"),
-    "mg_lightvae_v2": os.path.join("wan_models", "Matrix-Game-3.0", "MG-LightVAE_v2.pth"),
-}
-
-
 def build_vae_5b(args):
-    """Return the 5B VAE wrapper requested by args.vae_type."""
+    """Build the Wan2.2 VAE used by the maintained BF16 workflows."""
     vae_type = str(getattr(args, "vae_type", "wan")).lower().strip()
     model_name = getattr(getattr(args, "model_kwargs", None), "model_name", "Wan2.2-TI2V-5B")
     model_root = getattr(getattr(args, "model_kwargs", None), "model_root", None)
@@ -589,12 +583,7 @@ def build_vae_5b(args):
     if vae_type in ("wan", "wan2.2", ""):
         return WanVAEWrapper(model_name=model_name, model_root=model_root)
 
-    if vae_type in _MG_LIGHTVAE_DEFAULT_PATHS:
-        from utils.lightvae_5b_wrapper import LightVAE5BWrapper
-
-        return LightVAE5BWrapper(vae_path=_MG_LIGHTVAE_DEFAULT_PATHS[vae_type])
-
     raise ValueError(
         f"Unknown vae_type '{vae_type}'. "
-        "Expected one of: wan, mg_lightvae, mg_lightvae_v2."
+        "The maintained BF16 workflows only support wan."
     )

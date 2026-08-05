@@ -16,19 +16,12 @@ from tqdm import tqdm
 
 from pipeline.causal_diffusion_inference_sp import CausalDiffusionInferencePipelineSP
 from utils.config import normalize_config, section_get
-from utils.dataset import MultiTextConcatDataset, eval_collate_fn
+from utils.dataset import PromptDataset, prompt_collate_fn
 from utils.device import distributed_backend, is_npu, set_device
+from utils.inference_utils import load_generator_checkpoint, load_lora_state_dict
 from utils.lora_utils import configure_lora_for_model
 from utils.memory import DynamicSwapInstaller, get_cuda_free_memory_gb
 from utils.misc import set_seed
-from utils.nvfp4_checkpoint import (
-    clean_fsdp_state_dict_keys,
-    drop_fouroversix_master_weights,
-    is_nvfp4_state_dict,
-    is_te_nvfp4_checkpoint,
-    quantize_model_for_fouroversix_nvfp4,
-    unwrap_generator_state_dict,
-)
 
 
 def synchronize_accelerator(device):
@@ -115,136 +108,14 @@ def compute_group_specs(world_size, sp_size, dp_size, num_heads, num_frame_per_b
     return groups
 
 
-def _maybe_to_dict(value):
-    if value is None:
-        return None
-    if OmegaConf.is_config(value):
-        value = OmegaConf.to_container(value, resolve=True)
-    return dict(value)
-
-
-def _config_bool(value, default=False):
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
-
-
-def _expected_inference_samples(config):
-    inference_iter = int(getattr(config, "inference_iter", -1))
-    return inference_iter + 1 if inference_iter >= 0 else None
-
-
-def _resolve_torch_compile(config):
-    setting = getattr(config, "torch_compile", False)
-    if isinstance(setting, str) and setting.strip().lower() == "auto":
-        if not bool(getattr(config, "model_quant", False)):
-            return False, "auto disabled because model_quant is false"
-        min_samples = int(getattr(config, "torch_compile_min_samples", 2))
-        expected_samples = _expected_inference_samples(config)
-        if expected_samples is not None and expected_samples < min_samples:
-            return False, f"auto disabled because expected samples ({expected_samples}) < {min_samples}"
-        return True, "auto enabled for repeated quantized inference"
-    return _config_bool(setting, default=False), "explicit setting"
-
-
-def quantize_generator_model(model, config, keep_master_weights, is_main_process):
-    from utils.quant import (
-        ModelQuantizationConfig,
-        _materialize_mixed_quantized_weights_for_inference,
-        _materialize_quantized_weights_for_inference,
-        _materialize_transformer_engine_weights_for_inference,
-        quantize_model_with_filter,
-    )
-
-    use_transformer_engine = bool(getattr(config, "model_quant_use_transformer_engine", False))
-    te_inference_only = bool(getattr(config, "model_quant_te_inference_only", use_transformer_engine))
-    te_low_precision_weights = bool(getattr(config, "model_quant_te_low_precision_weights", te_inference_only))
-    te_fallback_to_fouroversix = bool(getattr(config, "model_quant_te_fallback_to_fouroversix", False))
-    quant_cfg = ModelQuantizationConfig(
-        scale_rule=getattr(config, "model_quant_scale_rule", "static_6"),
-        quantize_backend=getattr(config, "model_quant_backend", None),
-        activation_scale_rule=getattr(
-            config, "model_quant_activation_scale_rule",
-            getattr(config, "model_quant_scale_rule", "static_6"),
-        ),
-        weight_scale_rule=getattr(config, "model_quant_weight_scale_rule", None),
-        gradient_scale_rule=getattr(config, "model_quant_gradient_scale_rule", None),
-    )
-    quant_cfg.keep_master_weights = keep_master_weights
-    model, matched_modules = quantize_model_with_filter(
-        model,
-        quant_config=quant_cfg,
-        filtered_modules=getattr(config, "model_quant_filtered_modules", None),
-        use_default_filtered_modules=getattr(config, "model_quant_use_default_filtered_modules", True),
-        cast_model_to_bf16=True,
-        materialize_for_inference=False,
-        use_transformer_engine=use_transformer_engine,
-        te_inference_only=te_inference_only,
-        te_low_precision_weights=te_low_precision_weights,
-        te_recipe_kwargs=_maybe_to_dict(getattr(config, "model_quant_te_recipe_kwargs", None)),
-        te_module_kwargs=_maybe_to_dict(getattr(config, "model_quant_te_module_kwargs", None)),
-        te_fallback_to_fouroversix=te_fallback_to_fouroversix,
-        verbose=is_main_process,
-    )
-    materialize_fn = _materialize_quantized_weights_for_inference
-    if use_transformer_engine and te_fallback_to_fouroversix:
-        materialize_fn = _materialize_mixed_quantized_weights_for_inference
-    elif use_transformer_engine:
-        materialize_fn = _materialize_transformer_engine_weights_for_inference
-    if is_main_process:
-        print(f"[NVFP4] Generator quantized; {len(matched_modules)} modules excluded")
-    return model, materialize_fn
-
-
-def materialize_quantized_generator(model, device, materialize_fn, stage_desc, is_main_process):
-    mat_modules, master_bytes, quantized_bytes = materialize_fn(model, target_device=device)
-    if is_main_process:
-        print(
-            f"[NVFP4] Materialized quantized generator weights {stage_desc}: "
-            f"{len(mat_modules)} modules, master_weight={master_bytes / (1024 ** 3):.3f} GiB, "
-            f"quantized_weight={quantized_bytes / (1024 ** 3):.3f} GiB"
-        )
-
-
-def configure_generator_torch_compile(pipeline, config, is_main_process):
-    compile_enabled, reason = _resolve_torch_compile(config)
-    if not compile_enabled:
-        if is_main_process and str(getattr(config, "torch_compile", "false")).lower() == "auto":
-            print(f"[torch.compile] skipped: {reason}")
-        return
-    if not hasattr(pipeline.generator, "configure_torch_compile"):
-        if is_main_process:
-            print("[torch.compile][warn] Current generator does not expose configure_torch_compile; skipping")
-        return
-    compiled = pipeline.generator.configure_torch_compile(
-        backend=str(getattr(config, "torch_compile_backend", "inductor")),
-        mode=getattr(config, "torch_compile_mode", "max-autotune-no-cudagraphs"),
-        fullgraph=_config_bool(getattr(config, "torch_compile_fullgraph", False)),
-        dynamic=_config_bool(getattr(config, "torch_compile_dynamic", False)),
-        options=_maybe_to_dict(getattr(config, "torch_compile_options", None)),
-        suppress_errors=_config_bool(getattr(config, "torch_compile_suppress_errors", True), default=True),
-    )
-    if is_main_process:
-        print(f"[torch.compile] {'enabled' if compiled else 'not enabled'}: target=generator_model")
-
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, required=True, help="Path to the config YAML file")
-te_quant_group = parser.add_mutually_exclusive_group()
-te_quant_group.add_argument("--use_te_quant", dest="use_te_quant", action="store_true")
-te_quant_group.add_argument("--no_use_te_quant", dest="use_te_quant", action="store_false")
-parser.set_defaults(use_te_quant=None)
 args = parser.parse_args()
 
 config = normalize_config(OmegaConf.load(args.config_path))
-if args.use_te_quant is not None:
-    config.model_quant_use_transformer_engine = args.use_te_quant
-if is_npu() and getattr(config, "model_quant", False):
+if getattr(config, "model_quant", False):
     raise NotImplementedError(
-        "Ascend NPU BF16 reproduction does not support the NVIDIA NVFP4 path. "
-        "Use BF16 configs with model_quant=false and kv_quant=false."
+        "The supported inference path is BF16 only; set model_quant=false."
     )
 if not hasattr(config, "sampling_steps") or config.sampling_steps is None:
     raise ValueError("sampling_steps must be defined in the SP inference config")
@@ -260,8 +131,7 @@ config.inference_iter = getattr(config, "inference_iter", -1)
 if getattr(config, "i2v", False):
     raise NotImplementedError("I2V inference is not included in this SP release path.")
 if getattr(config, "kv_quant", False):
-    print("[SP][warn] kv_quant is not supported in Ulysses SP inference; disabling it.")
-    config.kv_quant = False
+    raise NotImplementedError("The supported inference path requires kv_quant=false.")
 
 sp_size = int(getattr(config, "sp_size", 1))
 dp_size = int(getattr(config, "dp_size", 1))
@@ -352,80 +222,20 @@ pipeline = CausalDiffusionInferencePipelineSP(
 
 merge_lora = bool(getattr(config, "merge_lora", False))
 has_lora_adapter = bool(getattr(config, "adapter", None) and configure_lora_for_model is not None)
-if has_lora_adapter and bool(getattr(config, "model_quant", False)) and not merge_lora:
-    if is_main_process:
-        print(
-            "[NVFP4][LoRA] merge_lora=false is unsupported with model_quant=true; "
-            "forcing merge_lora=true so the LoRA is folded into the BF16 base before quantization."
-        )
-    merge_lora = True
-    config.merge_lora = True
-materialize_quantized_weights_for_inference = None
-generator_checkpoint = None
-generator_lora_state = None
 generator_ckpt_path = getattr(config, "generator_ckpt", None)
-loaded_prequantized_generator = False
-prequantized_generator_backend = None
-
-if generator_ckpt_path:
-    if is_main_process:
-        print(f"[SP] Loading generator checkpoint: {generator_ckpt_path}")
-    generator_checkpoint = torch.load(generator_ckpt_path, map_location="cpu", mmap=True)
-    is_lora_only_checkpoint = (
-        isinstance(generator_checkpoint, dict)
-        and "generator_lora" in generator_checkpoint
-        and not any(key in generator_checkpoint for key in ("generator", "generator_ema", "model"))
-    )
-    if is_lora_only_checkpoint:
-        generator_lora_state = generator_checkpoint["generator_lora"]
-    else:
-        raw_gen_state_dict = unwrap_generator_state_dict(generator_checkpoint, use_ema=config.use_ema)
-        if config.use_ema:
-            raw_gen_state_dict = clean_fsdp_state_dict_keys(raw_gen_state_dict)
-        if is_te_nvfp4_checkpoint(generator_checkpoint):
-            raise ValueError("TransformerEngine module state_dict checkpoints are not supported here.")
-        if is_nvfp4_state_dict(raw_gen_state_dict):
-            if not getattr(config, "model_quant", False):
-                raise ValueError("generator_ckpt is materialized NVFP4 but model_quant is false.")
-            if getattr(config, "model_quant_use_transformer_engine", False):
-                raise ValueError("Materialized NVFP4 checkpoints require model_quant_use_transformer_engine=false.")
-            pipeline.generator.model, matched_modules = quantize_model_for_fouroversix_nvfp4(
-                pipeline.generator.model,
-                config=config,
-                keep_master_weights=False,
-                verbose=is_main_process,
-            )
-            dropped_modules = drop_fouroversix_master_weights(pipeline.generator.model)
-            pipeline.generator.load_state_dict(raw_gen_state_dict, strict=True)
-            loaded_prequantized_generator = True
-            prequantized_generator_backend = "fouroversix"
-            if is_main_process:
-                print(
-                    f"[NVFP4] Prepared SP generator: {len(dropped_modules)} materialized modules, "
-                    f"{len(matched_modules)} modules excluded"
-                )
-        elif config.use_ema:
-            missing, unexpected = pipeline.generator.load_state_dict(raw_gen_state_dict, strict=False)
-            if is_main_process and (missing or unexpected):
-                print(f"[SP][warn] missing={len(missing)}, unexpected={len(unexpected)}")
-        else:
-            pipeline.generator.load_state_dict(raw_gen_state_dict, strict=True)
+if not generator_ckpt_path:
+    raise ValueError("checkpoints.generator_ckpt is required for inference")
+if is_main_process:
+    print(f"[SP] Loading generator checkpoint: {generator_ckpt_path}")
+load_generator_checkpoint(
+    pipeline.generator,
+    generator_ckpt_path,
+    use_ema=bool(config.use_ema),
+    strict=True,
+)
 
 pipeline.is_lora_enabled = False
 pipeline.is_lora_merged = False
-if loaded_prequantized_generator:
-    has_lora_adapter = False
-    merge_lora = False
-    config.merge_lora = False
-
-if getattr(config, "model_quant", False) and not merge_lora and not loaded_prequantized_generator:
-    pipeline.generator.model, materialize_quantized_weights_for_inference = quantize_generator_model(
-        pipeline.generator.model,
-        config=config,
-        keep_master_weights=has_lora_adapter,
-        is_main_process=is_main_process,
-    )
-
 if has_lora_adapter:
     if is_main_process:
         print(f"[SP] Applying LoRA config: {config.adapter}")
@@ -436,14 +246,12 @@ if has_lora_adapter:
         is_main_process=is_main_process,
     )
     lora_ckpt_path = getattr(config, "lora_ckpt", None)
-    if lora_ckpt_path:
-        lora_checkpoint = torch.load(lora_ckpt_path, map_location="cpu", mmap=True)
-        if isinstance(lora_checkpoint, dict) and "generator_lora" in lora_checkpoint:
-            peft.set_peft_model_state_dict(pipeline.generator.model, lora_checkpoint["generator_lora"])
-        else:
-            peft.set_peft_model_state_dict(pipeline.generator.model, lora_checkpoint)
-    elif generator_lora_state is not None:
-        peft.set_peft_model_state_dict(pipeline.generator.model, generator_lora_state)
+    if not lora_ckpt_path:
+        raise ValueError("An adapter config requires checkpoints.lora_ckpt")
+    peft.set_peft_model_state_dict(
+        pipeline.generator.model,
+        load_lora_state_dict(lora_ckpt_path),
+    )
     if merge_lora:
         pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)
         pipeline.is_lora_merged = True
@@ -452,40 +260,12 @@ if has_lora_adapter:
 elif merge_lora and is_main_process:
     print("merge_lora=True requested but no adapter config was found; continuing without LoRA merge")
 
-del generator_checkpoint
-
-if loaded_prequantized_generator:
-    pipeline.text_encoder.to(dtype=torch.bfloat16)
-    pipeline.vae.to(dtype=torch.bfloat16)
-else:
-    pipeline = pipeline.to(dtype=torch.bfloat16)
+pipeline = pipeline.to(dtype=torch.bfloat16)
 if low_memory:
     DynamicSwapInstaller.install_model(pipeline.text_encoder, device=device)
 pipeline.generator.to(device=device)
 
-if getattr(config, "model_quant", False) and not loaded_prequantized_generator:
-    if merge_lora:
-        pipeline.generator.model, materialize_quantized_weights_for_inference = quantize_generator_model(
-            pipeline.generator.model,
-            config=config,
-            keep_master_weights=False,
-            is_main_process=is_main_process,
-        )
-        stage_desc = "after LoRA merge" if pipeline.is_lora_merged else "for inference"
-    else:
-        stage_desc = "after LoRA wrapping" if pipeline.is_lora_enabled else "for inference"
-    materialize_quantized_generator(
-        pipeline.generator.model,
-        device=device,
-        materialize_fn=materialize_quantized_weights_for_inference,
-        stage_desc=stage_desc,
-        is_main_process=is_main_process,
-    )
-elif loaded_prequantized_generator and is_main_process:
-    print(f"[NVFP4] Using pre-saved {prequantized_generator_backend} generator weights")
-
 pipeline.generator.model.eval().requires_grad_(False)
-configure_generator_torch_compile(pipeline, config, is_main_process)
 
 vae_device_str = getattr(config, "vae_device", None)
 use_dedicated_vae_device = bool(getattr(config, "streaming_vae", False)) and bool(vae_device_str)
@@ -533,12 +313,9 @@ if is_main_process and use_effective_sp:
 
 nfpb = getattr(config, "num_frame_per_block", 8)
 num_blocks = config.num_output_frames // nfpb
-dataset = MultiTextConcatDataset(
+dataset = PromptDataset(
     data_path=config.data_path,
     num_blocks=num_blocks,
-    chunks_per_shot=getattr(config, "chunks_per_shot", 0),
-    scene_cut_prefix=getattr(config, "scene_cut_prefix", "The scene transitions. "),
-    deterministic=True,
 )
 if is_main_process:
     print(f"[data] data_path={config.data_path}, mode={dataset._mode}, num_blocks={num_blocks}")
@@ -554,7 +331,7 @@ else:
     sampler = SequentialSampler(dataset)
 dataloader = DataLoader(
     dataset, batch_size=1, sampler=sampler, num_workers=0,
-    drop_last=False, collate_fn=eval_collate_fn,
+    drop_last=False, collate_fn=prompt_collate_fn,
 )
 
 if is_main_process:

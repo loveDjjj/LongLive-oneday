@@ -1,23 +1,28 @@
-# Training Data
+# 训练提示词数据
 
-Large training prompt files are intentionally excluded from Git. Prepare the
-Light-Forcing/Self-Forcing prompt corpus with:
+大型提示词文件不提交到 Git。运行：
 
 ```bash
-bash scripts/prepare_hsa_training_data.sh
+bash scripts/data/prepare_training_data.sh
 ```
 
-The script is offline by default. It first reuses a validated
-`prompts_train.txt`, then looks for a local `source_prompts.txt` or
-`vidprom_filtered_extended.txt`. A different local file can be selected with
-`SOURCE_FILE=/path/to/vidprom_filtered_extended.txt`. Only
-`ALLOW_DOWNLOAD=1 bash scripts/prepare_hsa_training_data.sh` is allowed to
-access Hugging Face. The source SHA256 is
-`7896742f468bc8aef9e4547424d1ce0a951acdb2a82233790155401a99bf5aa5`.
-The preparation step deduplicates prompts and removes normalized exact
-overlaps with the complete standard and augmented VBench prompt files.
+脚本默认离线：先复用通过 SHA256 和数量校验的 `prompts_train.txt`，否则查找本地 `source_prompts.txt` 或 `vidprom_filtered_extended.txt`。也可以指定：
 
-Expected output is 248,217 prompts with SHA256
-`c5ca345c5cb83db295dee0dda0f06530032e5ea2fe0e83c6fe686a4111b02623`.
-The upstream VidProM-derived data should be treated as CC BY-NC 4.0 and used
-only where that license is acceptable.
+```bash
+SOURCE_FILE=/path/to/vidprom_filtered_extended.txt \
+bash scripts/data/prepare_training_data.sh
+```
+
+只有显式设置 `ALLOW_DOWNLOAD=1` 时才会访问 Hugging Face。源文件预期包含 248221 条提示词，SHA256 为：
+
+```text
+7896742f468bc8aef9e4547424d1ce0a951acdb2a82233790155401a99bf5aa5
+```
+
+准备过程会去重，并移除与完整 VBench Standard 和 Augmented 提示词规范化后完全相同的样本。输出应包含 248217 条提示词，SHA256 为：
+
+```text
+c5ca345c5cb83db295dee0dda0f06530032e5ea2fe0e83c6fe686a4111b02623
+```
+
+VidProM 衍生数据应按 CC BY-NC 4.0 的适用范围使用。文件结构、Dataset 契约、训练样本计算和运行产物见 [HSA+CAG 训练指南](../../docs/hsa_cag_training.md)。

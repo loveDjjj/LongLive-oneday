@@ -7,7 +7,7 @@
 # No warranties are given. The work is provided "AS IS", without warranty of any kind, express or implied.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Small helpers for release inference examples."""
+"""Checkpoint and media helpers for the supported BF16 inference path."""
 
 from __future__ import annotations
 
@@ -17,18 +17,6 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
-from einops import rearrange
-from torchvision.io import write_video
-
-from utils.nvfp4_checkpoint import (
-    clean_fsdp_state_dict_keys,
-    drop_fouroversix_master_weights,
-    is_nvfp4_state_dict,
-    is_te_nvfp4_checkpoint,
-    quantize_model_for_fouroversix_nvfp4,
-    quantize_model_for_transformer_engine_nvfp4,
-    unwrap_generator_state_dict,
-)
 
 
 def _torch_load(path: str):
@@ -38,23 +26,77 @@ def _torch_load(path: str):
         return torch.load(path, map_location="cpu")
 
 
-def load_generator_checkpoint(generator, checkpoint_path: str, *, use_ema: bool = False, strict: bool | None = None):
+def clean_fsdp_state_dict_keys(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Remove wrapper prefixes found in historical FSDP checkpoints."""
+    return {
+        str(key).replace("_fsdp_wrapped_module.", ""): value
+        for key, value in state_dict.items()
+    }
+
+
+def extract_generator_state_dict(
+    checkpoint: object,
+    *,
+    use_ema: bool = False,
+) -> Mapping[str, torch.Tensor]:
+    """Extract a generator state dict from supported LongLive layouts."""
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError(f"Generator checkpoint must be a mapping, got {type(checkpoint).__name__}")
+
+    if use_ema:
+        if "generator_ema" not in checkpoint:
+            raise KeyError("use_ema=true, but the checkpoint has no 'generator_ema' entry")
+        state_dict = checkpoint["generator_ema"]
+    elif "generator" in checkpoint:
+        state_dict = checkpoint["generator"]
+    elif "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    elif "generator_lora" in checkpoint:
+        raise ValueError(
+            "The selected checkpoint contains only LoRA weights. Set checkpoints.lora_ckpt "
+            "and provide a full checkpoints.generator_ckpt."
+        )
+    else:
+        state_dict = checkpoint
+
+    if not isinstance(state_dict, Mapping) or not state_dict:
+        raise ValueError("Generator state dict is empty or has an unsupported layout")
+    if not all(isinstance(value, torch.Tensor) for value in state_dict.values()):
+        raise ValueError(
+            "Unrecognized checkpoint layout: expected a tensor state dict or one of "
+            "'generator', 'generator_ema', and 'model'"
+        )
+    return clean_fsdp_state_dict_keys(state_dict) if use_ema else state_dict
+
+
+def load_generator_checkpoint(
+    generator,
+    checkpoint_path: str,
+    *,
+    use_ema: bool = False,
+    strict: bool = True,
+):
     """Load a LongLive generator checkpoint into ``generator``."""
     checkpoint = _torch_load(checkpoint_path)
-    state_dict = unwrap_generator_state_dict(checkpoint, use_ema=use_ema)
-    if use_ema:
-        state_dict = clean_fsdp_state_dict_keys(state_dict)
-    if strict is None:
-        strict = not use_ema
+    state_dict = extract_generator_state_dict(checkpoint, use_ema=use_ema)
     return generator.load_state_dict(state_dict, strict=strict)
 
 
-def _load_lora_state_dict(lora_ckpt_path: str) -> Mapping[str, torch.Tensor]:
+def load_lora_state_dict(lora_ckpt_path: str) -> Mapping[str, torch.Tensor]:
     """Load a LoRA checkpoint, unwrapping ``generator_lora`` when present."""
     checkpoint = _torch_load(lora_ckpt_path)
     if isinstance(checkpoint, Mapping) and "generator_lora" in checkpoint:
         return checkpoint["generator_lora"]
+    if not isinstance(checkpoint, Mapping) or not checkpoint:
+        raise ValueError(f"LoRA checkpoint has an unsupported layout: {lora_ckpt_path}")
     return checkpoint
+
+
+def cpu_state_dict(module) -> dict[str, torch.Tensor]:
+    """Return a detached CPU state dict suitable for portable checkpoints."""
+    return {key: value.detach().cpu() for key, value in module.state_dict().items()}
 
 
 def apply_and_merge_lora(
@@ -65,15 +107,7 @@ def apply_and_merge_lora(
     dtype: torch.dtype = torch.bfloat16,
     verbose: bool = False,
 ):
-    """Wrap ``pipeline.generator.model`` with a LoRA adapter, load weights, and merge.
-
-    The merged module ends up structurally identical to the original generator
-    (``nn.Linear`` layers carrying the base + LoRA delta), which is what NVFP4
-    quantization needs as its starting point.
-
-    Returns ``True`` when LoRA was applied and merged, ``False`` when the config
-    did not request a LoRA adapter.
-    """
+    """Load and merge an optional LoRA adapter into the BF16 generator."""
     adapter_cfg = getattr(config, "adapter", None)
     lora_ckpt = getattr(config, "lora_ckpt", None)
     if adapter_cfg is None or not lora_ckpt:
@@ -98,7 +132,7 @@ def apply_and_merge_lora(
 
     if verbose:
         print(f"[LoRA] Loading LoRA weights from: {lora_ckpt}")
-    lora_state = _load_lora_state_dict(lora_ckpt)
+    lora_state = load_lora_state_dict(lora_ckpt)
     peft.set_peft_model_state_dict(pipeline.generator.model, lora_state)  # type: ignore[arg-type]
 
     if verbose:
@@ -132,134 +166,6 @@ def place_vae_for_streaming(pipeline, config) -> torch.device | None:
         pipeline.vae.mean = pipeline.vae.mean.to(device=vae_device)
         pipeline.vae.std = pipeline.vae.std.to(device=vae_device)
     return vae_device
-
-
-def setup_nvfp4_pipeline(
-    pipeline,
-    config,
-    device: torch.device | str,
-    *,
-    verbose: bool = False,
-):
-    """Configure ``pipeline`` for NVFP4 inference from a generator checkpoint.
-
-    Handles both supported NVFP4 backends:
-
-    * ``model_quant_use_transformer_engine=True`` -> a BF16 generator checkpoint
-      that gets wrapped with TransformerEngine NVFP4 modules and materialized
-      after moving to ``device``.
-    * ``model_quant_use_transformer_engine=False`` -> either a BF16 generator
-      checkpoint that gets quantized with FourOverSix at load time, or a
-      pre-materialized FourOverSix NVFP4 state dict loaded directly into the
-      already-quantized architecture.
-
-    Optional LoRA support (BF16 base only): when ``config.adapter`` and
-    ``config.lora_ckpt`` are both set, the LoRA adapter is loaded on the BF16
-    base generator, merged via ``merge_and_unload``, and the resulting weights
-    are then quantized — so the same yaml can swap between TE and FourOverSix
-    backends without pre-merging the LoRA checkpoint.
-
-    For materialized FourOverSix checkpoints LoRA cannot be applied (the master
-    weights have already been quantized away); ``lora_ckpt``/``adapter`` are
-    ignored in that case with a printed warning.
-    """
-    if not bool(getattr(config, "model_quant", False)):
-        raise ValueError("setup_nvfp4_pipeline requires model_quant=true in the config.")
-
-    generator_ckpt = getattr(config, "generator_ckpt", None)
-    if not generator_ckpt:
-        raise ValueError("checkpoints.generator_ckpt is required for NVFP4 inference.")
-
-    use_te = bool(getattr(config, "model_quant_use_transformer_engine", False))
-    device = torch.device(device)
-    use_ema = bool(getattr(config, "use_ema", False))
-
-    checkpoint = _torch_load(generator_ckpt)
-    state_dict = unwrap_generator_state_dict(checkpoint, use_ema=use_ema)
-    if use_ema:
-        state_dict = clean_fsdp_state_dict_keys(state_dict)
-
-    if is_te_nvfp4_checkpoint(checkpoint):
-        raise ValueError(
-            "Detected a TransformerEngine module state_dict export (no longer supported). "
-            "Re-export with `--backend transformer_engine` (merged BF16) or `--backend fouroversix`."
-        )
-
-    is_prequantized = is_nvfp4_state_dict(state_dict)
-    has_lora_request = bool(getattr(config, "adapter", None)) and bool(getattr(config, "lora_ckpt", None))
-
-    pipeline.is_lora_enabled = False
-    pipeline.is_lora_merged = False
-
-    if is_prequantized:
-        if has_lora_request and verbose:
-            print(
-                "[NVFP4] generator_ckpt is a materialized FourOverSix NVFP4 checkpoint; "
-                "ignoring lora_ckpt/adapter because the master weights are already quantized. "
-                "Use a BF16 base checkpoint if you need to load a LoRA on top."
-            )
-        if use_te:
-            raise ValueError(
-                "generator_ckpt is a materialized NVFP4 (FourOverSix) checkpoint; set "
-                "model_quant_use_transformer_engine: false."
-            )
-        pipeline.generator.model, _ = quantize_model_for_fouroversix_nvfp4(
-            pipeline.generator.model,
-            config=config,
-            keep_master_weights=False,
-            verbose=verbose,
-        )
-        drop_fouroversix_master_weights(pipeline.generator.model)
-        pipeline.generator.load_state_dict(state_dict, strict=True)
-
-        pipeline.text_encoder.to(dtype=torch.bfloat16)
-        pipeline.vae.to(dtype=torch.bfloat16)
-    else:
-        load_strict = not use_ema
-        pipeline.generator.load_state_dict(state_dict, strict=load_strict)
-
-        if has_lora_request:
-            # Apply + merge LoRA on the BF16 base before quantization. Move the
-            # generator to CUDA first so the TE wrapper (which requires CUDA
-            # modules) can later replace the merged Linear layers in-place.
-            apply_and_merge_lora(
-                pipeline,
-                config,
-                device=device,
-                dtype=torch.bfloat16,
-                verbose=verbose,
-            )
-
-        if use_te:
-            pipeline.generator.model, _ = quantize_model_for_transformer_engine_nvfp4(
-                pipeline.generator.model,
-                config=config,
-                keep_master_weights=False,
-                verbose=verbose,
-            )
-            te_fallback = bool(getattr(config, "model_quant_te_fallback_to_fouroversix", False))
-            if te_fallback:
-                from utils.quant import _materialize_mixed_quantized_weights_for_inference as materialize_fn
-            else:
-                from utils.quant import _materialize_transformer_engine_weights_for_inference as materialize_fn
-        else:
-            pipeline.generator.model, _ = quantize_model_for_fouroversix_nvfp4(
-                pipeline.generator.model,
-                config=config,
-                keep_master_weights=False,
-                verbose=verbose,
-            )
-            from utils.quant import _materialize_quantized_weights_for_inference as materialize_fn
-
-        pipeline.to(dtype=torch.bfloat16)
-        materialize_fn(pipeline.generator.model, target_device=device)
-
-    pipeline.generator.to(device=device)
-    pipeline.text_encoder.to(device=device)
-    pipeline.vae.to(device=device)
-    place_vae_for_streaming(pipeline, config)
-
-    return pipeline
 
 
 def prepare_single_prompt_inputs(
@@ -301,12 +207,16 @@ def video_to_uint8(video: torch.Tensor) -> torch.Tensor:
     if video.ndim != 4:
         raise ValueError(f"Expected video tensor with 4 dims, got shape={tuple(video.shape)}")
     if video.shape[1] in (1, 3):
+        from einops import rearrange
+
         video = rearrange(video, "t c h w -> t h w c")
     return (255.0 * video.cpu()).clamp(0, 255).to(torch.uint8)
 
 
 def save_video(video: torch.Tensor, output_path: str | os.PathLike, *, fps: int = 24) -> None:
     """Save a generated LongLive video tensor as an mp4 file."""
+    from torchvision.io import write_video
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_video(str(output_path), video_to_uint8(video), fps=fps)

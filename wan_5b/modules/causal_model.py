@@ -564,11 +564,9 @@ class CausalWanSelfAttention(nn.Module):
 
             sink_tokens = self.sink_size * frame_seqlen
             global_sink_tokens = getattr(self, "global_sink_size", 0) * frame_seqlen
-            is_quantized_cache = kv_cache.get("quantized", False)
-            if is_quantized_cache:
-                kv_cache_size = kv_cache["max_blocks"] * kv_cache["block_token_size"]
-            else:
-                kv_cache_size = kv_cache["k"].shape[1]
+            if kv_cache.get("quantized", False):
+                raise NotImplementedError("Quantized KV cache is not supported")
+            kv_cache_size = kv_cache["k"].shape[1]
 
             # ----- global + multi-shot pinned-sink support -----
             # Two protection mechanisms (independent, both optional):
@@ -628,22 +626,9 @@ class CausalWanSelfAttention(nn.Module):
                     _cache_global_end - num_evicted_tokens
                 local_start_index = local_end_index - num_new_tokens
 
-                if is_quantized_cache:
-                    from utils.quant import dequantize_kv_cache, k_smooth
-
-                    max_blks = int(kv_cache["max_blocks"])
-                    blk_sz = int(kv_cache["block_token_size"])
-                    cache_k = dequantize_kv_cache(
-                        kv_cache["k"], max_blks, self.num_heads, blk_sz, v.dtype, v.device
-                    )
-                    cache_v = dequantize_kv_cache(
-                        kv_cache["v"], max_blks, self.num_heads, blk_sz, v.dtype, v.device
-                    )
-                    new_k_for_cache = k_smooth(key_to_cache)
-                else:
-                    cache_k = kv_cache["k"]
-                    cache_v = kv_cache["v"]
-                    new_k_for_cache = key_to_cache
+                cache_k = kv_cache["k"]
+                cache_v = kv_cache["v"]
+                new_k_for_cache = key_to_cache
 
                 if _CGRAPH_OUTPLACE_KV_ENABLED:
                     # Cudagraph experiment: build the post-roll cache view
@@ -662,8 +647,8 @@ class CausalWanSelfAttention(nn.Module):
                         v,
                     ], dim=1)
                 else:
-                    temp_k = cache_k if is_quantized_cache else cache_k.clone()
-                    temp_v = cache_v if is_quantized_cache else cache_v.clone()
+                    temp_k = cache_k.clone()
+                    temp_v = cache_v.clone()
 
                     temp_k[:, effective_sink:effective_sink + num_rolled_tokens] = \
                         temp_k[:, effective_sink + num_evicted_tokens:effective_sink + num_evicted_tokens + num_rolled_tokens].clone()
@@ -699,40 +684,14 @@ class CausalWanSelfAttention(nn.Module):
                 local_end_index = _cache_local_end + current_end - _cache_global_end
                 local_start_index = local_end_index - num_new_tokens
 
-                if is_quantized_cache:
-                    from utils.quant import dequantize_kv_cache, k_smooth
-
-                    new_k_for_cache = k_smooth(key_to_cache)
-                    if local_start_index == 0:
-                        temp_k = new_k_for_cache
-                        temp_v = v
-                    else:
-                        max_blks = int(kv_cache["max_blocks"])
-                        blk_sz = int(kv_cache["block_token_size"])
-                        cache_k = dequantize_kv_cache(
-                            kv_cache["k"], max_blks, self.num_heads, blk_sz, v.dtype, v.device
-                        )
-                        cache_v = dequantize_kv_cache(
-                            kv_cache["v"], max_blks, self.num_heads, blk_sz, v.dtype, v.device
-                        )
-                        if _CGRAPH_OUTPLACE_KV_ENABLED:
-                            temp_k = torch.cat([cache_k[:, :local_start_index], new_k_for_cache], dim=1)
-                            temp_v = torch.cat([cache_v[:, :local_start_index], v], dim=1)
-                        else:
-                            temp_k = cache_k
-                            temp_v = cache_v
-                    if not _CGRAPH_OUTPLACE_KV_ENABLED:
-                        temp_k[:, local_start_index:local_end_index] = new_k_for_cache
-                        temp_v[:, local_start_index:local_end_index] = v
+                if _CGRAPH_OUTPLACE_KV_ENABLED:
+                    temp_k = torch.cat([kv_cache["k"][:, :local_start_index], key_to_cache], dim=1)
+                    temp_v = torch.cat([kv_cache["v"][:, :local_start_index], v], dim=1)
                 else:
-                    if _CGRAPH_OUTPLACE_KV_ENABLED:
-                        temp_k = torch.cat([kv_cache["k"][:, :local_start_index], key_to_cache], dim=1)
-                        temp_v = torch.cat([kv_cache["v"][:, :local_start_index], v], dim=1)
-                    else:
-                        temp_k = kv_cache["k"].clone()
-                        temp_v = kv_cache["v"].clone()
-                        temp_k[:, local_start_index:local_end_index] = key_to_cache
-                        temp_v[:, local_start_index:local_end_index] = v
+                    temp_k = kv_cache["k"].clone()
+                    temp_v = kv_cache["v"].clone()
+                    temp_k[:, local_start_index:local_end_index] = key_to_cache
+                    temp_v[:, local_start_index:local_end_index] = v
 
                 cache_update_info = {
                     "action": "direct_insert",
@@ -1520,7 +1479,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block_index, (current_end, local_end_index, update_info) in cache_update_infos:
             if update_info is not None:
                 cache = kv_cache[block_index]
-                is_quantized = cache.get("quantized", False)
+                if cache.get("quantized", False):
+                    raise NotImplementedError("Quantized KV cache is not supported")
                 
                 if update_info["action"] == "roll_and_insert":
                     # Apply the rolling update.
@@ -1532,53 +1492,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     new_k = update_info["new_k"]
                     new_v = update_info["new_v"]
 
-                    if is_quantized:
-                        from utils.quant import copy_quantized_into, quantize_to_fp4
-
-                        blk_sz = int(cache["block_token_size"])
-                        sink_blks = sink_tokens // blk_sz
-                        evict_blks = num_evicted_tokens // blk_sz
-                        roll_blks = num_rolled_tokens // blk_sz
-
-                        # iter-26: in-place copy into pre-allocated cache
-                        # slots instead of replacing the QuantizedTensor
-                        # reference. Required to unblock cudagraphs (the
-                        # fresh QT returned by quantize_to_fp4 lives in
-                        # the cudagraph memory pool; copying its data into
-                        # the persistent slot buffer breaks that escape).
-                        for i in range(roll_blks):
-                            src = sink_blks + evict_blks + i
-                            dst = sink_blks + i
-                            copy_quantized_into(cache["k"][dst], cache["k"][src])
-                            copy_quantized_into(cache["v"][dst], cache["v"][src])
-
-                        start_blk = local_start_index // blk_sz
-                        n_insert_blks = (local_end_index - local_start_index) // blk_sz
-                        head_dim = new_k.shape[-1]
-                        for bi in range(n_insert_blks):
-                            blk_idx = start_blk + bi
-                            ts = bi * blk_sz
-                            te = ts + blk_sz
-                            k_block = new_k[0, ts:te, :, :].reshape(-1, head_dim).contiguous()
-                            v_block = new_v[0, ts:te, :, :].reshape(-1, head_dim).contiguous()
-                            copy_quantized_into(
-                                cache["k"][blk_idx],
-                                quantize_to_fp4(k_block, self.kv_quant_config),
-                            )
-                            copy_quantized_into(
-                                cache["v"][blk_idx],
-                                quantize_to_fp4(v_block, self.kv_quant_config),
-                            )
-                    else:
-                        # Roll cached tokens.
-                        cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                            cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                        cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                            cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-
-                        # Insert the new key/value tensors.
-                        cache["k"][:, local_start_index:local_end_index] = new_k
-                        cache["v"][:, local_start_index:local_end_index] = new_v
+                    cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                        cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                        cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    cache["k"][:, local_start_index:local_end_index] = new_k
+                    cache["v"][:, local_start_index:local_end_index] = new_v
 
                     # If a pinned multi-shot sink lives outside position 0,
                     # the rolling shifted everything left by num_evicted_tokens;
@@ -1593,32 +1512,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     local_end_index = update_info["local_end_index"]
                     new_k = update_info["new_k"]
                     new_v = update_info["new_v"]
-                    if is_quantized:
-                        from utils.quant import copy_quantized_into, quantize_to_fp4
-
-                        blk_sz = int(cache["block_token_size"])
-                        start_blk = local_start_index // blk_sz
-                        n_insert_blks = (local_end_index - local_start_index) // blk_sz
-                        head_dim = new_k.shape[-1]
-                        # iter-26: in-place copy (see note above).
-                        for bi in range(n_insert_blks):
-                            blk_idx = start_blk + bi
-                            ts = bi * blk_sz
-                            te = ts + blk_sz
-                            k_block = new_k[0, ts:te, :, :].reshape(-1, head_dim).contiguous()
-                            v_block = new_v[0, ts:te, :, :].reshape(-1, head_dim).contiguous()
-                            copy_quantized_into(
-                                cache["k"][blk_idx],
-                                quantize_to_fp4(k_block, self.kv_quant_config),
-                            )
-                            copy_quantized_into(
-                                cache["v"][blk_idx],
-                                quantize_to_fp4(v_block, self.kv_quant_config),
-                            )
-                    else:
-                        # Insert the new key/value tensors.
-                        cache["k"][:, local_start_index:local_end_index] = new_k
-                        cache["v"][:, local_start_index:local_end_index] = new_v
+                    cache["k"][:, local_start_index:local_end_index] = new_k
+                    cache["v"][:, local_start_index:local_end_index] = new_v
             
             # Update cache indices.
             kv_cache[block_index]["global_end_index"].fill_(current_end)

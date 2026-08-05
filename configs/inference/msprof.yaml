@@ -1,5 +1,5 @@
-# Ascend msprof inference presets. All reported timings are collected under
-# msprof and are intended for comparisons made with the same profiler options.
+# 昇腾 msprof 推理预设。性能结果只能在相同 profiler 参数下横向比较。
+# 模型路径可通过 LONGLIVE_MODEL_ROOT 和 LONGLIVE_GENERATOR_CKPT 环境变量覆盖。
 model:
   name: Wan2.2-TI2V-5B
   root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -8,12 +8,14 @@ model:
   num_frame_per_block: 8
   local_attn_size: 32
 
+# SP 组共同生成一个样本；专用异步 VAE 模式要求额外暴露一张 NPU。
 runtime:
   sp_size: 4
   dp_size: 1
   model_num_heads: 24
   vae_mode: async_dedicated
 
+# 生成参数描述 latent 形状和因果采样策略。
 generation:
   latent_channels: 48
   latent_height: 44
@@ -24,12 +26,14 @@ generation:
   multi_shot_sink: true
   multi_shot_rope_offset: 8
 
+# 预热样本计入运行但不应计入最终统计。
 measurement:
   prompts: data/benchmarks/performance/prompts.txt
   num_prompts: 2
   warmup_per_rank: 1
   seed: 0
 
+# latent 帧数分别对应约 16、32 和 64 秒的像素视频。
 presets:
   16s:
     latent_frames: 96
@@ -38,6 +42,7 @@ presets:
   64s:
     latent_frames: 384
 
+# profiler 参数由启动脚本原样传给 msprof。
 msprof:
   output_type: db
   storage_limit: 50000MB
@@ -45,11 +50,13 @@ msprof:
   aic_metrics: PipeUtilization
   recover_parse: auto
 
+# 默认运行稠密对照；设置 LONGLIVE_SPARSE_METHOD=hsa_cag 可启用稀疏实验。
 sparsity:
   enabled: false
   method: dense
   options:
-    backend: auto
+    # 正式性能采集必须执行 Ascend Triton；不可用时直接失败，避免把 portable 当作 kernel 性能。
+    backend: ascend_triton
     sparsity: 0.85
     sparsity_base: 0.95
     block_q: 40
