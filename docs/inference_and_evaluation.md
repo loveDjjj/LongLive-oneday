@@ -27,7 +27,7 @@ YAML 管理模型结构、SP/DP、帧数、seed、数据和稀疏参数；Shell 
 
 ```bash
 export GENERATION_ENV=/path/to/longlive-env
-export CANN_ENV_SCRIPT=/path/to/Ascend/ascend-toolkit/set_env.sh
+export CANN_ENV_SCRIPT=/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
 export LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B
 export LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt
 ```

@@ -23,6 +23,6 @@ export AISBENCH_MAX_WORKERS=12
 
 See `docs/NPU_BF16_RUN_GUIDE.md` for the complete Chinese workflow.
 
-The launcher sources `/usr/local/Ascend/ascend-toolkit/set_env.sh`, prepends `$CONDA_PREFIX/lib` to
+The launcher sources `/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh`, prepends `$CONDA_PREFIX/lib` to
 `LD_LIBRARY_PATH`, and verifies both `torch_npu` and `decord` before starting
 AISBench. This avoids missing `libhccl.so` or loading an old system C++ runtime.

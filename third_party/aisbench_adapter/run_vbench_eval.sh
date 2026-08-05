@@ -12,7 +12,7 @@ export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/weight/vbench_models/}"
 export AISBENCH_WORK_DIR="${AISBENCH_WORK_DIR:-${REPO_ROOT}/outputs/default}"
 
 # Restore CANN/HCCL paths before changing the C++ runtime search order.
-CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
+CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 if [[ ! -f "${CANN_ENV_SCRIPT}" ]]; then
   echo "[error] CANN environment script not found: ${CANN_ENV_SCRIPT}" >&2
   echo "        Override it with CANN_ENV_SCRIPT=/actual/path/set_env.sh" >&2
@@ -39,7 +39,7 @@ if ! NPU_IMPORT_ERROR="$(python -c 'import torch; import torch_npu; print(torch_
   echo "${NPU_IMPORT_ERROR}" >&2
   echo >&2
   echo "Source the CANN environment before running this launcher, for example:" >&2
-  echo "  source /usr/local/Ascend/ascend-toolkit/set_env.sh" >&2
+  echo "  source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh" >&2
   echo "Do not concatenate LD_LIBRARY_PATH entries without a separating colon." >&2
   exit 1
 fi
