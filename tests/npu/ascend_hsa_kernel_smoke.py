@@ -21,6 +21,7 @@ print("[smoke] importing Ascend Triton backend", flush=True)
 from wan_5b.modules.sparse_attention_ascend import (
     ascend_triton_available,
     ascend_triton_sparse_attention,
+    ascend_triton_sparse_attention_blhd,
     ascend_triton_unavailable_reason,
 )
 print("[smoke] Ascend Triton backend imported", flush=True)
@@ -125,6 +126,25 @@ def main():
     print(f"forward max_abs={maximum:.6f} mean_abs={mean:.6f}", flush=True)
     if maximum > 0.05 or mean > 0.01:
         raise AssertionError("forward error exceeds BF16 tolerance")
+
+    stage("launching inference-only BLHD Triton forward")
+    with torch.no_grad():
+        actual_blhd = ascend_triton_sparse_attention_blhd(
+            source_q.permute(0, 2, 1, 3).contiguous(),
+            source_k.permute(0, 2, 1, 3).contiguous(),
+            source_v.permute(0, 2, 1, 3).contiguous(),
+            lut,
+            block_q=block_q,
+            block_k=block_k,
+        )
+    torch.npu.synchronize()
+    maximum, mean = error_stats(
+        actual_blhd,
+        expected.permute(0, 2, 1, 3).contiguous(),
+    )
+    print(f"BLHD forward max_abs={maximum:.6f} mean_abs={mean:.6f}", flush=True)
+    if maximum > 0.05 or mean > 0.01:
+        raise AssertionError("BLHD forward error exceeds BF16 tolerance")
 
     if not args.forward_only:
         grad = torch.randn(

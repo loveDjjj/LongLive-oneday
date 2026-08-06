@@ -55,19 +55,35 @@ if triton is not None:
         out_ptr,
         lse_ptr,
         scale,
+        q_stride_b: tl.constexpr,
+        q_stride_h: tl.constexpr,
+        q_stride_l: tl.constexpr,
+        k_stride_b: tl.constexpr,
+        k_stride_h: tl.constexpr,
+        k_stride_l: tl.constexpr,
+        v_stride_b: tl.constexpr,
+        v_stride_h: tl.constexpr,
+        v_stride_l: tl.constexpr,
+        out_stride_b: tl.constexpr,
+        out_stride_h: tl.constexpr,
+        out_stride_l: tl.constexpr,
         LQ: tl.constexpr,
         LKV: tl.constexpr,
         D: tl.constexpr,
+        HEADS: tl.constexpr,
         Q_BLOCKS: tl.constexpr,
         SELECTED_BLOCKS: tl.constexpr,
         BLOCK_Q: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_Q_PAD: tl.constexpr,
         BLOCK_K_PAD: tl.constexpr,
+        STORE_LSE: tl.constexpr,
     ):
         pid = tl.program_id(0)
         bh = pid // Q_BLOCKS
         query_block = pid - bh * Q_BLOCKS
+        batch_index = bh // HEADS
+        head_index = bh - batch_index * HEADS
 
         q_offsets = tl.arange(0, BLOCK_Q_PAD)
         k_offsets = tl.arange(0, BLOCK_K_PAD)
@@ -75,10 +91,11 @@ if triton is not None:
         q_indices = query_block * BLOCK_Q + q_offsets
         q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
 
-        q_base = bh * LQ * D
-        kv_base = bh * LKV * D
+        q_base = batch_index * q_stride_b + head_index * q_stride_h
+        k_base = batch_index * k_stride_b + head_index * k_stride_h
+        v_base = batch_index * v_stride_b + head_index * v_stride_h
         q = tl.load(
-            q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :],
+            q_ptr + q_base + q_indices[:, None] * q_stride_l + d_offsets[None, :],
             mask=q_mask[:, None],
             other=0.0,
         )
@@ -93,7 +110,7 @@ if triton is not None:
             k_indices = key_block * BLOCK_K + k_offsets
             k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
             k = tl.load(
-                k_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :],
+                k_ptr + k_base + k_indices[:, None] * k_stride_l + d_offsets[None, :],
                 mask=k_mask[:, None],
                 other=0.0,
             )
@@ -107,7 +124,7 @@ if triton is not None:
             block_sum = tl.sum(probabilities, axis=1)
 
             v = tl.load(
-                v_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :],
+                v_ptr + v_base + k_indices[:, None] * v_stride_l + d_offsets[None, :],
                 mask=k_mask[:, None],
                 other=0.0,
             )
@@ -117,13 +134,15 @@ if triton is not None:
             row_max = new_max
 
         output = accumulator / row_sum[:, None]
-        out_offsets = q_base + q_indices[:, None] * D + d_offsets[None, :]
+        out_base = batch_index * out_stride_b + head_index * out_stride_h
+        out_offsets = out_base + q_indices[:, None] * out_stride_l + d_offsets[None, :]
         tl.store(out_ptr + out_offsets, output, mask=q_mask[:, None])
-        tl.store(
-            lse_ptr + bh * LQ + q_indices,
-            row_max + tl.math.log2(row_sum),
-            mask=q_mask,
-        )
+        if STORE_LSE:
+            tl.store(
+                lse_ptr + bh * LQ + q_indices,
+                row_max + tl.math.log2(row_sum),
+                mask=q_mask,
+            )
 
 
     @triton.jit
@@ -407,15 +426,29 @@ class _AscendSparseAttention(torch.autograd.Function):
             output,
             lse,
             scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
             LQ=lq,
             LKV=lkv,
             D=dim,
+            HEADS=heads,
             Q_BLOCKS=q_blocks,
             SELECTED_BLOCKS=selected_blocks,
             BLOCK_Q=block_q,
             BLOCK_K=block_k,
             BLOCK_Q_PAD=block_q_pad,
             BLOCK_K_PAD=block_k_pad,
+            STORE_LSE=True,
         )
 
         ctx.save_for_backward(q, k, v, block_lut, sparse_map, lse, output)
@@ -510,6 +543,151 @@ class _AscendSparseAttention(torch.autograd.Function):
         return grad_q, grad_k, grad_v, None, None, None, None
 
 
+def _requires_autograd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
+    return torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v))
+
+
+def _ascend_triton_sparse_attention_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_lut: torch.Tensor,
+    block_q: int,
+    block_k: int,
+    scale: float,
+) -> torch.Tensor:
+    """Launch the inference-only kernel without allocating backward state."""
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    block_lut = block_lut.contiguous().to(torch.int32)
+
+    b, heads, lq, dim = q.shape
+    lkv = k.shape[2]
+    q_blocks = math.ceil(lq / block_q)
+    block_q_pad = triton.next_power_of_2(block_q)
+    block_k_pad = triton.next_power_of_2(block_k)
+    output = torch.empty_like(q)
+
+    _hsa_sparse_fwd[(b * heads * q_blocks,)](
+        q,
+        k,
+        v,
+        block_lut,
+        output,
+        output,
+        scale,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        LQ=lq,
+        LKV=lkv,
+        D=dim,
+        HEADS=heads,
+        Q_BLOCKS=q_blocks,
+        SELECTED_BLOCKS=block_lut.shape[-1],
+        BLOCK_Q=block_q,
+        BLOCK_K=block_k,
+        BLOCK_Q_PAD=block_q_pad,
+        BLOCK_K_PAD=block_k_pad,
+        STORE_LSE=False,
+    )
+    return output
+
+
+def ascend_triton_sparse_attention_blhd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_lut: torch.Tensor,
+    *,
+    block_q: int,
+    block_k: int,
+    scale: float | None = None,
+    validate_lut: bool = True,
+) -> torch.Tensor:
+    """Run the inference-only HSA kernel directly on contiguous BLHD tensors."""
+    if torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v)):
+        raise ValueError("BLHD Ascend HSA is inference-only; disable gradients")
+    if not ascend_triton_available():
+        raise RuntimeError(ascend_triton_unavailable_reason())
+    if q.device.type != "npu" or k.device.type != "npu" or v.device.type != "npu":
+        raise ValueError("Ascend Triton HSA requires q/k/v on an NPU device.")
+    if q.ndim != 4 or k.shape != v.shape:
+        raise ValueError("q/k/v must be BLHD tensors and k/v shapes must match.")
+    if q.shape[0] != k.shape[0] or q.shape[2:] != k.shape[2:]:
+        raise ValueError("q and k/v batch, head, and head dimensions must match.")
+    if q.dtype not in (torch.bfloat16, torch.float16) or q.dtype != k.dtype or q.dtype != v.dtype:
+        raise TypeError("Ascend Triton HSA requires matching BF16/FP16 q/k/v tensors.")
+
+    b, lq, heads, dim = q.shape
+    lkv = k.shape[1]
+    q_blocks = math.ceil(lq / block_q)
+    expected = (b, heads, q_blocks)
+    if block_lut.ndim != 4 or block_lut.shape[:3] != expected:
+        raise ValueError(f"block_lut must start with {expected}, got {tuple(block_lut.shape)}.")
+    if block_lut.shape[-1] == 0:
+        raise ValueError("block_lut must select at least one key block.")
+    key_blocks = math.ceil(lkv / block_k)
+    if validate_lut and (
+        torch.any(block_lut < 0) or torch.any(block_lut >= key_blocks)
+    ):
+        raise ValueError("block_lut contains an out-of-range key block index.")
+
+    block_lut = block_lut.contiguous().to(torch.int32)
+    block_q_pad = triton.next_power_of_2(block_q)
+    block_k_pad = triton.next_power_of_2(block_k)
+    if dim not in (64, 128, 256):
+        raise ValueError(f"unsupported HSA head dimension: {dim}")
+    if block_q_pad > 128 or block_k_pad > 128:
+        raise ValueError("Ascend Triton HSA supports block sizes up to 128.")
+
+    output = torch.empty_like(q)
+    attention_scale = float(scale) if scale is not None else dim ** -0.5
+    _hsa_sparse_fwd[(b * heads * q_blocks,)](
+        q,
+        k,
+        v,
+        block_lut,
+        output,
+        output,
+        attention_scale,
+        q.stride(0),
+        q.stride(2),
+        q.stride(1),
+        k.stride(0),
+        k.stride(2),
+        k.stride(1),
+        v.stride(0),
+        v.stride(2),
+        v.stride(1),
+        output.stride(0),
+        output.stride(2),
+        output.stride(1),
+        LQ=lq,
+        LKV=lkv,
+        D=dim,
+        HEADS=heads,
+        Q_BLOCKS=q_blocks,
+        SELECTED_BLOCKS=block_lut.shape[-1],
+        BLOCK_Q=block_q,
+        BLOCK_K=block_k,
+        BLOCK_Q_PAD=block_q_pad,
+        BLOCK_K_PAD=block_k_pad,
+        STORE_LSE=False,
+    )
+    return output
+
+
 def ascend_triton_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -519,8 +697,17 @@ def ascend_triton_sparse_attention(
     block_q: int,
     block_k: int,
     scale: float | None = None,
+    validate_lut: bool = True,
 ) -> torch.Tensor:
     """Run HSA sparse attention on BHLD tensors using an Ascend Triton LUT."""
+    if not ascend_triton_available():
+        raise RuntimeError(ascend_triton_unavailable_reason())
+    if q.device.type != "npu" or k.device.type != "npu" or v.device.type != "npu":
+        raise ValueError("Ascend Triton HSA requires q/k/v on an NPU device.")
+    if q.dtype not in (torch.bfloat16, torch.float16):
+        raise TypeError(f"Ascend Triton HSA requires BF16/FP16, got {q.dtype}.")
+    if q.dtype != k.dtype or q.dtype != v.dtype:
+        raise TypeError("q/k/v must use the same dtype.")
     if q.ndim != 4 or k.ndim != 4 or v.shape != k.shape:
         raise ValueError("q/k/v must be BHLD tensors and k/v shapes must match.")
     if q.shape[:2] != k.shape[:2] or q.shape[-1] != k.shape[-1]:
@@ -534,9 +721,21 @@ def ascend_triton_sparse_attention(
     if block_lut.shape[-1] == 0:
         raise ValueError("block_lut must select at least one key block.")
     key_blocks = math.ceil(k.shape[2] / block_k)
-    if torch.any(block_lut < 0) or torch.any(block_lut >= key_blocks):
+    if validate_lut and (
+        torch.any(block_lut < 0) or torch.any(block_lut >= key_blocks)
+    ):
         raise ValueError("block_lut contains an out-of-range key block index.")
     attention_scale = float(scale) if scale is not None else q.shape[-1] ** -0.5
+    if not _requires_autograd(q, k, v):
+        return _ascend_triton_sparse_attention_forward(
+            q,
+            k,
+            v,
+            block_lut,
+            int(block_q),
+            int(block_k),
+            attention_scale,
+        )
     return _AscendSparseAttention.apply(
         q, k, v, block_lut, int(block_q), int(block_k), attention_scale
     )
@@ -545,5 +744,6 @@ def ascend_triton_sparse_attention(
 __all__ = [
     "ascend_triton_available",
     "ascend_triton_sparse_attention",
+    "ascend_triton_sparse_attention_blhd",
     "ascend_triton_unavailable_reason",
 ]

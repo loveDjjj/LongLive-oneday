@@ -11,11 +11,16 @@ chunk can be kept dense independently of the historical sparsity budget.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
+
+
+_ASCEND_BLHD_INFERENCE = os.environ.get("LONGLIVE_HSA_BLHD_INFERENCE", "1") == "1"
+_ASCEND_VALIDATE_LUT = os.environ.get("LONGLIVE_HSA_VALIDATE_LUT", "0") == "1"
 
 
 @dataclass(frozen=True)
@@ -311,10 +316,25 @@ def _run_sparse_backend(
         from .sparse_attention_ascend import (
             ascend_triton_available,
             ascend_triton_sparse_attention,
+            ascend_triton_sparse_attention_blhd,
             ascend_triton_unavailable_reason,
         )
 
-        if ascend_triton_available() and q.device.type == "npu":
+        use_ascend = q.device.type == "npu" and (
+            backend == "ascend_triton" or ascend_triton_available()
+        )
+        if use_ascend:
+            if not torch.is_grad_enabled() and _ASCEND_BLHD_INFERENCE:
+                return ascend_triton_sparse_attention_blhd(
+                    q,
+                    k,
+                    v,
+                    block_lut,
+                    block_q=config.block_q,
+                    block_k=config.block_k,
+                    scale=config.softmax_scale,
+                    validate_lut=_ASCEND_VALIDATE_LUT,
+                )
             return ascend_triton_sparse_attention(
                 q.permute(0, 2, 1, 3).contiguous(),
                 k.permute(0, 2, 1, 3).contiguous(),
@@ -323,6 +343,7 @@ def _run_sparse_backend(
                 block_q=config.block_q,
                 block_k=config.block_k,
                 scale=config.softmax_scale,
+                validate_lut=_ASCEND_VALIDATE_LUT,
             ).permute(0, 2, 1, 3).contiguous()
         if backend == "ascend_triton":
             reason = ascend_triton_unavailable_reason()

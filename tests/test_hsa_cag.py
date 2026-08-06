@@ -5,6 +5,7 @@ from wan_5b.modules.sparse_attention import (
     calculate_chunk_sparsities,
     hierarchical_sparse_attention,
 )
+from wan_5b.modules.sparse_attention_ascend import _requires_autograd
 
 
 def test_cag_starts_dense_and_preserves_average_budget():
@@ -192,3 +193,12 @@ def test_hsa_rejects_sparse_current_chunk():
         assert "dense_current=true" in str(error)
     else:
         raise AssertionError("Expected sparse current-chunk routing to be rejected")
+
+
+def test_ascend_hsa_uses_forward_only_path_without_gradients():
+    tensor = torch.randn(2, requires_grad=True)
+
+    assert _requires_autograd(tensor, tensor, tensor)
+    with torch.no_grad():
+        assert not _requires_autograd(tensor, tensor, tensor)
+    assert not _requires_autograd(tensor.detach(), tensor.detach(), tensor.detach())

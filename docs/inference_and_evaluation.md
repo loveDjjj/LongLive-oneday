@@ -82,6 +82,15 @@ sparse_config:
 
 正式配置固定 `ascend_triton`，kernel 不可用时直接失败，不会静默降级到 portable。第一块、无历史 KV 或历史帧不足时回到 dense 属于算法预期；其余满足条件的历史 KV 进入 HSA 路由。
 
+Ascend 推理默认直接在 Ulysses 的 `BLHD` 布局上执行 forward-only HSA kernel，避免 Q/K/V 往返复制以及反向状态分配。兼容性排查时可设置 `LONGLIVE_HSA_BLHD_INFERENCE=0` 临时切回旧 `BHLD` 路径；设置 `LONGLIVE_HSA_VALIDATE_LUT=1` 可恢复逐次 LUT 边界检查，但会引入 NPU 到 Host 同步，不应用于正式性能测试。
+
+优化或调整 block 前，先用真实 SP4 尾部形状运行 microbenchmark。默认只测训练一致的 block 40；显式扫描候选值仅用于性能选型，正式修改仍需重新验证生成质量：
+
+```bash
+python tests/npu/benchmark_hsa_inference.py --device npu:0
+python tests/npu/benchmark_hsa_inference.py --device npu:0 --blocks 40,55,80,88,110
+```
+
 可在启动前只展开配置确认：
 
 ```bash
