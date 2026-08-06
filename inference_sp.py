@@ -133,6 +133,24 @@ if getattr(config, "i2v", False):
 if getattr(config, "kv_quant", False):
     raise NotImplementedError("The supported inference path requires kv_quant=false.")
 
+sparse_config = getattr(config, "sparse_config", None)
+if sparse_config:
+    from wan_5b.modules.sparse_attention import SparseAttentionConfig
+
+    parsed_sparse_config = SparseAttentionConfig.from_mapping(sparse_config)
+    if parsed_sparse_config.enabled and parsed_sparse_config.backend == "mindiesd":
+        from wan_5b.modules.sparse_attention_mindiesd import (
+            mindiesd_available,
+            mindiesd_unavailable_reason,
+        )
+
+        if not mindiesd_available():
+            raise RuntimeError(
+                "HSA inference requires MindIE-SD RainFusionAttention, but it could "
+                "not be imported. Install a MindIE-SD build matching torch_npu/CANN "
+                f"before loading the model. Detail: {mindiesd_unavailable_reason()}"
+            )
+
 sp_size = int(getattr(config, "sp_size", 1))
 dp_size = int(getattr(config, "dp_size", 1))
 auto_sp_remainder = bool(getattr(config, "auto_sp_remainder", False))

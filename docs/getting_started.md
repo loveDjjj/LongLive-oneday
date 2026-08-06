@@ -135,9 +135,11 @@ python scripts/evaluation/resolve_config.py vbench \
   --output /tmp/longlive_vbench_resolved.yaml
 ```
 
-加入 `LONGLIVE_SPARSE_METHOD=hsa_cag` 后，输出的 `model_kwargs.sparse_config` 必须包含 `enabled: true` 和 `backend: ascend_triton`。
+加入 `LONGLIVE_SPARSE_METHOD=hsa_cag` 后，输出的
+`model_kwargs.sparse_config` 必须包含 `enabled: true`、`backend: mindiesd`
+和 `block_q/block_k: 128`。
 
-## 6. Ascend Triton HSA kernel 烟测
+## 6. Ascend Triton 训练 kernel 烟测
 
 正式后端必须先通过前向和反向正确性测试。首次运行会编译 kernel，可能需要几十秒：
 
@@ -230,7 +232,49 @@ unset ASCEND_LAUNCH_BLOCKING
 
 ### 9.2 Ascend Triton 不可用
 
-检查 `triton.__file__`、CANN 环境、`torch_npu` 版本和 `wan_5b.modules.sparse_attention_ascend.ascend_triton_unavailable_reason()`。训练和正式稀疏评测都使用 `ascend_triton`，不会静默退回 portable。
+训练后端不可用时，检查 `triton.__file__`、CANN 环境、`torch_npu` 版本和
+`wan_5b.modules.sparse_attention_ascend.ascend_triton_unavailable_reason()`。
+训练使用 `ascend_triton`，不会静默退回 portable。
+
+正式稀疏推理使用 MindIE-SD 3.0.0 的 `RainFusionAttention`。虽然 3.0.0
+通用安装页把 CANN 8.0.0 列为包级基线，但本路径依赖的
+`aclnnRainFusionAttention` 从 ops-transformer 8.5.0 起提供；因此实际最低
+使用 CANN 8.5.0，并确保安装匹配版本的 ops 包。华为提供的 MindIE-SD 3.0.0
+镜像采用 CANN 8.5.1 + torch/torch_npu 2.9.0，这是新建环境的推荐组合。
+不要安装当前 `dev` 分支；它要求 CANN 9.0.1。安装稳定版：
+
+```bash
+pip install --trusted-host ascend.devcloud.huaweicloud.com \
+  -i https://ascend.devcloud.huaweicloud.com/pypi/simple/ mindiesd==3.0.0
+```
+
+安装后检查：
+
+```bash
+python - <<'PY'
+from wan_5b.modules.sparse_attention_mindiesd import (
+    mindiesd_available, mindiesd_unavailable_reason,
+)
+print("available:", mindiesd_available())
+print("detail:", mindiesd_unavailable_reason())
+PY
+```
+
+`available: false` 时不要运行 HSA VBench；启动入口也会在加载 5B 模型前失败。
+
+安装完成后先验证 BF16、矩形 Q/KV 和完整 LUT 与 dense attention 数值一致：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python tests/npu/mindiesd_hsa_kernel_smoke.py --device npu:0 --dtype bf16
+```
+
+再运行真实 SP4 尾部形状基准；只有 `full_ms` 小于 dense 延迟才进入 VBench：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python tests/npu/benchmark_hsa_inference.py --device npu:0
+```
 
 ### 9.3 分布式启动失败
 

@@ -38,7 +38,7 @@ def test_vbench_dense_does_not_inject_sparse_model_config(tmp_path, monkeypatch)
     assert metadata["required_devices"] == 16
 
 
-def test_vbench_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
+def test_vbench_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
     output = tmp_path / "hsa.yaml"
 
@@ -48,7 +48,9 @@ def test_vbench_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
     sparse = OmegaConf.load(output).model_kwargs.sparse_config
 
     assert sparse.enabled is True
-    assert sparse.backend == "ascend_triton"
+    assert sparse.backend == "mindiesd"
+    assert sparse.block_q == 128
+    assert sparse.block_k == 128
     assert metadata["sparsity_method"] == "hsa_cag"
 
 
@@ -61,7 +63,7 @@ def test_vbench_rejects_hsa_for_native_wan22(tmp_path, monkeypatch):
         )
 
 
-def test_msprof_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
+def test_msprof_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
     output = tmp_path / "msprof.yaml"
 
@@ -69,6 +71,8 @@ def test_msprof_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
     sparse = OmegaConf.load(output).model_kwargs.sparse_config
 
     assert sparse.enabled is True
-    assert sparse.backend == "ascend_triton"
+    assert sparse.backend == "mindiesd"
+    assert sparse.block_q == 128
+    assert sparse.block_k == 128
     assert metadata["sparsity_method"] == "hsa_cag"
     assert metadata["msprof"]["ai_core"] is True

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import statistics
 import sys
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import torch
@@ -29,12 +31,21 @@ from wan_5b.modules.sparse_attention_ascend import (
     ascend_triton_sparse_attention_blhd,
     ascend_triton_unavailable_reason,
 )
+from wan_5b.modules.sparse_attention_mindiesd import (
+    mindiesd_available,
+    mindiesd_sparse_attention_blhd,
+    mindiesd_unavailable_reason,
+)
 
 
 def _parse_blocks(value: str) -> list[int]:
     blocks = [int(item) for item in value.split(",") if item.strip()]
-    if not blocks or any(block <= 0 or 880 % block for block in blocks):
-        raise argparse.ArgumentTypeError("every block must be positive and divide 880")
+    if not blocks or any(
+        block <= 0 or 7040 % block or 28160 % block for block in blocks
+    ):
+        raise argparse.ArgumentTypeError(
+            "every block must be positive and divide the 7040/28160 tail lengths"
+        )
     return blocks
 
 
@@ -45,10 +56,35 @@ def _parse_positive_list(value: str) -> list[int]:
     return values
 
 
-def _sparse_config(block: int) -> dict:
+def _package_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _cann_version() -> str:
+    roots = [
+        os.environ.get("ASCEND_HOME_PATH"),
+        os.environ.get("ASCEND_TOOLKIT_HOME"),
+        "/usr/local/Ascend/ascend-toolkit/latest",
+    ]
+    for root in filter(None, roots):
+        for name in ("version.cfg", "version.info", "compiler/version.info"):
+            try:
+                lines = (Path(root) / name).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if "version" in line.lower() and "=" in line:
+                    return line.split("=", 1)[1].strip()
+    return "unknown"
+
+
+def _sparse_config(block: int, backend: str = "ascend_triton") -> dict:
     return {
         "enabled": True,
-        "backend": "ascend_triton",
+        "backend": backend,
         "sparsity": 0.85,
         "sparsity_base": 0.95,
         "block_q": block,
@@ -64,8 +100,10 @@ def _sparse_config(block: int) -> dict:
     }
 
 
-def _build_lut(q: torch.Tensor, k: torch.Tensor, block: int) -> torch.Tensor:
-    config = SparseAttentionConfig.from_mapping(_sparse_config(block))
+def _build_lut(
+    q: torch.Tensor, k: torch.Tensor, block: int, backend: str = "ascend_triton"
+) -> torch.Tensor:
+    config = SparseAttentionConfig.from_mapping(_sparse_config(block, backend))
     frame_seq = 880
     chunk_id = 23
     history_tokens = k.shape[1] - q.shape[1]
@@ -82,8 +120,10 @@ def _build_lut(q: torch.Tensor, k: torch.Tensor, block: int) -> torch.Tensor:
     history_ids = _history_block_indices(
         q_blocks,
         k_block_means,
+        k[:, :history_tokens],
         history_frames,
-        frame_seq // block,
+        frame_seq,
+        block,
         history_keep,
         config,
     )
@@ -111,7 +151,12 @@ def _measure(operation, *, warmup: int, iterations: int) -> tuple[float, float]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="npu:0")
-    parser.add_argument("--blocks", type=_parse_blocks, default=[40])
+    parser.add_argument(
+        "--backend",
+        choices=("mindiesd", "ascend_triton"),
+        default="mindiesd",
+    )
+    parser.add_argument("--blocks", type=_parse_blocks, default=[128])
     parser.add_argument(
         "--native-query-batches",
         type=_parse_positive_list,
@@ -123,11 +168,23 @@ def main() -> None:
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         raise ValueError("warmup and iterations must be positive")
-    if not ascend_triton_available():
+    if args.backend == "mindiesd":
+        if not mindiesd_available():
+            raise RuntimeError(mindiesd_unavailable_reason())
+        if args.blocks != [128]:
+            raise ValueError("MindIE-SD RainFusionAttention only supports block 128")
+    elif not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
+    device_name = torch.npu.get_device_properties(device).name
+    print(
+        f"torch={torch.__version__} torch_npu={_package_version('torch-npu')} "
+        f"mindiesd={_package_version('mindiesd')} cann={_cann_version()} "
+        f"device={device_name}",
+        flush=True,
+    )
     generator = torch.Generator(device="cpu").manual_seed(11)
     shape_q = (1, 7040, 6, 128)
     shape_kv = (1, 28160, 6, 128)
@@ -152,16 +209,23 @@ def main() -> None:
         )
 
         for block in args.blocks:
-            config = _sparse_config(block)
+            config = _sparse_config(block, args.backend)
             try:
                 route_median, route_min = _measure(
-                    lambda: _build_lut(q, k, block),
+                    lambda: _build_lut(q, k, block, args.backend),
                     warmup=args.warmup,
                     iterations=args.iterations,
                 )
-                block_lut = _build_lut(q, k, block)
-                kernel_median, kernel_min = _measure(
-                    lambda: ascend_triton_sparse_attention_blhd(
+                block_lut = _build_lut(q, k, block, args.backend)
+                selected_blocks = block_lut.shape[-1]
+                kv_blocks = k.shape[1] // block
+                effective_sparsity = 1.0 - selected_blocks / kv_blocks
+                if args.backend == "mindiesd":
+                    sparse_kernel = lambda: mindiesd_sparse_attention_blhd(
+                        q, k, v, block_lut
+                    )
+                else:
+                    sparse_kernel = lambda: ascend_triton_sparse_attention_blhd(
                         q,
                         k,
                         v,
@@ -169,7 +233,9 @@ def main() -> None:
                         block_q=block,
                         block_k=block,
                         validate_lut=False,
-                    ),
+                    )
+                kernel_median, kernel_min = _measure(
+                    sparse_kernel,
                     warmup=args.warmup,
                     iterations=args.iterations,
                 )
@@ -186,10 +252,12 @@ def main() -> None:
                     iterations=args.iterations,
                 )
                 print(
-                    f"hsa block={block} route_ms={route_median:.3f} "
+                    f"hsa backend={args.backend} block={block} route_ms={route_median:.3f} "
                     f"route_min_ms={route_min:.3f} kernel_ms={kernel_median:.3f} "
                     f"kernel_min_ms={kernel_min:.3f} full_ms={hsa_median:.3f} "
-                    f"full_min_ms={hsa_min:.3f} speedup={dense_median / hsa_median:.3f}x",
+                    f"full_min_ms={hsa_min:.3f} selected={selected_blocks}/{kv_blocks} "
+                    f"effective_sparsity={effective_sparsity:.3f} "
+                    f"speedup={dense_median / hsa_median:.3f}x",
                     flush=True,
                 )
                 for query_batch in args.native_query_batches:

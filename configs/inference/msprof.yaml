@@ -59,15 +59,15 @@ sparsity:
   enabled: false
   method: dense
   options:
-    # 正式性能采集必须执行 Ascend Triton；不可用时直接失败，避免把 portable 当作 kernel 性能。
-    backend: ascend_triton
+    # 正式性能采集使用 MindIE-SD 融合 RainFusionAttention；不可用时直接失败。
+    backend: mindiesd
     sparsity: 0.85
     sparsity_base: 0.95
-    block_q: 40
-    block_k: 40
+    block_q: 128
+    block_k: 128
     keep_frames: 6
     keep_sink: 1
     keep_near: 2
     dense_current: true
     min_sparse_history_frames: 2
-    query_block_batch: 2
+    query_block_batch: 1

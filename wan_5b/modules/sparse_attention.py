@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Mapping
 
 import torch
@@ -21,6 +22,41 @@ import torch.nn.functional as F
 
 _ASCEND_BLHD_INFERENCE = os.environ.get("LONGLIVE_HSA_BLHD_INFERENCE", "1") == "1"
 _ASCEND_VALIDATE_LUT = os.environ.get("LONGLIVE_HSA_VALIDATE_LUT", "0") == "1"
+
+
+def _device_key(device: torch.device) -> tuple[str, int | None]:
+    return device.type, device.index
+
+
+@lru_cache(maxsize=128)
+def _cached_arange(
+    device_type: str,
+    device_index: int | None,
+    start: int,
+    end: int,
+) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    return torch.arange(start, end, device=device)
+
+
+@lru_cache(maxsize=64)
+def _cached_frame_block_overlap(
+    device_type: str,
+    device_index: int | None,
+    history_frames: int,
+    frame_seq: int,
+    block_k: int,
+    history_block_count: int,
+) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    frame_starts = torch.arange(history_frames, device=device) * frame_seq
+    frame_ends = frame_starts + frame_seq
+    block_starts = torch.arange(history_block_count, device=device) * block_k
+    block_ends = block_starts + block_k
+    return (
+        (block_starts.unsqueeze(0) < frame_ends.unsqueeze(1))
+        & (block_ends.unsqueeze(0) > frame_starts.unsqueeze(1))
+    )
 
 
 @dataclass(frozen=True)
@@ -64,6 +100,8 @@ class SparseAttentionConfig:
                 "torch": "portable",
                 "triton": "ascend_triton",
                 "npu_triton": "ascend_triton",
+                "mindie_sd": "mindiesd",
+                "rainfusion": "mindiesd",
             }
             backend = str(normalized["backend"]).lower()
             normalized["backend"] = backend_aliases.get(backend, backend)
@@ -72,9 +110,9 @@ class SparseAttentionConfig:
         return config
 
     def validate(self) -> None:
-        if self.backend not in {"portable", "ascend_triton", "auto"}:
+        if self.backend not in {"portable", "ascend_triton", "mindiesd", "auto"}:
             raise ValueError(
-                "backend must be one of portable, ascend_triton, or auto; "
+                "backend must be one of portable, ascend_triton, mindiesd, or auto; "
                 f"got {self.backend}."
             )
         for name in ("sparsity", "sparsity_base"):
@@ -96,6 +134,12 @@ class SparseAttentionConfig:
             raise ValueError("keep_sink + keep_near must not exceed keep_frames.")
         if self.query_block_batch <= 0:
             raise ValueError("query_block_batch must be positive.")
+        if self.enabled and self.backend == "mindiesd" and (
+            self.block_q != 128 or self.block_k != 128
+        ):
+            raise ValueError(
+                "MindIE-SD RainFusionAttention requires block_q=block_k=128."
+            )
 
 
 def calculate_chunk_sparsities(
@@ -167,27 +211,37 @@ def _dense_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: f
 
 def _required_history_frames(
     q_blocks: torch.Tensor,
-    k_blocks: torch.Tensor,
+    history_k: torch.Tensor,
     history_frames: int,
-    blocks_per_frame: int,
+    frame_seq: int,
     config: SparseAttentionConfig,
 ) -> torch.Tensor:
     """Return selected historical frame ids as [B, H, QBlocks, FKeep]."""
     b, q_count, heads, _ = q_blocks.shape
     keep_count = min(config.keep_frames, history_frames)
+    device_type, device_index = _device_key(q_blocks.device)
     if keep_count >= history_frames:
-        return torch.arange(history_frames, device=q_blocks.device).view(1, 1, 1, -1).expand(
-            b, heads, q_count, -1
-        )
+        return _cached_arange(
+            device_type, device_index, 0, history_frames
+        ).view(1, 1, 1, -1).expand(b, heads, q_count, -1)
 
     sink_count = min(config.keep_sink, keep_count)
     near_count = min(config.keep_near, keep_count - sink_count)
     middle_keep = keep_count - sink_count - near_count
     fixed_parts = []
     if sink_count:
-        fixed_parts.append(torch.arange(sink_count, device=q_blocks.device))
+        fixed_parts.append(
+            _cached_arange(device_type, device_index, 0, sink_count)
+        )
     if near_count:
-        fixed_parts.append(torch.arange(history_frames - near_count, history_frames, device=q_blocks.device))
+        fixed_parts.append(
+            _cached_arange(
+                device_type,
+                device_index,
+                history_frames - near_count,
+                history_frames,
+            )
+        )
 
     selected = []
     if fixed_parts:
@@ -196,12 +250,13 @@ def _required_history_frames(
     if middle_keep:
         middle_start = sink_count
         middle_end = history_frames - near_count
-        history = k_blocks[:, : history_frames * blocks_per_frame]
-        frame_keys = history.reshape(
-            b, history_frames, blocks_per_frame, heads, -1
+        frame_keys = history_k.reshape(
+            b, history_frames, frame_seq, heads, -1
         ).mean(dim=2)
         middle_keys = frame_keys[:, middle_start:middle_end]
-        scores = torch.einsum("bmhd,bfhd->bhmf", q_blocks.float(), middle_keys.float())
+        scores = torch.einsum(
+            "bmhd,bfhd->bhmf", q_blocks.float(), middle_keys.float()
+        )
         middle_ids = torch.topk(scores, middle_keep, dim=-1, sorted=False).indices + middle_start
         selected.append(middle_ids)
     return torch.cat(selected, dim=-1)
@@ -210,43 +265,50 @@ def _required_history_frames(
 def _history_block_indices(
     q_blocks: torch.Tensor,
     k_blocks: torch.Tensor,
+    history_k: torch.Tensor,
     history_frames: int,
-    blocks_per_frame: int,
+    frame_seq: int,
+    block_k: int,
     history_keep_blocks: int,
     config: SparseAttentionConfig,
 ) -> torch.Tensor:
     """Select historical key blocks with HSA's frame then block hierarchy."""
     b, q_count, heads, _ = q_blocks.shape
-    history_block_count = history_frames * blocks_per_frame
+    history_block_count = history_k.shape[1] // block_k
     if history_keep_blocks >= history_block_count:
-        return torch.arange(history_block_count, device=q_blocks.device).view(1, 1, 1, -1).expand(
-            b, heads, q_count, -1
-        )
+        device_type, device_index = _device_key(q_blocks.device)
+        return _cached_arange(
+            device_type, device_index, 0, history_block_count
+        ).view(1, 1, 1, -1).expand(b, heads, q_count, -1)
 
     with torch.no_grad():
         frame_ids = _required_history_frames(
-            q_blocks.detach(), k_blocks.detach(), history_frames, blocks_per_frame, config
+            q_blocks.detach(), history_k.detach(), history_frames, frame_seq, config
         )
-        offsets = torch.arange(blocks_per_frame, device=q_blocks.device)
-        candidates = (
-            frame_ids.unsqueeze(-1) * blocks_per_frame + offsets.view(1, 1, 1, 1, -1)
-        ).flatten(-2)
+        device_type, device_index = _device_key(q_blocks.device)
+        overlap = _cached_frame_block_overlap(
+            device_type,
+            device_index,
+            history_frames,
+            frame_seq,
+            block_k,
+            history_block_count,
+        )
+        eligible = overlap[frame_ids].any(dim=-2)
 
-        keys = k_blocks[:, :history_block_count].permute(0, 2, 1, 3)
-        keys = keys.unsqueeze(2).expand(-1, -1, q_count, -1, -1)
-        candidate_keys = torch.gather(
-            keys,
-            3,
-            candidates.unsqueeze(-1).expand(-1, -1, -1, -1, keys.shape[-1]),
-        )
+        history_keys = k_blocks[:, :history_block_count].permute(0, 2, 1, 3)
         scores = torch.einsum(
-            "bmhd,bhmtd->bhmt",
+            "bqhd,bhkd->bhqk",
             q_blocks.detach().float(),
-            candidate_keys.float(),
+            history_keys.float(),
         )
-        keep = min(history_keep_blocks, candidates.shape[-1])
-        chosen = torch.topk(scores, keep, dim=-1, sorted=False).indices
-        return torch.gather(candidates, -1, chosen)
+        scores.masked_fill_(~eligible, float("-inf"))
+
+        # This lower bound prevents top-k from admitting ineligible blocks when
+        # adjacent selected frames share an execution-block boundary.
+        minimum_candidates = frame_ids.shape[-1] * max(1, frame_seq // block_k)
+        keep = min(history_keep_blocks, history_block_count, minimum_candidates)
+        return torch.topk(scores, keep, dim=-1, sorted=False).indices
 
 
 def _gather_query_blocks(
@@ -312,6 +374,39 @@ def _run_sparse_backend(
     config: SparseAttentionConfig,
 ) -> torch.Tensor:
     backend = config.backend
+    if backend in {"auto", "mindiesd"}:
+        from .sparse_attention_mindiesd import (
+            mindiesd_available,
+            mindiesd_sparse_attention_blhd,
+            mindiesd_unavailable_reason,
+        )
+
+        use_mindiesd = (
+            q.device.type == "npu"
+            and not torch.is_grad_enabled()
+            and config.block_q == 128
+            and config.block_k == 128
+            and mindiesd_available()
+        )
+        if use_mindiesd:
+            return mindiesd_sparse_attention_blhd(
+                q,
+                k,
+                v,
+                block_lut,
+                scale=config.softmax_scale,
+            )
+        if backend == "mindiesd":
+            if q.device.type != "npu":
+                reason = f"q is on {q.device.type}, not npu"
+            elif torch.is_grad_enabled():
+                reason = "MindIE-SD RainFusionAttention is forward-only"
+            elif config.block_q != 128 or config.block_k != 128:
+                reason = "MindIE-SD RainFusionAttention requires block_q=block_k=128"
+            else:
+                reason = mindiesd_unavailable_reason()
+            raise RuntimeError(f"MindIE-SD HSA was requested but is unavailable: {reason}")
+
     if backend in {"auto", "ascend_triton"}:
         from .sparse_attention_ascend import (
             ascend_triton_available,
@@ -382,14 +477,10 @@ def hierarchical_sparse_attention(
         return _dense_attention(q, k, v, config.softmax_scale)
     if q.ndim != 4 or k.shape != v.shape or q.shape[0] != k.shape[0]:
         raise ValueError("HSA expects q/k/v in BLHD layout with compatible shapes.")
-    if (
-        frame_seq <= 0
-        or frame_seq % config.block_q != 0
-        or frame_seq % config.block_k != 0
-    ):
+    if frame_seq <= 0 or config.block_k > frame_seq:
         raise ValueError(
-            f"frame_seq ({frame_seq}) must be divisible by block_q/block_k "
-            f"({config.block_q}/{config.block_k})."
+            f"frame_seq ({frame_seq}) must be positive and at least block_k "
+            f"({config.block_k})."
         )
     if q.shape[1] % frame_seq or k.shape[1] % frame_seq:
         raise ValueError("q and k token lengths must contain complete latent frames.")
@@ -410,10 +501,18 @@ def hierarchical_sparse_attention(
     k_work, v_work = k, v
 
     b, _, heads, dim = q_work.shape
+    if q_work.shape[1] % block_q or k_work.shape[1] % block_k:
+        raise ValueError(
+            "q and k token lengths must be divisible by block_q/block_k; "
+            f"got {q_work.shape[1]}/{k_work.shape[1]} and {block_q}/{block_k}."
+        )
     q_count = q_work.shape[1] // block_q
     k_count = k_work.shape[1] // block_k
     history_block_count = history_tokens // block_k
-    current_block_ids = torch.arange(history_block_count, k_count, device=q.device)
+    device_type, device_index = _device_key(q.device)
+    current_block_ids = _cached_arange(
+        device_type, device_index, history_block_count, k_count
+    )
     history_keep = max(1, math.ceil((1.0 - sparsity) * history_block_count))
 
     q_blocks = q_work.reshape(b, q_count, block_q, heads, dim).mean(dim=2)
@@ -421,8 +520,10 @@ def hierarchical_sparse_attention(
     history_ids = _history_block_indices(
         q_blocks,
         k_block_means,
+        k_work[:, :history_tokens],
         history_frames,
-        frame_seq // block_k,
+        frame_seq,
+        block_k,
         history_keep,
         config,
     )

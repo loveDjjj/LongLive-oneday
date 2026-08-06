@@ -7,8 +7,10 @@
 - 模型：`Wan2.2-TI2V-5B` 与 LongLive2.0 合并后的 Generator。
 - 训练：纯提示词、32 latent 帧、每块 8 帧、4 步 backward simulation。
 - 并行：FSDP + Ulysses SP + DP，支持单机和多机。
-- 稀疏后端：`ascend_triton` 为正式路径，`portable` 仅用于正确性对照。
-- 推理：BF16 Ulysses SP，支持稠密和 HSA+CAG 对照。
+- 稀疏后端：训练使用可反向的 `ascend_triton`；推理使用 MindIE-SD
+  `RainFusionAttention` 融合算子；`portable` 仅用于正确性对照。
+- 推理：BF16 Ulysses SP，支持稠密和 HSA+CAG 对照；HSA 路由按帧选择，
+  融合算子固定使用与 7040/28160 token 尾部形状对齐的 128-token block。
 - 评测：VBench Standard 与 msprof。
 
 不再维护源仓库的 AR、I2V、NVFP4、FourOverSix、CUDA/Hopper 和非 SP 推理入口。配置若启用这些能力会在启动阶段直接失败。
@@ -108,6 +110,7 @@ bash scripts/evaluation/run_msprof.sh 32s
 - [环境安装、依赖检查与烟测](docs/getting_started.md)
 - [训练、数据集、日志、checkpoint 与恢复](docs/hsa_cag_training.md)
 - [推理、VBench、msprof 与评测产物](docs/inference_and_evaluation.md)
+- [昇腾稀疏注意力上游调研与技术选型](docs/ascend_sparse_attention_design.md)
 
 ## 上游项目
 

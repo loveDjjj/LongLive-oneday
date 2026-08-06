@@ -67,31 +67,46 @@ resolver 会向 `model_kwargs` 注入：
 ```yaml
 sparse_config:
   enabled: true
-  backend: ascend_triton
+  backend: mindiesd
   sparsity: 0.85
   sparsity_base: 0.95
-  block_q: 40
-  block_k: 40
+  block_q: 128
+  block_k: 128
   keep_frames: 6
   keep_sink: 1
   keep_near: 2
   dense_current: true
   min_sparse_history_frames: 2
-  query_block_batch: 2
+  query_block_batch: 1
 ```
 
-正式配置固定 `ascend_triton`，kernel 不可用时直接失败，不会静默降级到 portable。第一块、无历史 KV 或历史帧不足时回到 dense 属于算法预期；其余满足条件的历史 KV 进入 HSA 路由。
+正式推理配置固定 `mindiesd`，底层调用 MindIE-SD 的融合
+`RainFusionAttention`，不可用时直接失败，不会静默降级到 portable 或
+Triton。训练仍使用支持反向的 `ascend_triton`。第一块、无历史 KV 或历史帧
+不足时回到 dense 属于算法预期；其余满足条件的历史 KV 进入 HSA 路由。
 
-Ascend 推理默认直接在 Ulysses 的 `BLHD` 布局上执行 forward-only HSA kernel，避免 Q/K/V 往返复制以及反向状态分配。兼容性排查时可设置 `LONGLIVE_HSA_BLHD_INFERENCE=0` 临时切回旧 `BHLD` 路径；设置 `LONGLIVE_HSA_VALIDATE_LUT=1` 可恢复逐次 LUT 边界检查，但会引入 NPU 到 Host 同步，不应用于正式性能测试。
+MindIE-SD 后端直接把 Ulysses 的 `BLHD` 张量作为 `TND` view 传入融合算子，
+不会执行完整 Q/K/V 转置。HSA 的帧路由仍按每帧 880 token 计算，但执行 LUT
+按 128 token 分块；8 帧 query 为 `7040 = 55 x 128`，32 帧 KV 为
+`28160 = 220 x 128`。跨越单帧边界的执行块只要与选中帧相交就进入候选集，
+不会重复加入 LUT。传给 CANN 的 `selectIdx` 只保留实际选择宽度，不再填充到
+220 个 KV block；frame/block overlap 和固定计数张量按设备与 shape 缓存，但
+每层 Q/K 分数和最终 LUT 仍独立计算。
 
-优化或调整 block 前，先用真实 SP4 尾部形状运行 microbenchmark。默认只测训练一致的 block 40；显式扫描候选值仅用于性能选型，正式修改仍需重新验证生成质量：
+先用真实 SP4 尾部形状运行 microbenchmark。默认测试正式推理使用的
+MindIE-SD 128 block；Triton 扫描只用于训练 kernel 回归：
 
 ```bash
 python tests/npu/benchmark_hsa_inference.py --device npu:0
-python tests/npu/benchmark_hsa_inference.py --device npu:0 --blocks 40,55,80,88,110
-python tests/npu/benchmark_hsa_inference.py --device npu:0 --blocks 40 \
+python tests/npu/benchmark_hsa_inference.py --device npu:0 \
+  --backend ascend_triton --blocks 40,55,80,88,110
+python tests/npu/benchmark_hsa_inference.py --device npu:0 \
+  --backend ascend_triton --blocks 40 \
   --native-query-batches 2,4,8,16
 ```
+
+正式启用前，`full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
+或 kernel 正确性不能证明加速。
 
 可在启动前只展开配置确认：
 
@@ -327,7 +342,8 @@ logs/msprof/<run-id>/
 ## 8. 结果验收和常见问题
 
 - 查看 `manifest.json` 和 resolved YAML，确认 checkpoint、模型类别、seed、SP/DP 和 `sparsity_method`。
-- 稀疏运行的 resolved YAML 必须含 `model_kwargs.sparse_config.enabled: true` 与 `backend: ascend_triton`。
+- 稀疏运行的 resolved YAML 必须含 `model_kwargs.sparse_config.enabled: true`、
+  `backend: mindiesd` 与 `block_q/block_k: 128`。
 - Dense/HSA 使用不同 `RUN_ID`，否则已有视频可能被错误复用。
 - 比较质量时保持同一 checkpoint、subset 和 seeds；比较性能时还要保持 profiler 参数和布局。
 - VBench 生成失败先看 `logs/vbench/<run-id>/seed_<seed>.log`，评测失败看 `aisbench.log`。
