@@ -77,6 +77,7 @@ if triton is not None:
         BLOCK_K: tl.constexpr,
         BLOCK_Q_PAD: tl.constexpr,
         BLOCK_K_PAD: tl.constexpr,
+        PIPELINE_STAGES: tl.constexpr,
         STORE_LSE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -105,7 +106,9 @@ if triton is not None:
         accumulator = tl.zeros([BLOCK_Q_PAD, D], tl.float32)
         lut_base = pid * SELECTED_BLOCKS
 
-        for selected_index in tl.range(0, SELECTED_BLOCKS, num_stages=2):
+        for selected_index in tl.range(
+            0, SELECTED_BLOCKS, num_stages=PIPELINE_STAGES
+        ):
             key_block = tl.load(lut_ptr + lut_base + selected_index)
             k_indices = key_block * BLOCK_K + k_offsets
             k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
@@ -404,6 +407,7 @@ class _AscendSparseAttention(torch.autograd.Function):
         selected_blocks = block_lut.shape[-1]
         block_q_pad = triton.next_power_of_2(block_q)
         block_k_pad = triton.next_power_of_2(block_k)
+        pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
         if dim not in (64, 128, 256):
             raise ValueError(f"unsupported HSA head dimension: {dim}")
         if block_q_pad > 128 or block_k_pad > 128:
@@ -448,6 +452,7 @@ class _AscendSparseAttention(torch.autograd.Function):
             BLOCK_K=block_k,
             BLOCK_Q_PAD=block_q_pad,
             BLOCK_K_PAD=block_k_pad,
+            PIPELINE_STAGES=pipeline_stages,
             STORE_LSE=True,
         )
 
@@ -567,6 +572,7 @@ def _ascend_triton_sparse_attention_forward(
     q_blocks = math.ceil(lq / block_q)
     block_q_pad = triton.next_power_of_2(block_q)
     block_k_pad = triton.next_power_of_2(block_k)
+    pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
     output = torch.empty_like(q)
 
     _hsa_sparse_fwd[(b * heads * q_blocks,)](
@@ -599,6 +605,7 @@ def _ascend_triton_sparse_attention_forward(
         BLOCK_K=block_k,
         BLOCK_Q_PAD=block_q_pad,
         BLOCK_K_PAD=block_k_pad,
+        PIPELINE_STAGES=pipeline_stages,
         STORE_LSE=False,
     )
     return output
@@ -646,6 +653,7 @@ def ascend_triton_sparse_attention_blhd(
     block_lut = block_lut.contiguous().to(torch.int32)
     block_q_pad = triton.next_power_of_2(block_q)
     block_k_pad = triton.next_power_of_2(block_k)
+    pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
     if dim not in (64, 128, 256):
         raise ValueError(f"unsupported HSA head dimension: {dim}")
     if block_q_pad > 128 or block_k_pad > 128:
@@ -683,6 +691,7 @@ def ascend_triton_sparse_attention_blhd(
         BLOCK_K=block_k,
         BLOCK_Q_PAD=block_q_pad,
         BLOCK_K_PAD=block_k_pad,
+        PIPELINE_STAGES=pipeline_stages,
         STORE_LSE=False,
     )
     return output

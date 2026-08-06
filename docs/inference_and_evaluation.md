@@ -89,6 +89,8 @@ Ascend 推理默认直接在 Ulysses 的 `BLHD` 布局上执行 forward-only HSA
 ```bash
 python tests/npu/benchmark_hsa_inference.py --device npu:0
 python tests/npu/benchmark_hsa_inference.py --device npu:0 --blocks 40,55,80,88,110
+python tests/npu/benchmark_hsa_inference.py --device npu:0 --blocks 40 \
+  --native-query-batches 2,4,8,16
 ```
 
 可在启动前只展开配置确认：
