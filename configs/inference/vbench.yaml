@@ -59,7 +59,7 @@ defaults:
   pixel_frames: 125
   fps: 24
   sp_size: 2
-  dp_size: 6
+  dp_size: 8
   seeds: [0, 1, 2, 3, 4]
 
 # 命令行只接受这里列出的预设名称。

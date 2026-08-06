@@ -134,17 +134,17 @@ wan22_standard_{full,5pct,20pct}
 wan22_augmented_{full,5pct,20pct}
 ```
 
-默认参数是 125 个像素帧、24 FPS、SP2 x DP6、seed 0 到 4，共需 12 张 worker NPU。LongLive2 会换算为 32 个 latent 帧；Wan2.2 原生入口直接生成 125 个像素帧。
+默认参数是 125 个像素帧、24 FPS、SP2 x DP8、seed 0 到 4，共需 16 张 worker NPU。LongLive2 会换算为 32 个 latent 帧；Wan2.2 原生入口直接生成 125 个像素帧。
 
 ## 5. VBench 常用命令
 
 VBench 需要生成环境、AISBench 环境和 VBench 模型缓存：
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export GENERATION_ENV=/path/to/longlive-env
 export AISBENCH_ENV=/path/to/aisbench-env
-export VBENCH_CACHE_DIR=/path/to/vbench_models
+export VBENCH_CACHE_DIR=/mnt/share/weights/vbench_models/
 ```
 
 ### 5.1 LongLive2 原始权重 Dense
@@ -187,7 +187,7 @@ bash scripts/evaluation/run_vbench.sh longlive2_augmented_5pct
 标准 20% 和 Augmented 20% 可使用同一合并权重串行执行 HSA+CAG 评测。第一项失败时脚本立即停止；`RUN_ID_PREFIX` 可选，默认包含启动时间：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
 RUN_ID_PREFIX=hsa_cag_step100_20pct \
 bash scripts/evaluation/run_vbench_hsa_cag_20pct.sh \
   runs/merged/longlive2_hsa_cag_step100.pt
@@ -220,7 +220,7 @@ bash scripts/evaluation/run_vbench.sh longlive2_standard_full
 
 ```text
 [run] task=vbench preset=... run_id=...
-[run] devices=... layout=SP2xDP6 prompts=43
+[run] devices=... layout=SP2xDP8 prompts=43
 [generate] seed=0 (1/5) port=...
 [generate seed 0 ...] [####------] ... [...<..., ...s/video]
 [evaluate] videos=runs/vbench/.../videos/prepared

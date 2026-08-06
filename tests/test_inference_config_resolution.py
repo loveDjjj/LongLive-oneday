@@ -33,6 +33,9 @@ def test_vbench_dense_does_not_inject_sparse_model_config(tmp_path, monkeypatch)
 
     assert "sparse_config" not in resolved.model_kwargs
     assert metadata["sparsity_method"] == "dense"
+    assert metadata["dp_size"] == 8
+    assert metadata["nproc_per_node"] == 16
+    assert metadata["required_devices"] == 16
 
 
 def test_vbench_hsa_uses_required_ascend_backend(tmp_path, monkeypatch):
