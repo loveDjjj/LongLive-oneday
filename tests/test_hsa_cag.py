@@ -118,6 +118,65 @@ def test_hsa_query_block_batching_preserves_output():
     torch.testing.assert_close(batched, unbatched)
 
 
+def test_hsa_routing_cache_reuses_history_summaries_and_preserves_output():
+    torch.manual_seed(12)
+    q = torch.randn(1, 8, 2, 4)
+    k = torch.randn(1, 24, 2, 4)
+    v = torch.randn(1, 24, 2, 4)
+    config = {
+        "enabled": True,
+        "sparsity": 0.5,
+        "block_q": 2,
+        "block_k": 2,
+        "keep_frames": 2,
+        "keep_sink": 1,
+        "keep_near": 1,
+    }
+    routing_cache = {}
+
+    with torch.no_grad():
+        first = hierarchical_sparse_attention(
+            q,
+            k,
+            v,
+            frame_seq=4,
+            chunk_id=2,
+            sparse_config=config,
+            routing_cache=routing_cache,
+        )
+        cached_block_means = routing_cache["block_means"]
+        cached_frame_keys = routing_cache["frame_keys"]
+        second = hierarchical_sparse_attention(
+            q,
+            k,
+            v,
+            frame_seq=4,
+            chunk_id=2,
+            sparse_config=config,
+            routing_cache=routing_cache,
+        )
+        uncached = hierarchical_sparse_attention(
+            q, k, v, frame_seq=4, chunk_id=2, sparse_config=config
+        )
+
+        assert routing_cache["block_means"] is cached_block_means
+        assert routing_cache["frame_keys"] is cached_frame_keys
+        torch.testing.assert_close(second, first)
+        torch.testing.assert_close(second, uncached)
+
+        hierarchical_sparse_attention(
+            q,
+            k,
+            v,
+            frame_seq=4,
+            chunk_id=3,
+            sparse_config=config,
+            routing_cache=routing_cache,
+        )
+        assert routing_cache["block_means"] is not cached_block_means
+        assert routing_cache["frame_keys"] is not cached_frame_keys
+
+
 def test_hsa_auto_backend_falls_back_to_portable_on_cpu():
     torch.manual_seed(3)
     q = torch.randn(1, 4, 2, 4)

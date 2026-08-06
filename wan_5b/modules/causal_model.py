@@ -817,6 +817,10 @@ class CausalWanSelfAttention(nn.Module):
                         frame_seq=frame_seqlen,
                         chunk_id=chunk_id,
                         sparse_config=self._sparse_config,
+                        routing_cache=(
+                            None if torch.is_grad_enabled()
+                            else kv_cache.setdefault("hsa_routing_cache", {})
+                        ),
                     )
                 else:
                     x = attention(roped_query, roped_window_k, window_v)
@@ -829,6 +833,10 @@ class CausalWanSelfAttention(nn.Module):
                         frame_seq=frame_seqlen,
                         chunk_id=chunk_id,
                         sparse_config=self._sparse_config,
+                        routing_cache=(
+                            None if torch.is_grad_enabled()
+                            else kv_cache.setdefault("hsa_routing_cache", {})
+                        ),
                     )
                 else:
                     x = attention(roped_query, window_k, window_v)

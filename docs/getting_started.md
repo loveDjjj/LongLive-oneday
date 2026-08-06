@@ -269,7 +269,7 @@ ASCEND_RT_VISIBLE_DEVICES=0 \
 python tests/npu/mindiesd_hsa_kernel_smoke.py --device npu:0 --dtype bf16
 ```
 
-再运行真实 SP4 尾部形状基准；只有 `full_ms` 小于 dense 延迟才进入 VBench：
+再运行真实 SP4 尾部形状基准；只有 `cached_full_ms` 小于 dense 延迟才进入 VBench：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \

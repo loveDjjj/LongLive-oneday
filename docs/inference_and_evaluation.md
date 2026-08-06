@@ -93,6 +93,12 @@ MindIE-SD 后端直接把 Ulysses 的 `BLHD` 张量作为 `TND` view 传入融�
 220 个 KV block；frame/block overlap 和固定计数张量按设备与 shape 缓存，但
 每层 Q/K 分数和最终 LUT 仍独立计算。
 
+同一个 AR chunk 的多个去噪 step 共享不变的历史 K。每层 KV cache 因此只保留
+当前 chunk 的历史 frame/block summaries，并在后续 step 复用；query summary、
+相关性分数、Top-K 和 LUT 仍按 step 重新计算。chunk 变化时缓存覆盖，clean recache
+时显式清空，训练或其他启用梯度的路径不使用该缓存。最终 LUT 只排序历史 Top-K，
+再拼接天然升序的当前 chunk block，保持 RainFusionAttention 的升序索引契约。
+
 先用真实 SP4 尾部形状运行 microbenchmark。默认测试正式推理使用的
 MindIE-SD 128 block；Triton 扫描只用于训练 kernel 回归：
 
@@ -105,7 +111,12 @@ python tests/npu/benchmark_hsa_inference.py --device npu:0 \
   --native-query-batches 2,4,8,16
 ```
 
-正式启用前，`full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
+输出中的 `uncached_route_ms` 是新 chunk 第一次构建历史 summaries 和 LUT 的冷路由，
+`kernel_ms` 是固定 LUT 下的 RainFusionAttention，`cached_full_ms` 是复用历史
+summaries 后的完整 HSA。判断稳态收益应比较 `cached_full_ms` 与 `dense median_ms`；
+长视频仍需用 msprof 验证每个新 chunk 的冷路由成本是否被后续去噪 step 摊薄。
+
+正式启用前，`cached_full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
 或 kernel 正确性不能证明加速。
 
 可在启动前只展开配置确认：

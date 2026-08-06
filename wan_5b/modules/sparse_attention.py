@@ -215,6 +215,7 @@ def _required_history_frames(
     history_frames: int,
     frame_seq: int,
     config: SparseAttentionConfig,
+    history_frame_keys: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return selected historical frame ids as [B, H, QBlocks, FKeep]."""
     b, q_count, heads, _ = q_blocks.shape
@@ -250,12 +251,15 @@ def _required_history_frames(
     if middle_keep:
         middle_start = sink_count
         middle_end = history_frames - near_count
-        frame_keys = history_k.reshape(
-            b, history_frames, frame_seq, heads, -1
-        ).mean(dim=2)
+        frame_keys = history_frame_keys
+        if frame_keys is None:
+            frame_keys = history_k.reshape(
+                b, history_frames, frame_seq, heads, -1
+            ).mean(dim=2)
         middle_keys = frame_keys[:, middle_start:middle_end]
-        scores = torch.einsum(
-            "bmhd,bfhd->bhmf", q_blocks.float(), middle_keys.float()
+        scores = torch.matmul(
+            q_blocks.permute(0, 2, 1, 3).float(),
+            middle_keys.permute(0, 2, 3, 1).float(),
         )
         middle_ids = torch.topk(scores, middle_keep, dim=-1, sorted=False).indices + middle_start
         selected.append(middle_ids)
@@ -271,6 +275,7 @@ def _history_block_indices(
     block_k: int,
     history_keep_blocks: int,
     config: SparseAttentionConfig,
+    history_frame_keys: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select historical key blocks with HSA's frame then block hierarchy."""
     b, q_count, heads, _ = q_blocks.shape
@@ -283,7 +288,8 @@ def _history_block_indices(
 
     with torch.no_grad():
         frame_ids = _required_history_frames(
-            q_blocks.detach(), history_k.detach(), history_frames, frame_seq, config
+            q_blocks.detach(), history_k.detach(), history_frames, frame_seq,
+            config, history_frame_keys=history_frame_keys,
         )
         device_type, device_index = _device_key(q_blocks.device)
         overlap = _cached_frame_block_overlap(
@@ -297,10 +303,9 @@ def _history_block_indices(
         eligible = overlap[frame_ids].any(dim=-2)
 
         history_keys = k_blocks[:, :history_block_count].permute(0, 2, 1, 3)
-        scores = torch.einsum(
-            "bqhd,bhkd->bhqk",
-            q_blocks.detach().float(),
-            history_keys.float(),
+        scores = torch.matmul(
+            q_blocks.detach().permute(0, 2, 1, 3).float(),
+            history_keys.transpose(-1, -2).float(),
         )
         scores.masked_fill_(~eligible, float("-inf"))
 
@@ -466,6 +471,7 @@ def hierarchical_sparse_attention(
     frame_seq: int,
     chunk_id: int,
     sparse_config: Mapping[str, Any] | SparseAttentionConfig | None,
+    routing_cache: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     """Apply HSA to cached rectangular BLHD tensors using the configured backend."""
     config = (
@@ -516,25 +522,57 @@ def hierarchical_sparse_attention(
     history_keep = max(1, math.ceil((1.0 - sparsity) * history_block_count))
 
     q_blocks = q_work.reshape(b, q_count, block_q, heads, dim).mean(dim=2)
-    k_block_means = k_work.reshape(b, k_count, block_k, heads, dim).mean(dim=2)
+
+    # Historical K is unchanged across the denoising steps of one AR chunk.
+    # Cache only its routing summaries; query summaries remain step-dependent.
+    cache_key = (
+        int(chunk_id), history_tokens, history_frames, frame_seq, block_k,
+        heads, dim, q_work.dtype, q_work.device.type, q_work.device.index,
+    )
+    cached = None
+    if routing_cache is not None and not torch.is_grad_enabled():
+        if routing_cache.get("key") == cache_key:
+            cached = routing_cache
+    if cached is None:
+        history_k = k_work[:, :history_tokens]
+        history_block_means = history_k.reshape(
+            b, history_block_count, block_k, heads, dim
+        ).mean(dim=2).float()
+        history_frame_keys = history_k.reshape(
+            b, history_frames, frame_seq, heads, dim
+        ).mean(dim=2).float()
+        if routing_cache is not None and not torch.is_grad_enabled():
+            routing_cache.clear()
+            routing_cache.update({
+                "key": cache_key,
+                "block_means": history_block_means,
+                "frame_keys": history_frame_keys,
+            })
+    else:
+        history_block_means = cached["block_means"]
+        history_frame_keys = cached["frame_keys"]
+
     history_ids = _history_block_indices(
         q_blocks,
-        k_block_means,
+        history_block_means,
         k_work[:, :history_tokens],
         history_frames,
         frame_seq,
         block_k,
         history_keep,
         config,
+        history_frame_keys=history_frame_keys,
     )
 
-    selected = history_ids
+    # RainFusion requires ascending indices. Current blocks form a consecutive
+    # suffix, so sorting only the shorter historical selection is sufficient.
+    selected = torch.sort(history_ids, dim=-1).values
     if config.dense_current:
         current = current_block_ids.view(1, 1, 1, -1).expand(
             b, heads, q_count, -1
         )
         selected = torch.cat([selected, current], dim=-1)
-    block_lut = torch.sort(selected, dim=-1).values.contiguous()
+    block_lut = selected.contiguous()
     return _run_sparse_backend(q_work, k_work, v_work, block_lut, config)
 
 

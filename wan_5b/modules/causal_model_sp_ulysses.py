@@ -228,6 +228,10 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                     frame_seq=frame_seqlen,
                     chunk_id=chunk_id,
                     sparse_config=self._sparse_config,
+                    routing_cache=(
+                        None if torch.is_grad_enabled()
+                        else kv_cache.setdefault("hsa_routing_cache", {})
+                    ),
                 )
             else:
                 out_heads = attention(roped_q, k_full, v_full, causal=False)

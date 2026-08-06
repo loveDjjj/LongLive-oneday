@@ -116,20 +116,28 @@ def _build_lut(
     history_keep = max(1, math.ceil((1.0 - sparsity) * history_block_count))
 
     q_blocks = q.reshape(b, q_count, block, heads, dim).mean(dim=2)
-    k_block_means = k.reshape(b, k_count, block, heads, dim).mean(dim=2)
+    history_k = k[:, :history_tokens]
+    k_block_means = history_k.reshape(
+        b, history_block_count, block, heads, dim
+    ).mean(dim=2).float()
+    history_frame_keys = history_k.reshape(
+        b, history_frames, frame_seq, heads, dim
+    ).mean(dim=2).float()
     history_ids = _history_block_indices(
         q_blocks,
         k_block_means,
-        k[:, :history_tokens],
+        history_k,
         history_frames,
         frame_seq,
         block,
         history_keep,
         config,
+        history_frame_keys=history_frame_keys,
     )
     current_ids = torch.arange(history_block_count, k_count, device=q.device)
     current = current_ids.view(1, 1, 1, -1).expand(b, heads, q_count, -1)
-    return torch.sort(torch.cat([history_ids, current], dim=-1), dim=-1).values.contiguous()
+    history_ids = torch.sort(history_ids, dim=-1).values
+    return torch.cat([history_ids, current], dim=-1).contiguous()
 
 
 def _measure(operation, *, warmup: int, iterations: int) -> tuple[float, float]:
@@ -239,6 +247,7 @@ def main() -> None:
                     warmup=args.warmup,
                     iterations=args.iterations,
                 )
+                routing_cache = {}
                 hsa_median, hsa_min = _measure(
                     lambda: hierarchical_sparse_attention(
                         q,
@@ -247,15 +256,18 @@ def main() -> None:
                         frame_seq=880,
                         chunk_id=23,
                         sparse_config=config,
+                        routing_cache=routing_cache,
                     ),
                     warmup=args.warmup,
                     iterations=args.iterations,
                 )
                 print(
-                    f"hsa backend={args.backend} block={block} route_ms={route_median:.3f} "
-                    f"route_min_ms={route_min:.3f} kernel_ms={kernel_median:.3f} "
-                    f"kernel_min_ms={kernel_min:.3f} full_ms={hsa_median:.3f} "
-                    f"full_min_ms={hsa_min:.3f} selected={selected_blocks}/{kv_blocks} "
+                    f"hsa backend={args.backend} block={block} "
+                    f"uncached_route_ms={route_median:.3f} "
+                    f"uncached_route_min_ms={route_min:.3f} "
+                    f"kernel_ms={kernel_median:.3f} kernel_min_ms={kernel_min:.3f} "
+                    f"cached_full_ms={hsa_median:.3f} cached_full_min_ms={hsa_min:.3f} "
+                    f"selected={selected_blocks}/{kv_blocks} "
                     f"effective_sparsity={effective_sparsity:.3f} "
                     f"speedup={dense_median / hsa_median:.3f}x",
                     flush=True,

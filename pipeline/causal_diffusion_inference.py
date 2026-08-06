@@ -1035,6 +1035,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         """Reset KV cache for clean recache, preserving global sink."""
         global_sink_tokens = self.global_sink_size * self.frame_seq_length
         for block_cache in kv_cache:
+            block_cache.pop("hsa_routing_cache", None)
             block_cache["local_end_index"].fill_(global_sink_tokens)
             block_cache["global_end_index"].fill_(current_start_tokens)
             block_cache["pinned_start"].fill_(-1)

@@ -77,7 +77,7 @@ block pooling 和阈值选块。但该接口生成自己的 CDF/一阶段 mask�
 
 1. BF16 全 LUT 输出与 dense attention 对齐；
 2. BF16 稀疏 LUT 输出与 portable block-sparse 参考对齐；
-3. 真实 SP4 尾部 `Q=7040`、`KV=28160` 下 `full_ms < dense_ms`；
+3. 真实 SP4 尾部 `Q=7040`、`KV=28160` 下 `cached_full_ms < dense_ms`；
 4. 32 秒 msprof 中 Attention、路由和通信分别有可解释的耗时下降；
 5. 同一合并权重、提示词和 seed 的 VBench 20% 质量不低于既定容差。
 
