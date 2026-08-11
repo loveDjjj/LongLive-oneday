@@ -324,6 +324,19 @@ SLA 将 DiT 延迟降低 `25.52%`。但包含 dedicated VAE 的 p50 分别为 `1
 `127.555 s`，未获得端到端收益。这两组指标必须分开报告：前者证明 attention/DiT
 优化，后者反映当前单视频交付能力；不能用其中一项替代另一项。
 
+latent-only 运行保存的 `.pt` 可直接用于 VAE-only 基准，不必重新执行 DiT：
+
+```bash
+python tests/npu/benchmark_vae_decode.py \
+  --latent runs/benchmark/dense-dit-32s-3run/videos/rank0-1-0_regular_sp4.pt \
+  --device npu:0 --chunk-frames 8 --iterations 1
+```
+
+该工具先用两个 chunk 预热，再复现当前 dedicated VAE worker 内的 cached decode、逐
+chunk pinned DtoH、CPU 拼接和归一化，分别报告 `decode_dtoh_seconds` 与
+`cpu_post_seconds`，同时给出 latent/pixel FPS 和峰值显存。它不包含 DiT 卡到 VAE 卡的
+队列传输；后续 VAE 优化必须复用同一个 latent、chunk 大小和设备环境进行对照。
+
 ### 7.2 msprof 算子分析
 
 msprof 当前只测试 LongLive2。三个 preset：
