@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate MindIE-SD RainFusionAttention against dense NPU attention."""
+"""Validate MindIE-SD sparse SLA backends against dense NPU attention."""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from wan_5b.modules.sla_attention_mindiesd import (
+    mindiesd_bsa_available,
+    mindiesd_bsa_sparse_attention_blhd,
+    mindiesd_bsa_unavailable_reason,
     mindiesd_available,
     mindiesd_sparse_attention_blhd,
     mindiesd_unavailable_reason,
@@ -58,6 +61,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--dtype", choices=("bf16", "fp16"), default="bf16")
+    parser.add_argument(
+        "--backend", choices=("rainfusion", "bsa"), default="rainfusion"
+    )
     parser.add_argument("--q-tokens", type=int, default=1024)
     parser.add_argument("--kv-tokens", type=int, default=2048)
     parser.add_argument("--heads", type=int, default=6)
@@ -71,8 +77,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.q_tokens % 128 or args.kv_tokens % 128:
         raise ValueError("q-tokens and kv-tokens must be divisible by 128")
-    if not mindiesd_available():
-        raise RuntimeError(mindiesd_unavailable_reason())
+    if args.backend == "rainfusion":
+        if not mindiesd_available():
+            raise RuntimeError(mindiesd_unavailable_reason())
+        sparse_attention = mindiesd_sparse_attention_blhd
+    else:
+        if not mindiesd_bsa_available():
+            raise RuntimeError(mindiesd_bsa_unavailable_reason())
+        sparse_attention = mindiesd_bsa_sparse_attention_blhd
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
@@ -99,11 +111,11 @@ def main() -> None:
     sparse_lut = full_lut[..., : args.selected_blocks].contiguous()
 
     with torch.no_grad():
-        sparse = mindiesd_sparse_attention_blhd(q, k, v, full_lut)
+        sparse = sparse_attention(q, k, v, full_lut)
         dense = F.scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         ).transpose(1, 2)
-        sparse_selected = mindiesd_sparse_attention_blhd(q, k, v, sparse_lut)
+        sparse_selected = sparse_attention(q, k, v, sparse_lut)
         sparse_reference = _portable_sparse_attention(
             q,
             k,
@@ -121,7 +133,7 @@ def main() -> None:
     mean_abs = difference.mean().item()
     tolerance = 3e-2 if args.dtype == "bf16" else 1e-2
     print(
-        f"dtype={args.dtype} q={shape_q} kv={shape_kv} "
+        f"backend={args.backend} dtype={args.dtype} q={shape_q} kv={shape_kv} "
         f"max_abs={max_abs:.6f} mean_abs={mean_abs:.6f}"
     )
     if max_abs > tolerance:

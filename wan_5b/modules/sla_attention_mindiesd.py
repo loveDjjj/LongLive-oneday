@@ -11,6 +11,7 @@ import torch
 
 
 _IMPORT_ERROR: Exception | None = None
+_BSA_IMPORT_ERROR: Exception | None = None
 try:
     from mindiesd.layers.flash_attn.sparse_flash_attn_rf_v2 import (
         rain_fusion_attention as _rain_fusion_attention,
@@ -18,6 +19,14 @@ try:
 except Exception as error:  # pragma: no cover - depends on the NPU runtime
     _rain_fusion_attention = None
     _IMPORT_ERROR = error
+
+try:
+    from mindiesd.layers._custom_ops import (
+        block_sparse_attention as _block_sparse_attention,
+    )
+except Exception as error:  # pragma: no cover - depends on the NPU runtime
+    _block_sparse_attention = None
+    _BSA_IMPORT_ERROR = error
 
 
 def mindiesd_available() -> bool:
@@ -28,6 +37,22 @@ def mindiesd_unavailable_reason() -> str:
     if _IMPORT_ERROR is None:
         return "available"
     return f"{type(_IMPORT_ERROR).__name__}: {_IMPORT_ERROR}"
+
+
+def mindiesd_bsa_available() -> bool:
+    return _block_sparse_attention is not None and hasattr(
+        torch.ops.mindiesd, "block_sparse_attention"
+    )
+
+
+def mindiesd_bsa_unavailable_reason() -> str:
+    if _BSA_IMPORT_ERROR is None:
+        if _block_sparse_attention is None:
+            return "MindIE-SD block_sparse_attention wrapper is unavailable"
+        if not hasattr(torch.ops.mindiesd, "block_sparse_attention"):
+            return "MindIE-SD block_sparse_attention operator is not registered"
+        return "available"
+    return f"{type(_BSA_IMPORT_ERROR).__name__}: {_BSA_IMPORT_ERROR}"
 
 
 @lru_cache(maxsize=128)
@@ -77,6 +102,21 @@ def _prepare_mindiesd_lut(
         selected_blocks,
     )
     return select_idx, select_num_idx
+
+
+def _prepare_mindiesd_bsa_mask(
+    block_lut: torch.Tensor, k_blocks: int
+) -> torch.Tensor:
+    if block_lut.ndim != 4:
+        raise ValueError("MindIE-SD BSA LUT must have shape [batch, heads, q_blocks, selected]")
+    if block_lut.shape[-1] <= 0 or block_lut.shape[-1] > k_blocks:
+        raise ValueError("MindIE-SD BSA selected-block count is outside the KV block range")
+    mask = torch.zeros(
+        (*block_lut.shape[:3], k_blocks),
+        dtype=torch.int8,
+        device=block_lut.device,
+    )
+    return mask.scatter_(-1, block_lut.long(), 1)
 
 
 def mindiesd_sparse_attention_blhd(
@@ -146,7 +186,60 @@ def mindiesd_sparse_attention_blhd(
     return output.unsqueeze(0)
 
 
+def mindiesd_bsa_sparse_attention_blhd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_lut: torch.Tensor,
+    *,
+    scale: float | None = None,
+) -> torch.Tensor:
+    """Run MindIE-SD BlockSparseAttention directly in rectangular TND layout."""
+    if _block_sparse_attention is None:
+        raise RuntimeError(
+            "MindIE-SD BSA is unavailable: " + mindiesd_bsa_unavailable_reason()
+        )
+    if torch.is_grad_enabled():
+        raise RuntimeError("MindIE-SD BlockSparseAttention is forward-only")
+    if q.ndim != 4 or k.shape != v.shape or q.shape[0] != 1 or k.shape[0] != 1:
+        raise ValueError("MindIE-SD BSA expects batch-one compatible BLHD q/k/v")
+    if q.device.type != "npu" or q.device != k.device or q.device != v.device:
+        raise ValueError("MindIE-SD BSA requires q/k/v on the same NPU")
+    if q.dtype not in (torch.float16, torch.bfloat16) or not (
+        q.dtype == k.dtype == v.dtype
+    ):
+        raise TypeError("MindIE-SD BSA requires matching BF16/FP16 q/k/v")
+    if q.shape[2:] != k.shape[2:] or q.shape[1] % 128 or k.shape[1] % 128:
+        raise ValueError("MindIE-SD BSA requires matching heads and 128-aligned sequence lengths")
+
+    q_blocks = q.shape[1] // 128
+    k_blocks = k.shape[1] // 128
+    if tuple(block_lut.shape[:3]) != (1, q.shape[2], q_blocks):
+        raise ValueError("MindIE-SD BSA LUT shape does not match q")
+    block_mask = _prepare_mindiesd_bsa_mask(block_lut, k_blocks)
+    attention_scale = float(scale) if scale is not None else 1.0 / math.sqrt(q.shape[-1])
+    output, _ = _block_sparse_attention(
+        query=q.squeeze(0).contiguous(),
+        key=k.squeeze(0).contiguous(),
+        value=v.squeeze(0).contiguous(),
+        block_sparse_mask=block_mask,
+        block_shape=[128, 128],
+        q_input_layout="TND",
+        kv_input_layout="TND",
+        num_key_value_heads=q.shape[2],
+        scale_value=attention_scale,
+        inner_precise=0,
+        actual_seq_lengths=[q.shape[1]],
+        actual_seq_lengths_kv=[k.shape[1]],
+        softmax_lse_flag=0,
+    )
+    return output.unsqueeze(0)
+
+
 __all__ = [
+    "mindiesd_bsa_available",
+    "mindiesd_bsa_sparse_attention_blhd",
+    "mindiesd_bsa_unavailable_reason",
     "mindiesd_available",
     "mindiesd_sparse_attention_blhd",
     "mindiesd_unavailable_reason",

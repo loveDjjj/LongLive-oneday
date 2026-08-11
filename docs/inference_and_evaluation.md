@@ -99,6 +99,8 @@ MindIE-SD 128 block；Ascend Triton 用于训练 kernel 回归：
 ```bash
 python tests/npu/benchmark_sla_inference.py --device npu:0
 python tests/npu/benchmark_sla_inference.py --device npu:0 \
+  --backend mindiesd_bsa
+python tests/npu/benchmark_sla_inference.py --device npu:0 \
   --backend ascend_triton
 ```
 

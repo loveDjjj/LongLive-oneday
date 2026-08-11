@@ -8,7 +8,10 @@ from wan_5b.modules.sla_attention import (
     sla_cag_attention,
 )
 from wan_5b.modules.sla_attention_ascend import _requires_autograd
-from wan_5b.modules.sla_attention_mindiesd import _prepare_mindiesd_lut
+from wan_5b.modules.sla_attention_mindiesd import (
+    _prepare_mindiesd_bsa_mask,
+    _prepare_mindiesd_lut,
+)
 
 
 def _projection(dim: int, *, identity: bool = False) -> torch.nn.Linear:
@@ -257,6 +260,7 @@ def test_backend_aliases_and_mindiesd_block_contract():
     assert SLAAttentionConfig.from_mapping({"backend": "triton"}).backend == "ascend_triton"
     assert SLAAttentionConfig.from_mapping({"backend": "torch"}).backend == "portable"
     assert SLAAttentionConfig.from_mapping({"backend": "rainfusion"}).backend == "mindiesd"
+    assert SLAAttentionConfig.from_mapping({"backend": "bsa"}).backend == "mindiesd_bsa"
     try:
         SLAAttentionConfig.from_mapping(
             {"enabled": True, "backend": "mindiesd", "block_q": 64, "block_k": 64}
@@ -273,6 +277,13 @@ def test_mindiesd_lut_stays_compact_and_uses_valid_counts():
     assert select_idx.shape == (2, 2, 2)
     assert select_num.shape == (2, 2)
     assert torch.all(select_num == 2)
+
+
+def test_mindiesd_bsa_mask_expands_compact_lut():
+    compact = torch.tensor([[[[0, 2], [1, 3]]]], dtype=torch.int64)
+    mask = _prepare_mindiesd_bsa_mask(compact, k_blocks=4)
+    expected = torch.tensor([[[[1, 0, 1, 0], [0, 1, 0, 1]]]], dtype=torch.int8)
+    torch.testing.assert_close(mask, expected)
 
 
 def test_ascend_autograd_gate_detects_projection_inputs():

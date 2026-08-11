@@ -85,6 +85,8 @@ class SLAAttentionConfig:
                 "npu_triton": "ascend_triton",
                 "mindie_sd": "mindiesd",
                 "rainfusion": "mindiesd",
+                "bsa": "mindiesd_bsa",
+                "block_sparse_attention": "mindiesd_bsa",
             }
             backend = str(normalized["backend"]).lower()
             normalized["backend"] = backend_aliases.get(backend, backend)
@@ -93,9 +95,11 @@ class SLAAttentionConfig:
         return config
 
     def validate(self) -> None:
-        if self.backend not in {"portable", "ascend_triton", "mindiesd", "auto"}:
+        if self.backend not in {
+            "portable", "ascend_triton", "mindiesd", "mindiesd_bsa", "auto"
+        }:
             raise ValueError(
-                "backend must be one of portable, ascend_triton, mindiesd, or auto; "
+                "backend must be portable, ascend_triton, mindiesd, mindiesd_bsa, or auto; "
                 f"got {self.backend}."
             )
         for name in ("sparsity", "sparsity_base"):
@@ -112,7 +116,7 @@ class SLAAttentionConfig:
             raise ValueError("query_block_batch must be positive.")
         if self.linear_eps <= 0:
             raise ValueError("linear_eps must be positive.")
-        if self.enabled and self.backend == "mindiesd" and (
+        if self.enabled and self.backend in {"mindiesd", "mindiesd_bsa"} and (
             self.block_q != 128 or self.block_k != 128
         ):
             raise ValueError("MindIE-SD sparse execution requires 128-token blocks.")
@@ -242,20 +246,42 @@ def _run_sparse_backend(
     config: SLAAttentionConfig,
 ) -> torch.Tensor:
     backend = config.backend
-    if backend in {"auto", "mindiesd"}:
+    if backend in {"auto", "mindiesd", "mindiesd_bsa"}:
         from .sla_attention_mindiesd import (
+            mindiesd_bsa_available,
+            mindiesd_bsa_sparse_attention_blhd,
+            mindiesd_bsa_unavailable_reason,
             mindiesd_available,
             mindiesd_sparse_attention_blhd,
             mindiesd_unavailable_reason,
         )
 
-        use_mindiesd = (
+        inference_compatible = (
             q.device.type == "npu"
             and not torch.is_grad_enabled()
             and config.block_q == 128
             and config.block_k == 128
-            and mindiesd_available()
         )
+        if backend == "mindiesd_bsa":
+            if not inference_compatible:
+                if q.device.type != "npu":
+                    reason = f"q is on {q.device.type}, not npu"
+                elif torch.is_grad_enabled():
+                    reason = "MindIE-SD sparse execution is forward-only"
+                else:
+                    reason = "MindIE-SD sparse execution requires 128-token blocks"
+                raise RuntimeError(
+                    f"MindIE-SD BSA SLA sparse branch is unavailable: {reason}"
+                )
+            if not mindiesd_bsa_available():
+                raise RuntimeError(
+                    "MindIE-SD BSA SLA sparse branch is unavailable: "
+                    + mindiesd_bsa_unavailable_reason()
+                )
+            return mindiesd_bsa_sparse_attention_blhd(
+                q, k, v, block_lut, scale=config.softmax_scale
+            )
+        use_mindiesd = inference_compatible and mindiesd_available()
         if use_mindiesd:
             return mindiesd_sparse_attention_blhd(
                 q, k, v, block_lut, scale=config.softmax_scale

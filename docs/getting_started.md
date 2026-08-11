@@ -269,11 +269,23 @@ ASCEND_RT_VISIBLE_DEVICES=0 \
 python tests/npu/mindiesd_sla_kernel_smoke.py --device npu:0 --dtype bf16
 ```
 
+MindIE-SD 若注册了官方 `block_sparse_attention`，再验证实验 BSA 路径；当前
+RainFusion 仍是默认值，BSA 未通过 smoke 与真实形状基准前不得切换：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python tests/npu/mindiesd_sla_kernel_smoke.py \
+  --device npu:0 --dtype bf16 --backend bsa
+```
+
 再运行真实 SP4 尾部形状基准；只有 `cached_full_ms` 小于 dense 延迟才进入 VBench：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \
 python tests/npu/benchmark_sla_inference.py --device npu:0
+ASCEND_RT_VISIBLE_DEVICES=0 \
+python tests/npu/benchmark_sla_inference.py \
+  --device npu:0 --backend mindiesd_bsa
 ```
 
 ### 9.3 分布式启动失败

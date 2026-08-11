@@ -31,6 +31,9 @@ from wan_5b.modules.sla_attention_ascend import (
     ascend_triton_unavailable_reason,
 )
 from wan_5b.modules.sla_attention_mindiesd import (
+    mindiesd_bsa_available,
+    mindiesd_bsa_sparse_attention_blhd,
+    mindiesd_bsa_unavailable_reason,
     mindiesd_available,
     mindiesd_sparse_attention_blhd,
     mindiesd_unavailable_reason,
@@ -103,7 +106,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="npu:0")
     parser.add_argument(
-        "--backend", choices=("mindiesd", "ascend_triton"), default="mindiesd"
+        "--backend",
+        choices=("mindiesd", "mindiesd_bsa", "ascend_triton"),
+        default="mindiesd",
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
@@ -112,6 +117,8 @@ def main() -> None:
         raise ValueError("warmup and iterations must be positive")
     if args.backend == "mindiesd" and not mindiesd_available():
         raise RuntimeError(mindiesd_unavailable_reason())
+    if args.backend == "mindiesd_bsa" and not mindiesd_bsa_available():
+        raise RuntimeError(mindiesd_bsa_unavailable_reason())
     if args.backend == "ascend_triton" and not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
 
@@ -163,6 +170,10 @@ def main() -> None:
         )
         if args.backend == "mindiesd":
             sparse_operation = lambda: mindiesd_sparse_attention_blhd(q, k, v, lut)
+        elif args.backend == "mindiesd_bsa":
+            sparse_operation = lambda: mindiesd_bsa_sparse_attention_blhd(
+                q, k, v, lut
+            )
         else:
             sparse_operation = lambda: ascend_triton_sparse_attention_blhd(
                 q, k, v, lut, block_q=128, block_k=128, validate_lut=False

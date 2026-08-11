@@ -21,6 +21,11 @@ SLA+CAG 的依据、实现边界和验收规则。
   `proj_l` 使用 PyTorch autograd。
 - 该上游 kernel 以单个 `L=q.shape[2]` 处理 Q 和 KV，原生假定方形注意力。
   LongLive 尾部是 `Q=7040`、`KV=28160`，不能原样调用。
+- 截至 `2026-08-11`，MindSpeed-MM 官方 master `645c382` 仍未合入 SLA；
+  `hyz22/MindSpeed-MM-SLA` 仍停在 `136f886`。
+- MindIE-SD master `044461f` 已包含官方 `SparseLinearAttention` 与 AscendC
+  `block_sparse_attention`，但完整 SLA 类仍把稀疏 Triton 路径的 KV 长度写成
+  Q 长度。其底层 BSA 支持 TND、矩形 Q/KV，可作为独立推理后端验证。
 - 当前服务器是 MindIE-SD 3.0.0、CANN 8.5.0，并提示 Triton-Ascend 低于 3.2.1，
   因此统一 `SparseLinearAttention` 类不可用。现有
   `RainFusionAttention` 可承担推理时的矩形稀疏 softmax 前向，但不能承担训练反向。
@@ -42,8 +47,9 @@ SLA+CAG 的依据、实现边界和验收规则。
    后训练，因此初始输出等于稀疏分支，训练后再学习补偿。
 6. 推理缓存历史 block representatives 和线性注意力统计量；新 chunk 或 recache
    时失效。训练路径不复用无梯度缓存。
-7. 推理的稀疏 softmax 分支复用 MindIE-SD RainFusionAttention，线性分支仍由
-   PyTorch NPU 算子执行。
+7. 默认推理稀疏分支复用 MindIE-SD RainFusionAttention；实验性的
+   `mindiesd_bsa` 使用同一 LUT 调用官方 BlockSparseAttention。线性分支仍由
+   PyTorch NPU 算子执行，两个后端必须以完整 SLA 延迟 A/B 后再决定默认值。
 
 旧 HSA LoRA 不能直接转换为 SLA LoRA。训练 checkpoint 写入
 `sparse_method: sla_cag`，恢复时拒绝旧 HSA 和无标签状态。旧的稠密 LongLive
