@@ -16,6 +16,7 @@ CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
 PRESET="${1:-32s}"
 BENCHMARK_REPEATS="${BENCHMARK_REPEATS:-3}"
 BENCHMARK_WARMUP="${BENCHMARK_WARMUP:-1}"
+BENCHMARK_LATENTS_ONLY="${BENCHMARK_LATENTS_ONLY:-0}"
 
 if [[ ! "${BENCHMARK_REPEATS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "[error] BENCHMARK_REPEATS must be a positive integer" >&2
@@ -23,6 +24,10 @@ if [[ ! "${BENCHMARK_REPEATS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ ! "${BENCHMARK_WARMUP}" =~ ^[0-9]+$ ]]; then
   echo "[error] BENCHMARK_WARMUP must be a non-negative integer" >&2
+  exit 1
+fi
+if [[ "${BENCHMARK_LATENTS_ONLY}" != "0" && "${BENCHMARK_LATENTS_ONLY}" != "1" ]]; then
+  echo "[error] BENCHMARK_LATENTS_ONLY must be 0 or 1" >&2
   exit 1
 fi
 if [[ ! -f "${CONFIG_PATH}" || ! -f "${CANN_ENV_SCRIPT}" ]]; then
@@ -52,6 +57,9 @@ resolve_args=(
   --num-prompts "${total_prompts}"
   --warmup-per-rank "${BENCHMARK_WARMUP}"
 )
+if [[ "${BENCHMARK_LATENTS_ONLY}" == "1" ]]; then
+  resolve_args+=(--save-latents-only)
+fi
 "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py \
   "${resolve_args[@]}" >"${metadata_tmp}"
 
@@ -103,6 +111,7 @@ echo "[run] task=benchmark preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
 echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 echo "[run] warmup=${BENCHMARK_WARMUP} measured=${BENCHMARK_REPEATS}"
+echo "[run] latents_only=${BENCHMARK_LATENTS_ONLY}"
 echo "[run] config=${resolved_config}"
 
 set +e

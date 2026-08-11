@@ -303,6 +303,22 @@ bash scripts/evaluation/run_benchmark.sh 32s
 checkpoint、提示词、seed、SP/DP、VAE 模式和设备集合一致，并比较 summary 中的 p50；
 不能使用保存时间，也不能用单次运行决定默认后端。
 
+若完整生成被异步 VAE 临界路径掩盖，使用 latent-only 模式隔离 DiT。该模式不加载或
+执行 VAE，只需要 4 张 SP worker 卡；summary 中 FPS/RTF 为 0 是预期行为，只比较
+`generation_seconds`：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=dense \
+RUN_ID=dense-dit-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=sla_cag \
+LONGLIVE_SLA_BACKEND=mindiesd RUN_ID=sla-dit-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+```
+
 ### 7.2 msprof 算子分析
 
 msprof 当前只测试 LongLive2。三个 preset：

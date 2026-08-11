@@ -148,7 +148,9 @@ def resolve_msprof(args) -> dict:
     if warmup >= num_prompts:
         raise ValueError("warmup_per_rank must be smaller than num_prompts")
 
-    async_vae = vae_mode == "async_dedicated"
+    save_latents_only = bool(getattr(args, "save_latents_only", False))
+    async_vae = vae_mode == "async_dedicated" and not save_latents_only
+    effective_vae_mode = "disabled" if save_latents_only else vae_mode
     vae_device = f"npu:{nproc}" if async_vae else None
     output_folder = args.output_folder or "videos/msprof"
     model = config.model
@@ -171,7 +173,7 @@ def resolve_msprof(args) -> dict:
         "use_ema": False,
         "output_folder": output_folder,
         "num_samples": 1,
-        "save_latents_only": False,
+        "save_latents_only": save_latents_only,
         "save_with_index": True,
         "inference_iter": num_prompts - 1,
         "num_output_frames": frames,
@@ -220,13 +222,13 @@ def resolve_msprof(args) -> dict:
         "sp_size": sp_size,
         "dp_size": dp_size,
         "nproc_per_node": nproc,
-        "vae_mode": vae_mode,
+        "vae_mode": effective_vae_mode,
         "required_devices": nproc + int(async_vae),
         "num_prompts": num_prompts,
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
         "sparsity_backend": sparse_backend,
-        "run_tag": f"msprof-longlive2-{args.preset}-{vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
+        "run_tag": f"msprof-longlive2-{args.preset}-{effective_vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
     return metadata
@@ -400,6 +402,7 @@ def parse_args():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--num-prompts", type=int)
     parser.add_argument("--warmup-per-rank", type=int)
+    parser.add_argument("--save-latents-only", action="store_true")
     return parser.parse_args()
 
 

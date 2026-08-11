@@ -85,3 +85,8 @@ SLA2 还需要额外的 `proj_q/proj_k`、逐 query-block alpha、router 蒸馏�
 microbenchmark 加速 `3.402x`。BSA 因 `libopapi.so` 缺少
 `aclnnBlockSparseAttentionV2` 无法运行。该结果只通过第 3 项门槛，仍需无 profiler
 的 32 秒三次端到端对照才能通过第 4 项。
+
+首次无 profiler 完整生成对照中，Dense p50 为 `121.983 s`，SLA p50 为
+`127.555 s`，SLA 变慢 `4.57%`，因此第 4 项尚未通过。两组 p95 几乎相同
+（`127.807 s` 与 `127.827 s`），且计时会等待专用异步 VAE 完成；下一步先用
+latent-only 模式隔离 DiT，再判断回归来自 SLA 计算还是 VAE 临界路径。

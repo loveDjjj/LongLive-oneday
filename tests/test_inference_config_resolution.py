@@ -25,6 +25,7 @@ def _args(config, preset, output, *, seed=None):
         seed=seed,
         num_prompts=None,
         warmup_per_rank=None,
+        save_latents_only=False,
     )
 
 
@@ -155,3 +156,22 @@ def test_benchmark_overrides_repetition_counts_without_profiler_metadata(
     assert metadata["run_tag"].startswith("benchmark-")
     assert "msprof" not in metadata
     assert OmegaConf.load(args.output).inference_iter == 3
+
+
+def test_latent_only_benchmark_disables_dedicated_vae(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    args = _args(MSPROF_CONFIG, "32s", tmp_path / "latent_only.yaml")
+    args.num_prompts = 4
+    args.warmup_per_rank = 1
+    args.save_latents_only = True
+
+    metadata = resolve_benchmark(args)
+    resolved = OmegaConf.load(args.output)
+
+    assert resolved.save_latents_only is True
+    assert resolved.inference.streaming_vae is False
+    assert resolved.inference.async_vae is False
+    assert resolved.inference.vae_device is None
+    assert metadata["vae_mode"] == "disabled"
+    assert metadata["required_devices"] == 4
+    assert "-disabled-" in metadata["run_tag"]
