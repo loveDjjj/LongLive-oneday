@@ -60,6 +60,8 @@ json_field() {
     "${metadata_tmp}" "$1"
 }
 run_tag="$(json_field run_tag)"
+sparsity_method="$(json_field sparsity_method)"
+sparsity_backend="$(json_field sparsity_backend)"
 entrypoint="$(json_field entrypoint)"
 sp_size="$(json_field sp_size)"
 dp_size="$(json_field dp_size)"
@@ -155,6 +157,7 @@ count_completed_dimensions() {
 
 echo "[run] task=vbench preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} prompts=${prompt_count}"
+echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 read -r -a seed_array <<<"${seeds}"
 generation_started_at="$(date +%s)"
 total_videos=$((prompt_count * ${#seed_array[@]}))

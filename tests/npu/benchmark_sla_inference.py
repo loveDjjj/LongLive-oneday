@@ -165,6 +165,20 @@ def main() -> None:
             warmup=args.warmup,
             iterations=args.iterations,
         )
+        router_cache = {}
+        cached_route_median, cached_route_min = _measure(
+            lambda: build_sla_block_lut(
+                q,
+                k,
+                frame_seq=880,
+                sparsity=sparsity,
+                config=config,
+                cache=router_cache,
+                cache_token=chunk_id,
+            ),
+            warmup=args.warmup,
+            iterations=args.iterations,
+        )
         lut = build_sla_block_lut(
             q, k, frame_seq=880, sparsity=sparsity, config=config
         )
@@ -218,7 +232,8 @@ def main() -> None:
         key_blocks = k.shape[1] // 128
         print(
             f"sla backend={args.backend} block=128 cag_sparsity={sparsity:.3f} "
-            f"route_ms={route_median:.3f} route_min_ms={route_min:.3f} "
+            f"uncached_route_ms={route_median:.3f} uncached_route_min_ms={route_min:.3f} "
+            f"cached_route_ms={cached_route_median:.3f} cached_route_min_ms={cached_route_min:.3f} "
             f"sparse_kernel_ms={kernel_median:.3f} sparse_kernel_min_ms={kernel_min:.3f} "
             f"cached_linear_ms={linear_median:.3f} cached_linear_min_ms={linear_min:.3f} "
             f"cached_full_ms={full_median:.3f} cached_full_min_ms={full_min:.3f} "

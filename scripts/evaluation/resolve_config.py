@@ -66,6 +66,15 @@ def _sparse_model_config(sparsity) -> dict | None:
     if method != "sla_cag":
         raise ValueError(f"unsupported sparse attention method={method!r}")
     options = OmegaConf.to_container(sparsity.options, resolve=True)
+    backend_override = os.environ.get("LONGLIVE_SLA_BACKEND", "").strip()
+    if backend_override:
+        allowed = {"mindiesd", "mindiesd_bsa", "ascend_triton"}
+        if backend_override not in allowed:
+            raise ValueError(
+                f"unsupported SLA inference backend={backend_override!r}; "
+                f"choose one of {sorted(allowed)}"
+            )
+        options["backend"] = backend_override
     return {"enabled": True, **options}
 
 
@@ -74,6 +83,28 @@ def _sparse_method(sparsity) -> str:
     if method_override:
         return method_override
     return str(sparsity.method) if bool(sparsity.enabled) else "dense"
+
+
+def _sparse_backend(sparsity) -> str:
+    if _sparse_method(sparsity) == "dense":
+        return "dense"
+    return os.environ.get(
+        "LONGLIVE_SLA_BACKEND", str(sparsity.options.backend)
+    ).strip()
+
+
+def _resolved_sparsity(sparsity, sparse_model_config: dict | None) -> dict:
+    output = OmegaConf.to_container(sparsity, resolve=True)
+    if sparse_model_config is None:
+        output["enabled"] = False
+        output["method"] = "dense"
+        return output
+    output["enabled"] = True
+    output["method"] = "sla_cag"
+    output["options"] = {
+        key: value for key, value in sparse_model_config.items() if key != "enabled"
+    }
+    return output
 
 
 def resolve_msprof(args) -> dict:
@@ -157,13 +188,14 @@ def resolve_msprof(args) -> dict:
             "lora_ckpt": None,
         },
         "model_quant": False,
-        "sparsity": OmegaConf.to_container(config.sparsity, resolve=True),
+        "sparsity": _resolved_sparsity(config.sparsity, sparse_config),
         "logging": {"seed": int(measurement.seed)},
     }
     _save(resolved, args.output)
 
     pixel_frames = (frames - 1) * 4 + 1
     sparse_method = _sparse_method(config.sparsity)
+    sparse_backend = _sparse_backend(config.sparsity)
     metadata = {
         "task": "msprof",
         "engine": "longlive2",
@@ -179,7 +211,8 @@ def resolve_msprof(args) -> dict:
         "num_prompts": num_prompts,
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
-        "run_tag": f"msprof-longlive2-{args.preset}-{vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}",
+        "sparsity_backend": sparse_backend,
+        "run_tag": f"msprof-longlive2-{args.preset}-{vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
     return metadata
@@ -215,6 +248,7 @@ def resolve_vbench(args) -> dict:
         raise ValueError(f"seed={seed} is not part of preset seeds={seeds}")
     output_folder = args.output_folder or "videos/vbench"
     model_root = _model_root(str(engine.model_root))
+    sparse_config = _sparse_model_config(config.sparsity)
 
     if engine_name == "longlive2":
         if (pixel_frames - 1) % 4 != 0:
@@ -227,7 +261,6 @@ def resolve_vbench(args) -> dict:
             "num_frame_per_block": int(engine.num_frame_per_block),
             "local_attn_size": int(engine.local_attn_size),
         }
-        sparse_config = _sparse_model_config(config.sparsity)
         if sparse_config is not None:
             model_kwargs["sparse_config"] = sparse_config
         resolved = {
@@ -264,11 +297,11 @@ def resolve_vbench(args) -> dict:
                 "lora_ckpt": None,
             },
             "model_quant": False,
-            "sparsity": OmegaConf.to_container(config.sparsity, resolve=True),
+            "sparsity": _resolved_sparsity(config.sparsity, sparse_config),
             "logging": {"seed": seed},
         }
     elif engine_name == "wan22":
-        if _sparse_model_config(config.sparsity) is not None:
+        if sparse_config is not None:
             raise ValueError("SLA+CAG is implemented for LongLive2 causal inference only")
         latent_frames = None
         resolved = {
@@ -298,7 +331,7 @@ def resolve_vbench(args) -> dict:
                 "t5_cpu": False,
                 "offload_model": False,
             },
-            "sparsity": OmegaConf.to_container(config.sparsity, resolve=True),
+            "sparsity": _resolved_sparsity(config.sparsity, sparse_config),
             "logging": {"seed": seed},
         }
     else:
@@ -306,6 +339,7 @@ def resolve_vbench(args) -> dict:
 
     _save(resolved, args.output)
     sparse_method = _sparse_method(config.sparsity)
+    sparse_backend = _sparse_backend(config.sparsity)
     metadata = {
         "task": "vbench",
         "preset": args.preset,
@@ -326,7 +360,8 @@ def resolve_vbench(args) -> dict:
         "naming_prompts": naming_prompts,
         "full_info": full_info,
         "sparsity_method": sparse_method,
-        "run_tag": f"vbench-{engine_name}-{category}-{subset}-{pixel_frames}f-{len(seeds)}seed-sp{sp_size}-dp{dp_size}-{sparse_method}",
+        "sparsity_backend": sparse_backend,
+        "run_tag": f"vbench-{engine_name}-{category}-{subset}-{pixel_frames}f-{len(seeds)}seed-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
     }
     return metadata
 

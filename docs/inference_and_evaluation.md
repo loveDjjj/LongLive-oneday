@@ -62,6 +62,15 @@ LONGLIVE_SPARSE_METHOD=sla_cag \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ```
 
+默认稀疏 kernel 是 RainFusion。仅在 BSA smoke 与 microbenchmark 通过后，用下面的
+覆盖变量做同 checkpoint 对照；resolved YAML、metadata 和 run tag 会记录后端：
+
+```bash
+LONGLIVE_SPARSE_METHOD=sla_cag \
+LONGLIVE_SLA_BACKEND=mindiesd_bsa \
+bash scripts/evaluation/run_msprof.sh 32s
+```
+
 resolver 会向 `model_kwargs` 注入：
 
 ```yaml

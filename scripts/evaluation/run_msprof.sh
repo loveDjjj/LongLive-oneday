@@ -52,6 +52,8 @@ json_field() {
 }
 
 run_tag="$(json_field run_tag)"
+sparsity_method="$(json_field sparsity_method)"
+sparsity_backend="$(json_field sparsity_backend)"
 sp_size="$(json_field sp_size)"
 dp_size="$(json_field dp_size)"
 nproc="$(json_field nproc_per_node)"
@@ -106,6 +108,7 @@ cp "${metadata_tmp}" "${run_dir}/manifest.json"
 
 echo "[run] task=msprof preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
+echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 echo "[run] config=${resolved_config} profile=${profile_dir}"
 echo "[run] msprof_ai_core=${ai_core} task_time=${task_time}"
 
