@@ -90,3 +90,14 @@ microbenchmark 加速 `3.402x`。BSA 因 `libopapi.so` 缺少
 `127.555 s`，SLA 变慢 `4.57%`，因此第 4 项尚未通过。两组 p95 几乎相同
 （`127.807 s` 与 `127.827 s`），且计时会等待专用异步 VAE 完成；下一步先用
 latent-only 模式隔离 DiT，再判断回归来自 SLA 计算还是 VAE 临界路径。
+
+latent-only 三次对照进一步确认 SLA 的 DiT 优化有效：Dense p50 为 `48.656 s`，
+SLA p50 为 `36.240 s`，延迟降低 `25.52%`，加速 `1.343x`；p95 同样降低
+`25.39%`，峰值显存仅增加约 `0.02 GiB`。结合 attention microbenchmark 的
+`3.402x`，按 Amdahl 定律反推 Dense attention 约占 DiT 时间的 `36%`。即使后续将
+attention 开销完全消除，当前非 attention 部分仍把 DiT 加速上限限制在约 `1.57x`。
+
+因此当前结论不是“SLA 底层无效”，而是单视频完整生成由约 127 秒的 VAE 流水线主导。
+在 VAE 至少获得约 `2.6x` 加速、接近 Dense DiT 的 49 秒临界路径之前，继续优化 SLA
+无法稳定改善完整落盘延迟。SLA 仍适用于 latent-only 生成、批量两阶段生成/解码，以及
+后续 VAE 瓶颈解除后的完整推理。

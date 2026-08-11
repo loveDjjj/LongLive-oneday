@@ -117,6 +117,9 @@ bash scripts/evaluation/run_msprof.sh 32s
 ```
 
 推理预设、设备数量和输出格式见 [推理与评测指南](docs/inference_and_evaluation.md)。
+当前 SP4 实测 SLA 将 32 秒 latent-only DiT p50 从 `48.656 s` 降至 `36.240 s`
+（`1.343x`），但 dedicated VAE 仍主导约 127 秒的完整生成临界路径，因此默认发布
+配置继续保持 Dense，直到 VAE 优化后重新通过完整端到端验收。
 
 ## 文档
 

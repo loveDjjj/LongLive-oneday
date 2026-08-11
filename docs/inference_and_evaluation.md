@@ -319,6 +319,11 @@ LONGLIVE_SLA_BACKEND=mindiesd RUN_ID=sla-dit-32s-3run \
 bash scripts/evaluation/run_benchmark.sh 32s
 ```
 
+当前 SP4 32 秒实测中，Dense/SLA latent-only p50 分别为 `48.656 s` 和 `36.240 s`，
+SLA 将 DiT 延迟降低 `25.52%`。但包含 dedicated VAE 的 p50 分别为 `121.983 s` 和
+`127.555 s`，未获得端到端收益。这两组指标必须分开报告：前者证明 attention/DiT
+优化，后者反映当前单视频交付能力；不能用其中一项替代另一项。
+
 ### 7.2 msprof 算子分析
 
 msprof 当前只测试 LongLive2。三个 preset：
