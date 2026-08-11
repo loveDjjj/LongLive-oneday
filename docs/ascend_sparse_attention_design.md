@@ -74,9 +74,14 @@ SLA2 还需要额外的 `proj_q/proj_k`、逐 query-block alpha、router 蒸馏�
 2. Ascend Triton 矩形 Q/K/V 前向、反向无 NaN/Inf，梯度误差在 smoke test 容差内。
 3. `Q=7040`、`KV=28160` 下完整 `cached_full_ms < dense median_ms`；不能只看
    sparse kernel 时间。
-4. 同配置 32 秒 msprof 的 generation time 和 FPS 优于 Dense，且至少重复 3 次，
-   报告 median，排除编译、预热和保存视频时间。
+4. 同配置 32 秒无 profiler 的 generation time 和 FPS 优于 Dense，且至少重复 3 次，
+   报告 median，排除编译、预热和保存视频时间；之后再用 msprof 定位算子收益。
 5. 使用同一 checkpoint、提示词、seed、帧数的 Dense/SLA VBench 20% 对照通过质量容差。
 
 第三项失败就不启动长训练；第四项失败则保持 Dense 为发布默认值。SLA 是否可行最终
 取决于这两个实测门槛，而不是上游名称或理论稀疏率。
+
+当前 CANN 8.5 实测 RainFusion 尾部完整 SLA 为 `1.665 ms`，Dense 为 `5.662 ms`，
+microbenchmark 加速 `3.402x`。BSA 因 `libopapi.so` 缺少
+`aclnnBlockSparseAttentionV2` 无法运行。该结果只通过第 3 项门槛，仍需无 profiler
+的 32 秒三次端到端对照才能通过第 4 项。

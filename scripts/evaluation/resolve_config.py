@@ -59,6 +59,8 @@ def _save(config: dict, output: Path | None) -> None:
 
 def _sparse_model_config(sparsity) -> dict | None:
     method_override = os.environ.get("LONGLIVE_SPARSE_METHOD", "").strip()
+    if method_override == "dense":
+        return None
     enabled = bool(sparsity.enabled) or bool(method_override)
     if not enabled:
         return None
@@ -123,14 +125,26 @@ def resolve_msprof(args) -> dict:
     if vae_mode == "async_dedicated" and dp_size != 1:
         raise ValueError("async_dedicated VAE requires dp_size=1")
 
-    num_prompts = int(measurement.num_prompts)
+    num_prompts_override = getattr(args, "num_prompts", None)
+    num_prompts = int(
+        measurement.num_prompts
+        if num_prompts_override is None
+        else num_prompts_override
+    )
     available_prompts = _prompt_count(str(measurement.prompts))
     if not 1 <= num_prompts <= available_prompts:
         raise ValueError(
             f"measurement.num_prompts={num_prompts} but {measurement.prompts} "
             f"contains {available_prompts} prompts"
         )
-    warmup = int(measurement.warmup_per_rank)
+    warmup_override = getattr(args, "warmup_per_rank", None)
+    warmup = int(
+        measurement.warmup_per_rank
+        if warmup_override is None
+        else warmup_override
+    )
+    if warmup < 0:
+        raise ValueError("warmup_per_rank must be non-negative")
     if warmup >= num_prompts:
         raise ValueError("warmup_per_rank must be smaller than num_prompts")
 
@@ -215,6 +229,16 @@ def resolve_msprof(args) -> dict:
         "run_tag": f"msprof-longlive2-{args.preset}-{vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
+    return metadata
+
+
+def resolve_benchmark(args) -> dict:
+    metadata = resolve_msprof(args)
+    metadata["task"] = "benchmark"
+    metadata["run_tag"] = metadata["run_tag"].replace(
+        "msprof-", "benchmark-", 1
+    )
+    metadata.pop("msprof", None)
     return metadata
 
 
@@ -368,18 +392,25 @@ def resolve_vbench(args) -> dict:
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=("msprof", "vbench"))
+    parser.add_argument("kind", choices=("benchmark", "msprof", "vbench"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--preset", required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--output-folder")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--num-prompts", type=int)
+    parser.add_argument("--warmup-per-rank", type=int)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    metadata = resolve_msprof(args) if args.kind == "msprof" else resolve_vbench(args)
+    if args.kind == "benchmark":
+        metadata = resolve_benchmark(args)
+    elif args.kind == "msprof":
+        metadata = resolve_msprof(args)
+    else:
+        metadata = resolve_vbench(args)
     print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
 
 

@@ -119,6 +119,11 @@ python tests/npu/benchmark_sla_inference.py --device npu:0 \
 延迟。`linear_projection_speedup` 只衡量线性分支的代数优化；判断稳态收益必须比较
 `cached_full_ms` 与同次运行的 `dense median_ms`，再用 msprof 验证整网收益。
 
+在 MindIE-SD 3.0.0 + CANN 8.5 上，RainFusion 实测支持矩形 SLA。该环境虽然注册了
+`block_sparse_attention` 的 PyTorch wrapper，但 `libopapi.so` 不包含
+`aclnnBlockSparseAttentionV2`，因此不能使用 `mindiesd_bsa`。单独 source 同一套 CANN
+环境不会补出缺失符号；必须整体升级支持该算子的 CANN/MindIE-SD 栈。
+
 正式启用前，`cached_full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
 或 kernel 正确性不能证明加速。
 
@@ -276,7 +281,29 @@ logs/vbench/<run-id>/
 
 `RUN_ID` 只能是目录名，不能包含 `/`。中断后使用相同 `RUN_ID` 会按 seed 目录中的 mp4 数量继续，完整 seed 会显示 `[resume] ... already complete`；评测阶段每次创建新的 session 目录。
 
-## 7. msprof 性能测试
+## 7. 性能测试与 msprof
+
+### 7.1 无 profiler 端到端基准
+
+先使用无 profiler 入口判断真实延迟。默认运行 1 次预热和 3 次有效测量，保存
+manifest、resolved YAML、视频、原始日志和统计摘要：
+
+```bash
+LONGLIVE_SPARSE_METHOD=dense \
+RUN_ID=dense-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+
+LONGLIVE_SPARSE_METHOD=sla_cag \
+LONGLIVE_SLA_BACKEND=mindiesd \
+RUN_ID=sla-rainfusion-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+```
+
+可用 `BENCHMARK_REPEATS` 和 `BENCHMARK_WARMUP` 调整次数。Dense/SLA 对照必须保持
+checkpoint、提示词、seed、SP/DP、VAE 模式和设备集合一致，并比较 summary 中的 p50；
+不能使用保存时间，也不能用单次运行决定默认后端。
+
+### 7.2 msprof 算子分析
 
 msprof 当前只测试 LongLive2。三个 preset：
 

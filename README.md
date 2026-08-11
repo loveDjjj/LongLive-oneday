@@ -11,7 +11,7 @@
   `RainFusionAttention` 融合算子；`portable` 仅用于正确性对照。
 - 推理：BF16 Ulysses SP，支持稠密和 SLA+CAG 对照；SLA 对全部滚动 KV
   执行全局 128-token block Top-K，并强制保留 sink/recent blocks。
-- 评测：VBench Standard 与 msprof。
+- 评测：无 profiler 重复性能基准、VBench Standard 与 msprof。
 
 不再维护源仓库的 AR、I2V、NVFP4、FourOverSix、CUDA/Hopper 和非 SP 推理入口。配置若启用这些能力会在启动阶段直接失败。
 
@@ -95,11 +95,24 @@ LONGLIVE_SPARSE_METHOD=sla_cag RUN_ID=sla_cag_sparse \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
 ```
 
-性能采集：
+先运行无 profiler 的三次性能对照：
 
 ```bash
 LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=dense RUN_ID=dense-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
 LONGLIVE_SPARSE_METHOD=sla_cag \
+LONGLIVE_SLA_BACKEND=mindiesd RUN_ID=sla-32s-3run \
+bash scripts/evaluation/run_benchmark.sh 32s
+```
+
+确认端到端收益后再采集 msprof：
+
+```bash
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=sla_cag LONGLIVE_SLA_BACKEND=mindiesd \
 bash scripts/evaluation/run_msprof.sh 32s
 ```
 

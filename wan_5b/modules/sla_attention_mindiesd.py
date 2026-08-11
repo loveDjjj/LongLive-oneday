@@ -218,21 +218,31 @@ def mindiesd_bsa_sparse_attention_blhd(
         raise ValueError("MindIE-SD BSA LUT shape does not match q")
     block_mask = _prepare_mindiesd_bsa_mask(block_lut, k_blocks)
     attention_scale = float(scale) if scale is not None else 1.0 / math.sqrt(q.shape[-1])
-    output, _ = _block_sparse_attention(
-        query=q.squeeze(0).contiguous(),
-        key=k.squeeze(0).contiguous(),
-        value=v.squeeze(0).contiguous(),
-        block_sparse_mask=block_mask,
-        block_shape=[128, 128],
-        q_input_layout="TND",
-        kv_input_layout="TND",
-        num_key_value_heads=q.shape[2],
-        scale_value=attention_scale,
-        inner_precise=0,
-        actual_seq_lengths=[q.shape[1]],
-        actual_seq_lengths_kv=[k.shape[1]],
-        softmax_lse_flag=0,
-    )
+    try:
+        output, _ = _block_sparse_attention(
+            query=q.squeeze(0).contiguous(),
+            key=k.squeeze(0).contiguous(),
+            value=v.squeeze(0).contiguous(),
+            block_sparse_mask=block_mask,
+            block_shape=[128, 128],
+            q_input_layout="TND",
+            kv_input_layout="TND",
+            num_key_value_heads=q.shape[2],
+            scale_value=attention_scale,
+            inner_precise=0,
+            actual_seq_lengths=[q.shape[1]],
+            actual_seq_lengths_kv=[k.shape[1]],
+            softmax_lse_flag=0,
+        )
+    except RuntimeError as error:
+        if "aclnnBlockSparseAttentionV2" in str(error):
+            raise RuntimeError(
+                "MindIE-SD registered BlockSparseAttention, but the active CANN "
+                "libopapi.so does not provide aclnnBlockSparseAttentionV2. Use "
+                "backend='mindiesd' (RainFusion) or upgrade the complete CANN and "
+                "MindIE-SD operator stack together."
+            ) from error
+        raise
     return output.unsqueeze(0)
 
 

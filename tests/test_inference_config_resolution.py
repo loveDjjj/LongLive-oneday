@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from scripts.evaluation.resolve_config import resolve_msprof, resolve_vbench
+from scripts.evaluation.resolve_config import (
+    resolve_benchmark,
+    resolve_msprof,
+    resolve_vbench,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +23,8 @@ def _args(config, preset, output, *, seed=None):
         output=output,
         output_folder=None,
         seed=seed,
+        num_prompts=None,
+        warmup_per_rank=None,
     )
 
 
@@ -36,6 +42,27 @@ def test_vbench_dense_does_not_inject_sparse_model_config(tmp_path, monkeypatch)
     assert metadata["dp_size"] == 8
     assert metadata["nproc_per_node"] == 16
     assert metadata["required_devices"] == 16
+
+
+def test_explicit_dense_override_disables_configured_sparsity(tmp_path, monkeypatch):
+    config = OmegaConf.load(VBENCH_CONFIG)
+    config.sparsity.enabled = True
+    config.sparsity.method = "sla_cag"
+    config_path = tmp_path / "sparse_default.yaml"
+    OmegaConf.save(config, config_path)
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "dense")
+    output = tmp_path / "explicit_dense.yaml"
+
+    metadata = resolve_vbench(
+        _args(config_path, "longlive2_standard_5pct", output, seed=0)
+    )
+
+    resolved = OmegaConf.load(output)
+    assert "sparse_config" not in resolved.model_kwargs
+    assert resolved.sparsity.enabled is False
+    assert resolved.sparsity.method == "dense"
+    assert metadata["sparsity_method"] == "dense"
+    assert metadata["sparsity_backend"] == "dense"
 
 
 def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
@@ -110,3 +137,21 @@ def test_msprof_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     assert metadata["sparsity_method"] == "sla_cag"
     assert metadata["sparsity_backend"] == "mindiesd"
     assert metadata["msprof"]["ai_core"] is True
+
+
+def test_benchmark_overrides_repetition_counts_without_profiler_metadata(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    args = _args(MSPROF_CONFIG, "32s", tmp_path / "benchmark.yaml")
+    args.num_prompts = 4
+    args.warmup_per_rank = 1
+
+    metadata = resolve_benchmark(args)
+
+    assert metadata["task"] == "benchmark"
+    assert metadata["num_prompts"] == 4
+    assert metadata["warmup_per_rank"] == 1
+    assert metadata["run_tag"].startswith("benchmark-")
+    assert "msprof" not in metadata
+    assert OmegaConf.load(args.output).inference_iter == 3
