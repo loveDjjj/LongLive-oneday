@@ -85,7 +85,12 @@ def main() -> None:
     import peft
 
     print(f"Loading LoRA checkpoint: {lora_ckpt}")
-    peft.set_peft_model_state_dict(generator.model, load_lora_state_dict(lora_ckpt))  # type: ignore[arg-type]
+    peft.set_peft_model_state_dict(
+        generator.model,
+        load_lora_state_dict(
+            lora_ckpt, expected_sparse_method="sla_cag"
+        ),
+    )  # type: ignore[arg-type]
 
     print(f"Merging LoRA on {device} in {dtype}...")
     generator.to(device=device, dtype=dtype)
@@ -102,6 +107,7 @@ def main() -> None:
         "model_name": getattr(config.model_kwargs, "model_name", None),
         "dtype": str(dtype).replace("torch.", ""),
         "merged_lora": True,
+        "sparse_method": "sla_cag",
     }
     torch.save(checkpoint, output_path)
     size_gib = os.path.getsize(output_path) / (1024 ** 3)

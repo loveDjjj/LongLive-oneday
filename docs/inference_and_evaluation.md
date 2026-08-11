@@ -1,16 +1,16 @@
 # 昇腾 NPU 推理与评测指南
 
-本文覆盖当前维护的两条评测工作流：`scripts/evaluation/run_vbench.sh` 生成视频并执行 AISBench VBench Standard，`scripts/evaluation/run_msprof.sh` 采集 LongLive2 推理性能。环境准备见 [环境安装与测试](getting_started.md)，LoRA checkpoint 和合并方法见 [HSA+CAG 训练指南](hsa_cag_training.md)。
+本文覆盖当前维护的两条评测工作流：`scripts/evaluation/run_vbench.sh` 生成视频并执行 AISBench VBench Standard，`scripts/evaluation/run_msprof.sh` 采集 LongLive2 推理性能。环境准备见 [环境安装与测试](getting_started.md)，LoRA checkpoint 和合并方法见 [SLA+CAG 训练指南](sla_cag_training.md)。
 
 ## 1. 支持矩阵
 
-| 工作流 | 模型类别 | Dense | HSA+CAG | 入口 |
+| 工作流 | 模型类别 | Dense | SLA+CAG | 入口 |
 | --- | --- | --- | --- | --- |
 | VBench | LongLive2 causal Generator | 支持 | 支持 | `inference_sp.py` |
 | VBench | Wan2.2-TI2V-5B 原生模型 | 支持 | 不支持 | `inference_wan22_sp.py` |
 | msprof | LongLive2 causal Generator | 支持 | 支持 | `inference_sp.py` |
 
-HSA+CAG 是运行时 attention 路由，不是另一份 checkpoint。同一合并权重分别跑 dense 和 sparse，才能隔离稀疏计算造成的质量与性能变化。Wan2.2 原生入口启用 HSA 会在配置解析阶段报错。
+SLA+CAG 是运行时 attention 路由，不是另一份 checkpoint。同一合并权重分别跑 dense 和 sparse，才能隔离稀疏计算造成的质量与性能变化。Wan2.2 原生入口启用 SLA 会在配置解析阶段报错。
 
 当前 VBench 只执行 Standard 评测协议。`data/benchmarks/vbench_long/` 保留 Long 所需映射和 clip 配置，但 AISBench/NPU Long 适配尚未完成，不能通过当前 preset 启动。
 
@@ -38,16 +38,16 @@ export LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt
 
 ```bash
 python scripts/checkpoints/merge_lora.py \
-  --config_path configs/train/hsa_cag.yaml \
+  --config_path configs/train/sla_cag.yaml \
   --generator_ckpt /path/to/longlive2_merged_generator.pt \
   --lora_ckpt /path/to/train_state.pt \
-  --output_path runs/merged/longlive2_hsa_cag_2k.pt \
+  --output_path runs/merged/longlive2_sla_cag_2k.pt \
   --device npu:0
 ```
 
 推理加载器支持完整 BF16 `{"generator": state_dict}`、`{"model": state_dict}`、raw state dict，或在 `use_ema=true` 时加载 `generator_ema`。VBench resolver 不现场加载 LoRA，因此正式评测使用预先合并的 checkpoint。
 
-## 3. HSA+CAG 推理开关
+## 3. SLA+CAG 推理开关
 
 Dense 不设置环境变量：
 
@@ -55,10 +55,10 @@ Dense 不设置环境变量：
 bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ```
 
-HSA+CAG 设置：
+SLA+CAG 设置：
 
 ```bash
-LONGLIVE_SPARSE_METHOD=hsa_cag \
+LONGLIVE_SPARSE_METHOD=sla_cag \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ```
 
@@ -68,53 +68,42 @@ resolver 会向 `model_kwargs` 注入：
 sparse_config:
   enabled: true
   backend: mindiesd
-  sparsity: 0.85
-  sparsity_base: 0.95
+  sparsity: 0.95
+  sparsity_base: 0.97
   block_q: 128
   block_k: 128
-  keep_frames: 6
-  keep_sink: 1
-  keep_near: 2
-  dense_current: true
-  min_sparse_history_frames: 2
+  feature_map: softmax
+  keep_sink_frames: 1
+  keep_recent_frames: 1
+  dense_current: false
+  min_sparse_history_frames: 1
   query_block_batch: 1
+  linear_cache: true
+  linear_eps: 1.0e-5
 ```
 
-正式推理配置固定 `mindiesd`，底层调用 MindIE-SD 的融合
-`RainFusionAttention`，不可用时直接失败，不会静默降级到 portable 或
-Triton。训练仍使用支持反向的 `ascend_triton`。第一块、无历史 KV 或历史帧
-不足时回到 dense 属于算法预期；其余满足条件的历史 KV 进入 HSA 路由。
+正式推理的稀疏 softmax 分支固定使用 MindIE-SD `RainFusionAttention`；不可用时
+直接失败。线性补偿分支由 PyTorch NPU 算子计算。训练使用支持反向的
+`ascend_triton`。第一块或历史不足时回到 dense；之后对全部滚动 KV 做全局
+128-token block Top-K，并强制保留 sink/recent blocks。默认不保持当前 chunk
+稠密，以免 8/32 帧当前块把理论稀疏率限制在 75%。
 
-MindIE-SD 后端直接把 Ulysses 的 `BLHD` 张量作为 `TND` view 传入融合算子，
-不会执行完整 Q/K/V 转置。HSA 的帧路由仍按每帧 880 token 计算，但执行 LUT
-按 128 token 分块；8 帧 query 为 `7040 = 55 x 128`，32 帧 KV 为
-`28160 = 220 x 128`。跨越单帧边界的执行块只要与选中帧相交就进入候选集，
-不会重复加入 LUT。传给 CANN 的 `selectIdx` 只保留实际选择宽度，不再填充到
-220 个 KV block；frame/block overlap 和固定计数张量按设备与 shape 缓存，但
-每层 Q/K 分数和最终 LUT 仍独立计算。
-
-同一个 AR chunk 的多个去噪 step 共享不变的历史 K。每层 KV cache 因此只保留
-当前 chunk 的历史 frame/block summaries，并在后续 step 复用；query summary、
-相关性分数、Top-K 和 LUT 仍按 step 重新计算。chunk 变化时缓存覆盖，clean recache
-时显式清空，训练或其他启用梯度的路径不使用该缓存。最终 LUT 只排序历史 Top-K，
-再拼接天然升序的当前 chunk block，保持 RainFusionAttention 的升序索引契约。
+SP4 尾部形状是 `Q=7040=55x128`、`KV=28160=220x128`。CAG 在不同 AR chunk
+调整 Top-K 预算。相同 chunk 的多个去噪 step 会复用历史 K 的 block summaries
+和线性注意力统计量；query、当前 K、Top-K 和最终 LUT 仍逐层逐步更新。
+`selectIdx` 保持紧凑且升序，满足 RainFusionAttention 契约。
 
 先用真实 SP4 尾部形状运行 microbenchmark。默认测试正式推理使用的
-MindIE-SD 128 block；Triton 扫描只用于训练 kernel 回归：
+MindIE-SD 128 block；Ascend Triton 用于训练 kernel 回归：
 
 ```bash
-python tests/npu/benchmark_hsa_inference.py --device npu:0
-python tests/npu/benchmark_hsa_inference.py --device npu:0 \
-  --backend ascend_triton --blocks 40,55,80,88,110
-python tests/npu/benchmark_hsa_inference.py --device npu:0 \
-  --backend ascend_triton --blocks 40 \
-  --native-query-batches 2,4,8,16
+python tests/npu/benchmark_sla_inference.py --device npu:0
+python tests/npu/benchmark_sla_inference.py --device npu:0 \
+  --backend ascend_triton
 ```
 
-输出中的 `uncached_route_ms` 是新 chunk 第一次构建历史 summaries 和 LUT 的冷路由，
-`kernel_ms` 是固定 LUT 下的 RainFusionAttention，`cached_full_ms` 是复用历史
-summaries 后的完整 HSA。判断稳态收益应比较 `cached_full_ms` 与 `dense median_ms`；
-长视频仍需用 msprof 验证每个新 chunk 的冷路由成本是否被后续去噪 step 摊薄。
+输出分别报告路由、稀疏 kernel、缓存后的线性分支以及完整 SLA 延迟。判断稳态收益
+必须比较 `cached_full_ms` 与同次运行的 `dense median_ms`，再用 msprof 验证整网收益。
 
 正式启用前，`cached_full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
 或 kernel 正确性不能证明加速。
@@ -122,14 +111,14 @@ summaries 后的完整 HSA。判断稳态收益应比较 `cached_full_ms` 与 `d
 可在启动前只展开配置确认：
 
 ```bash
-LONGLIVE_SPARSE_METHOD=hsa_cag \
+LONGLIVE_SPARSE_METHOD=sla_cag \
 python scripts/evaluation/resolve_config.py vbench \
   --config configs/inference/vbench.yaml \
   --preset longlive2_standard_5pct \
   --seed 0 \
-  --output /tmp/vbench_hsa.yaml
+  --output /tmp/vbench_sla.yaml
 
-sed -n '1,35p' /tmp/vbench_hsa.yaml
+sed -n '1,35p' /tmp/vbench_sla.yaml
 ```
 
 ## 4. VBench 数据集和 preset
@@ -184,39 +173,39 @@ bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ### 5.2 LoRA 合并权重 Dense
 
 ```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
-RUN_ID=hsa_cag_2k_dense_5pct \
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+RUN_ID=sla_cag_2k_dense_5pct \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ```
 
-### 5.3 同一合并权重 HSA+CAG
+### 5.3 同一合并权重 SLA+CAG
 
 ```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=hsa_cag \
-RUN_ID=hsa_cag_2k_sparse_5pct \
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=sla_cag \
+RUN_ID=sla_cag_2k_sparse_5pct \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
 ```
 
-三组关系：原始 Dense 对比训练后 Dense 衡量 LoRA 后训练影响；训练后 Dense 对比训练后 HSA 衡量纯稀疏影响；原始 Dense 对比最终 HSA 衡量总体效果。三组必须使用相同 subset、帧数和 seeds。
+三组关系：原始 Dense 对比训练后 Dense 衡量 LoRA 后训练影响；训练后 Dense 对比训练后 SLA 衡量纯稀疏影响；原始 Dense 对比最终 SLA 衡量总体效果。三组必须使用相同 subset、帧数和 seeds。
 
 ### 5.4 Augmented prompt
 
 ```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
-RUN_ID=hsa_cag_2k_dense_augmented_5pct \
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+RUN_ID=sla_cag_2k_dense_augmented_5pct \
 bash scripts/evaluation/run_vbench.sh longlive2_augmented_5pct
 ```
 
-### 5.5 HSA+CAG 20% 串行评测
+### 5.5 SLA+CAG 20% 串行评测
 
-标准 20% 和 Augmented 20% 可使用同一合并权重串行执行 HSA+CAG 评测。第一项失败时脚本立即停止；`RUN_ID_PREFIX` 可选，默认包含启动时间：
+标准 20% 和 Augmented 20% 可使用同一合并权重串行执行 SLA+CAG 评测。第一项失败时脚本立即停止；`RUN_ID_PREFIX` 可选，默认包含启动时间：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-RUN_ID_PREFIX=hsa_cag_step100_20pct \
-bash scripts/evaluation/run_vbench_hsa_cag_20pct.sh \
-  runs/merged/longlive2_hsa_cag_step100.pt
+RUN_ID_PREFIX=sla_cag_step100_20pct \
+bash scripts/evaluation/run_vbench_sla_cag_20pct.sh \
+  runs/merged/longlive2_sla_cag_step100.pt
 ```
 
 ### 5.6 Wan2.2 原生模型
@@ -227,7 +216,7 @@ RUN_ID=wan22_dense_5pct \
 bash scripts/evaluation/run_vbench.sh wan22_standard_5pct
 ```
 
-不要给 `wan22_*` 命令设置 `LONGLIVE_SPARSE_METHOD=hsa_cag`。
+不要给 `wan22_*` 命令设置 `LONGLIVE_SPARSE_METHOD=sla_cag`。
 
 ### 5.7 扩大评测规模
 
@@ -292,19 +281,19 @@ Dense：
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4 \
 GENERATION_ENV=/path/to/longlive-env \
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
-RUN_ID=hsa_cag_2k_dense_msprof_32s \
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+RUN_ID=sla_cag_2k_dense_msprof_32s \
 bash scripts/evaluation/run_msprof.sh 32s
 ```
 
-HSA+CAG：
+SLA+CAG：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4 \
 GENERATION_ENV=/path/to/longlive-env \
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_hsa_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=hsa_cag \
-RUN_ID=hsa_cag_2k_sparse_msprof_32s \
+LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
+LONGLIVE_SPARSE_METHOD=sla_cag \
+RUN_ID=sla_cag_2k_sparse_msprof_32s \
 bash scripts/evaluation/run_msprof.sh 32s
 ```
 
@@ -355,7 +344,7 @@ logs/msprof/<run-id>/
 - 查看 `manifest.json` 和 resolved YAML，确认 checkpoint、模型类别、seed、SP/DP 和 `sparsity_method`。
 - 稀疏运行的 resolved YAML 必须含 `model_kwargs.sparse_config.enabled: true`、
   `backend: mindiesd` 与 `block_q/block_k: 128`。
-- Dense/HSA 使用不同 `RUN_ID`，否则已有视频可能被错误复用。
+- Dense/SLA 使用不同 `RUN_ID`，否则已有视频可能被错误复用。
 - 比较质量时保持同一 checkpoint、subset 和 seeds；比较性能时还要保持 profiler 参数和布局。
 - VBench 生成失败先看 `logs/vbench/<run-id>/seed_<seed>.log`，评测失败看 `aisbench.log`。
 - msprof 无 `PROF_*` 目录时视为失败；`msprof-analyze` 单项失败会输出 warning，但主 profile 和 summary 仍保留。

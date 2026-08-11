@@ -63,7 +63,7 @@ def _sparse_model_config(sparsity) -> dict | None:
     if not enabled:
         return None
     method = method_override or str(sparsity.method)
-    if method != "hsa_cag":
+    if method != "sla_cag":
         raise ValueError(f"unsupported sparse attention method={method!r}")
     options = OmegaConf.to_container(sparsity.options, resolve=True)
     return {"enabled": True, **options}
@@ -269,7 +269,7 @@ def resolve_vbench(args) -> dict:
         }
     elif engine_name == "wan22":
         if _sparse_model_config(config.sparsity) is not None:
-            raise ValueError("HSA+CAG is implemented for LongLive2 causal inference only")
+            raise ValueError("SLA+CAG is implemented for LongLive2 causal inference only")
         latent_frames = None
         resolved = {
             "model_kwargs": {

@@ -17,12 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from wan_5b.modules.sparse_attention_mindiesd import (
+from wan_5b.modules.sla_attention_mindiesd import (
     mindiesd_available,
     mindiesd_sparse_attention_blhd,
     mindiesd_unavailable_reason,
 )
-from wan_5b.modules.sparse_attention import _portable_sparse_attention
+from wan_5b.modules.sla_attention import _portable_sparse_attention
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -142,7 +142,7 @@ def main() -> None:
             "MindIE-SD sparse-LUT output differs from the portable reference: "
             f"{sparse_max_abs:.6f} > {tolerance:.6f}"
         )
-    print("MindIE-SD HSA smoke test passed")
+    print("MindIE-SD SLA sparse smoke test passed")
 
 
 if __name__ == "__main__":

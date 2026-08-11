@@ -1,6 +1,6 @@
 # 昇腾环境安装与测试
 
-本文只描述当前维护的昇腾 BF16 路径：环境安装、依赖检查、代码测试、Ascend Triton HSA kernel 烟测和单步训练烟测。训练参数与数据见 [HSA+CAG 训练指南](hsa_cag_training.md)，VBench 与 msprof 见 [推理与评测指南](inference_and_evaluation.md)。
+本文只描述当前维护的昇腾 BF16 路径：环境安装、依赖检查、代码测试、Ascend Triton SLA kernel 烟测和单步训练烟测。训练参数与数据见 [SLA+CAG 训练指南](sla_cag_training.md)，VBench 与 msprof 见 [推理与评测指南](inference_and_evaluation.md)。
 
 ## 1. 已验证的软件栈
 
@@ -116,7 +116,7 @@ python - <<'PY'
 from omegaconf import OmegaConf
 
 for path in (
-    "configs/train/hsa_cag.yaml",
+    "configs/train/sla_cag.yaml",
     "configs/inference/vbench.yaml",
     "configs/inference/msprof.yaml",
 ):
@@ -135,7 +135,7 @@ python scripts/evaluation/resolve_config.py vbench \
   --output /tmp/longlive_vbench_resolved.yaml
 ```
 
-加入 `LONGLIVE_SPARSE_METHOD=hsa_cag` 后，输出的
+加入 `LONGLIVE_SPARSE_METHOD=sla_cag` 后，输出的
 `model_kwargs.sparse_config` 必须包含 `enabled: true`、`backend: mindiesd`
 和 `block_q/block_k: 128`。
 
@@ -145,7 +145,7 @@ python scripts/evaluation/resolve_config.py vbench \
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=15 PYTHONUNBUFFERED=1 timeout 20m \
-python tests/npu/ascend_hsa_kernel_smoke.py --device npu:0
+python tests/npu/ascend_sla_kernel_smoke.py --device npu:0
 ```
 
 脚本会显示以下阶段：
@@ -158,14 +158,14 @@ forward max_abs=... mean_abs=...
 dq max_abs=... mean_abs=...
 dk max_abs=... mean_abs=...
 dv max_abs=... mean_abs=...
-Ascend Triton HSA smoke test passed
+Ascend Triton SLA smoke test passed
 ```
 
 代码阈值是前向 `max_abs <= 0.05, mean_abs <= 0.01`，反向 `max_abs <= 0.08, mean_abs <= 0.015`。只检查前向可运行：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=15 PYTHONUNBUFFERED=1 timeout 20m \
-python tests/npu/ascend_hsa_kernel_smoke.py --device npu:0 --forward-only
+python tests/npu/ascend_sla_kernel_smoke.py --device npu:0 --forward-only
 ```
 
 ## 7. 单步训练环境烟测
@@ -175,19 +175,19 @@ python tests/npu/ascend_hsa_kernel_smoke.py --device npu:0 --forward-only
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
-MAX_ITERS=1 TRAIN_RUN_NAME=hsa_cag_smoke \
+MAX_ITERS=1 TRAIN_RUN_NAME=sla_cag_smoke \
 VIS_INTERVAL=0 \
-bash scripts/training/run_hsa_cag.sh
+bash scripts/training/run_sla_cag.sh
 ```
 
 成功标准不是只完成模型加载，而是终端出现 `step 1` 的 loss/grad norm，且生成：
 
 ```text
-runs/training/hsa_cag_smoke/config.source.yaml
-runs/training/hsa_cag_smoke/config.resolved.yaml
-runs/training/hsa_cag_smoke/manifest.json
-logs/training/hsa_cag_smoke/node_0.log
-logs/training/hsa_cag_smoke/metrics.jsonl
+runs/training/sla_cag_smoke/config.source.yaml
+runs/training/sla_cag_smoke/config.resolved.yaml
+runs/training/sla_cag_smoke/manifest.json
+logs/training/sla_cag_smoke/node_0.log
+logs/training/sla_cag_smoke/metrics.jsonl
 ```
 
 `SAVE_INTERVAL` 默认是 10，所以单步烟测不会产生 checkpoint；需要验证保存时显式设置 `SAVE_INTERVAL=1 MAX_CHECKPOINTS=1`。
@@ -219,7 +219,7 @@ Python 栈可能只指向下一次同步位置。仅在复现单步错误时启�
 
 ```bash
 ASCEND_LAUNCH_BLOCKING=1 MAX_ITERS=1 VIS_INTERVAL=0 \
-bash scripts/training/run_hsa_cag.sh
+bash scripts/training/run_sla_cag.sh
 ```
 
 定位后取消，避免严重拖慢训练：
@@ -233,7 +233,7 @@ unset ASCEND_LAUNCH_BLOCKING
 ### 9.2 Ascend Triton 不可用
 
 训练后端不可用时，检查 `triton.__file__`、CANN 环境、`torch_npu` 版本和
-`wan_5b.modules.sparse_attention_ascend.ascend_triton_unavailable_reason()`。
+`wan_5b.modules.sla_attention_ascend.ascend_triton_unavailable_reason()`。
 训练使用 `ascend_triton`，不会静默退回 portable。
 
 正式稀疏推理使用 MindIE-SD 3.0.0 的 `RainFusionAttention`。虽然 3.0.0
@@ -252,7 +252,7 @@ pip install --trusted-host ascend.devcloud.huaweicloud.com \
 
 ```bash
 python - <<'PY'
-from wan_5b.modules.sparse_attention_mindiesd import (
+from wan_5b.modules.sla_attention_mindiesd import (
     mindiesd_available, mindiesd_unavailable_reason,
 )
 print("available:", mindiesd_available())
@@ -260,20 +260,20 @@ print("detail:", mindiesd_unavailable_reason())
 PY
 ```
 
-`available: false` 时不要运行 HSA VBench；启动入口也会在加载 5B 模型前失败。
+`available: false` 时不要运行 SLA VBench；启动入口也会在加载 5B 模型前失败。
 
 安装完成后先验证 BF16、矩形 Q/KV 和完整 LUT 与 dense attention 数值一致：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \
-python tests/npu/mindiesd_hsa_kernel_smoke.py --device npu:0 --dtype bf16
+python tests/npu/mindiesd_sla_kernel_smoke.py --device npu:0 --dtype bf16
 ```
 
 再运行真实 SP4 尾部形状基准；只有 `cached_full_ms` 小于 dense 延迟才进入 VBench：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 \
-python tests/npu/benchmark_hsa_inference.py --device npu:0
+python tests/npu/benchmark_sla_inference.py --device npu:0
 ```
 
 ### 9.3 分布式启动失败

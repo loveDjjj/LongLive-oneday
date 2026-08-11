@@ -24,8 +24,10 @@ from utils.training_state import (
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
     restore_rng_state,
+    validate_sparse_checkpoint_method,
 )
 from utils.device import current_device, empty_cache
+from utils.inference_utils import load_generator_state_dict
 import torch.distributed as dist
 from omegaconf import OmegaConf
 from model import DMD
@@ -148,7 +150,7 @@ class Trainer:
         else:
             raise ValueError(f"Unsupported distribution matching loss: {config.distribution_loss}")
         if not getattr(config, "adapter", None):
-            raise ValueError("Maintained HSA+CAG training requires a LoRA adapter")
+            raise ValueError("Maintained SLA+CAG training requires a LoRA adapter")
 
         # Auto resume configuration (needed for LoRA checkpoint loading)
         auto_resume = getattr(config, "auto_resume", True)  # Default to True
@@ -176,17 +178,29 @@ class Trainer:
                 if isinstance(generator_checkpoint, dict) and "generator" in generator_checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained generator from {generator_checkpoint_path}")
-                    self.model.generator.load_state_dict(generator_checkpoint["generator"], strict=True)
+                    load_generator_state_dict(
+                        self.model.generator,
+                        generator_checkpoint["generator"],
+                        strict=True,
+                    )
                     if self.is_main_process:
                         print("Generator weights loaded successfully")
                 elif isinstance(generator_checkpoint, dict) and "model" in generator_checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained generator from {generator_checkpoint_path}")
-                    self.model.generator.load_state_dict(generator_checkpoint["model"], strict=True)
+                    load_generator_state_dict(
+                        self.model.generator,
+                        generator_checkpoint["model"],
+                        strict=True,
+                    )
                     if self.is_main_process:
                         print("Generator weights loaded successfully")
                 else:
-                    self.model.generator.load_state_dict(generator_checkpoint, strict=True)
+                    load_generator_state_dict(
+                        self.model.generator,
+                        generator_checkpoint,
+                        strict=True,
+                    )
                     if self.is_main_process:
                         print("Loading base model as raw state_dict")
                 
@@ -261,6 +275,8 @@ class Trainer:
             if lora_checkpoint is not None:
                 if self.is_main_process:
                     print(f"Loading LoRA checkpoint from {lora_checkpoint_path} (before FSDP wrapping)")
+
+                validate_sparse_checkpoint_method(lora_checkpoint, "sla_cag")
 
                 if "generator_lora" not in lora_checkpoint:
                     raise ValueError(f"LoRA checkpoint {lora_checkpoint_path} is not a valid LoRA checkpoint. "
@@ -661,6 +677,7 @@ class Trainer:
                 "critic_optimizer": critic_optim_state,
                 "step": self.step,
                 "checkpoint_format_version": 3,
+                "sparse_method": "sla_cag",
                 "world_size": self.world_size,
                 "sequence_parallel_size": self.sequence_parallel_size,
                 "data_parallel_size": self.data_parallel_size,
@@ -964,7 +981,13 @@ class Trainer:
         for name, module in transformer.named_modules():
             if module.__class__.__name__ in adapter_target_modules:
                 for full_submodule_name, submodule in module.named_modules(prefix=name):
-                    if isinstance(submodule, torch.nn.Linear):
+                    if (
+                        isinstance(submodule, torch.nn.Linear)
+                        and not (
+                            model_name == "fake_score"
+                            and full_submodule_name.endswith(".sla_linear")
+                        )
+                    ):
                         target_linear_modules.add(full_submodule_name)
         
         target_linear_modules = list(target_linear_modules)

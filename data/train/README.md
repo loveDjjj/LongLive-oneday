@@ -25,4 +25,4 @@ bash scripts/data/prepare_training_data.sh
 c5ca345c5cb83db295dee0dda0f06530032e5ea2fe0e83c6fe686a4111b02623
 ```
 
-VidProM 衍生数据应按 CC BY-NC 4.0 的适用范围使用。文件结构、Dataset 契约、训练样本计算和运行产物见 [HSA+CAG 训练指南](../../docs/hsa_cag_training.md)。
+VidProM 衍生数据应按 CC BY-NC 4.0 的适用范围使用。文件结构、Dataset 契约、训练样本计算和运行产物见 [SLA+CAG 训练指南](../../docs/sla_cag_training.md)。

@@ -1,4 +1,4 @@
-"""Prompt-only datasets used by maintained HSA+CAG training and inference."""
+"""Prompt-only datasets used by maintained SLA+CAG training and inference."""
 
 from __future__ import annotations
 

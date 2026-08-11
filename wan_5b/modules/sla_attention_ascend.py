@@ -1,10 +1,10 @@
-# Copyright 2026 LongLive HSA contributors.
+# Copyright 2026 LongLive SLA contributors.
 # SPDX-License-Identifier: Apache-2.0
 """Ascend Triton backend for cached rectangular block-sparse attention.
 
 The sparse softmax kernels are adapted from the Apache-2.0 MindSpeed-MM-SLA
 implementation. Unlike that implementation, this backend accepts different
-query and KV lengths and consumes HSA's precomputed block LUT directly.
+query and KV lengths and consumes SLA's precomputed block LUT directly.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def ascend_triton_unavailable_reason() -> str:
 if triton is not None:
 
     @triton.jit
-    def _hsa_sparse_fwd(
+    def _sla_sparse_fwd(
         q_ptr,
         k_ptr,
         v_ptr,
@@ -149,7 +149,7 @@ if triton is not None:
 
 
     @triton.jit
-    def _hsa_sparse_delta(
+    def _sla_sparse_delta(
         out_ptr,
         grad_out_ptr,
         delta_ptr,
@@ -166,7 +166,7 @@ if triton is not None:
 
 
     @triton.jit
-    def _hsa_sparse_bwd_dq(
+    def _sla_sparse_bwd_dq(
         q_ptr,
         k_ptr,
         v_ptr,
@@ -231,7 +231,7 @@ if triton is not None:
 
 
     @triton.jit
-    def _hsa_sparse_bwd_dk(
+    def _sla_sparse_bwd_dk(
         q_ptr,
         k_ptr,
         v_ptr,
@@ -310,7 +310,7 @@ if triton is not None:
 
 
     @triton.jit
-    def _hsa_sparse_bwd_dv(
+    def _sla_sparse_bwd_dv(
         q_ptr,
         k_ptr,
         sparse_map_ptr,
@@ -388,9 +388,9 @@ class _AscendSparseAttention(torch.autograd.Function):
         if not ascend_triton_available():
             raise RuntimeError(ascend_triton_unavailable_reason())
         if q.device.type != "npu" or k.device.type != "npu" or v.device.type != "npu":
-            raise ValueError("Ascend Triton HSA requires q/k/v on an NPU device.")
+            raise ValueError("Ascend Triton SLA requires q/k/v on an NPU device.")
         if q.dtype not in (torch.bfloat16, torch.float16):
-            raise TypeError(f"Ascend Triton HSA requires BF16/FP16, got {q.dtype}.")
+            raise TypeError(f"Ascend Triton SLA requires BF16/FP16, got {q.dtype}.")
         if q.dtype != k.dtype or q.dtype != v.dtype:
             raise TypeError("q/k/v must use the same dtype.")
 
@@ -409,9 +409,9 @@ class _AscendSparseAttention(torch.autograd.Function):
         block_k_pad = triton.next_power_of_2(block_k)
         pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
         if dim not in (64, 128, 256):
-            raise ValueError(f"unsupported HSA head dimension: {dim}")
+            raise ValueError(f"unsupported SLA head dimension: {dim}")
         if block_q_pad > 128 or block_k_pad > 128:
-            raise ValueError("Ascend Triton HSA supports block sizes up to 128.")
+            raise ValueError("Ascend Triton SLA supports block sizes up to 128.")
 
         output = torch.empty_like(q)
         lse = torch.empty((b, heads, lq), dtype=torch.float32, device=q.device)
@@ -422,7 +422,7 @@ class _AscendSparseAttention(torch.autograd.Function):
         sparse_map = sparse_map.contiguous()
 
         grid = (b * heads * q_blocks,)
-        _hsa_sparse_fwd[grid](
+        _sla_sparse_fwd[grid](
             q,
             k,
             v,
@@ -479,14 +479,14 @@ class _AscendSparseAttention(torch.autograd.Function):
         grad_q = torch.empty_like(q)
         grad_k = torch.empty_like(k)
         grad_v = torch.empty_like(v)
-        _hsa_sparse_delta[(b * heads * lq,)](
+        _sla_sparse_delta[(b * heads * lq,)](
             output,
             grad_output,
             delta,
             ROWS=b * heads * lq,
             D=dim,
         )
-        _hsa_sparse_bwd_dq[(b * heads * q_blocks,)](
+        _sla_sparse_bwd_dq[(b * heads * q_blocks,)](
             q,
             k,
             v,
@@ -507,7 +507,7 @@ class _AscendSparseAttention(torch.autograd.Function):
             BLOCK_K_PAD=block_k_pad,
         )
         kv_grid = (b * heads * k_blocks,)
-        _hsa_sparse_bwd_dk[kv_grid](
+        _sla_sparse_bwd_dk[kv_grid](
             q,
             k,
             v,
@@ -527,7 +527,7 @@ class _AscendSparseAttention(torch.autograd.Function):
             BLOCK_Q_PAD=block_q_pad,
             BLOCK_K_PAD=block_k_pad,
         )
-        _hsa_sparse_bwd_dv[kv_grid](
+        _sla_sparse_bwd_dv[kv_grid](
             q,
             k,
             sparse_map,
@@ -575,7 +575,7 @@ def _ascend_triton_sparse_attention_forward(
     pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
     output = torch.empty_like(q)
 
-    _hsa_sparse_fwd[(b * heads * q_blocks,)](
+    _sla_sparse_fwd[(b * heads * q_blocks,)](
         q,
         k,
         v,
@@ -622,19 +622,19 @@ def ascend_triton_sparse_attention_blhd(
     scale: float | None = None,
     validate_lut: bool = True,
 ) -> torch.Tensor:
-    """Run the inference-only HSA kernel directly on contiguous BLHD tensors."""
+    """Run the inference-only SLA kernel directly on contiguous BLHD tensors."""
     if torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v)):
-        raise ValueError("BLHD Ascend HSA is inference-only; disable gradients")
+        raise ValueError("BLHD Ascend SLA is inference-only; disable gradients")
     if not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
     if q.device.type != "npu" or k.device.type != "npu" or v.device.type != "npu":
-        raise ValueError("Ascend Triton HSA requires q/k/v on an NPU device.")
+        raise ValueError("Ascend Triton SLA requires q/k/v on an NPU device.")
     if q.ndim != 4 or k.shape != v.shape:
         raise ValueError("q/k/v must be BLHD tensors and k/v shapes must match.")
     if q.shape[0] != k.shape[0] or q.shape[2:] != k.shape[2:]:
         raise ValueError("q and k/v batch, head, and head dimensions must match.")
     if q.dtype not in (torch.bfloat16, torch.float16) or q.dtype != k.dtype or q.dtype != v.dtype:
-        raise TypeError("Ascend Triton HSA requires matching BF16/FP16 q/k/v tensors.")
+        raise TypeError("Ascend Triton SLA requires matching BF16/FP16 q/k/v tensors.")
 
     b, lq, heads, dim = q.shape
     lkv = k.shape[1]
@@ -655,13 +655,13 @@ def ascend_triton_sparse_attention_blhd(
     block_k_pad = triton.next_power_of_2(block_k)
     pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
     if dim not in (64, 128, 256):
-        raise ValueError(f"unsupported HSA head dimension: {dim}")
+        raise ValueError(f"unsupported SLA head dimension: {dim}")
     if block_q_pad > 128 or block_k_pad > 128:
-        raise ValueError("Ascend Triton HSA supports block sizes up to 128.")
+        raise ValueError("Ascend Triton SLA supports block sizes up to 128.")
 
     output = torch.empty_like(q)
     attention_scale = float(scale) if scale is not None else dim ** -0.5
-    _hsa_sparse_fwd[(b * heads * q_blocks,)](
+    _sla_sparse_fwd[(b * heads * q_blocks,)](
         q,
         k,
         v,
@@ -708,13 +708,13 @@ def ascend_triton_sparse_attention(
     scale: float | None = None,
     validate_lut: bool = True,
 ) -> torch.Tensor:
-    """Run HSA sparse attention on BHLD tensors using an Ascend Triton LUT."""
+    """Run block-sparse attention on BHLD tensors using an Ascend Triton LUT."""
     if not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
     if q.device.type != "npu" or k.device.type != "npu" or v.device.type != "npu":
-        raise ValueError("Ascend Triton HSA requires q/k/v on an NPU device.")
+        raise ValueError("Ascend Triton SLA requires q/k/v on an NPU device.")
     if q.dtype not in (torch.bfloat16, torch.float16):
-        raise TypeError(f"Ascend Triton HSA requires BF16/FP16, got {q.dtype}.")
+        raise TypeError(f"Ascend Triton SLA requires BF16/FP16, got {q.dtype}.")
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise TypeError("q/k/v must use the same dtype.")
     if q.ndim != 4 or k.ndim != 4 or v.shape != k.shape:

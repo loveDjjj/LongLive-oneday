@@ -1,8 +1,9 @@
 # 昇腾 NPU BF16 依赖列表。
 # 请先安装与 Ascend/CANN 匹配的 torch、torchvision 和 torch_npu。
 # 此环境不要安装 CUDA、NVFP4、TransformerEngine、FlashAttention 或 TensorRT 包。
-# HSA 训练的 ascend_triton 后端还需要与 torch_npu/CANN 匹配的昇腾 Triton。
-# HSA 推理固定 MindIE-SD 3.0.0 RainFusionAttention；算子最低使用 CANN 8.5.0，
+# SLA 训练的 ascend_triton 后端还需要与 torch_npu/CANN 匹配的昇腾 Triton。
+# SLA 推理的稀疏 softmax 分支使用 MindIE-SD 3.0.0 RainFusionAttention；
+# 算子最低使用 CANN 8.5.0，线性补偿分支由 PyTorch NPU 算子执行。
 # 推荐官方镜像组合 CANN 8.5.1 + torch/torch_npu 2.9.0。MindIE-SD 需从昇腾源
 # 单独安装，不要使用要求 CANN 9.0.1 的 dev 分支。
 

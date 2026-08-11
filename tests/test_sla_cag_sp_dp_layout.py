@@ -6,7 +6,7 @@ from wan_5b.distributed.sp_training import (
 )
 
 
-class HsaCagSpDpLayoutTest(unittest.TestCase):
+class SlaCagSpDpLayoutTest(unittest.TestCase):
     def test_sp4_dp4_rank_layout(self):
         sp_groups, dp_groups = build_sp_dp_rank_layout(16, 4)
 

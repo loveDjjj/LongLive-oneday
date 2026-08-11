@@ -1,6 +1,6 @@
-# Copyright 2026 LongLive HSA contributors.
+# Copyright 2026 LongLive SLA contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""MindIE-SD RainFusionAttention execution backend for inference-only HSA."""
+"""MindIE-SD RainFusionAttention execution backend for inference-only SLA sparse branch."""
 
 from __future__ import annotations
 
@@ -100,21 +100,21 @@ def mindiesd_sparse_attention_blhd(
     if q.device.type != "npu":
         raise RuntimeError(f"MindIE-SD RainFusionAttention requires NPU tensors, got {q.device}")
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4 or k.shape != v.shape:
-        raise ValueError("MindIE-SD HSA expects compatible BLHD q/k/v tensors")
+        raise ValueError("MindIE-SD SLA sparse branch expects compatible BLHD q/k/v tensors")
     if q.shape[0] != 1 or k.shape[0] != 1:
-        raise ValueError("MindIE-SD HSA currently requires batch size 1")
+        raise ValueError("MindIE-SD SLA sparse branch currently requires batch size 1")
     if q.shape[2:] != k.shape[2:]:
-        raise ValueError("MindIE-SD HSA requires matching q/k head dimensions")
+        raise ValueError("MindIE-SD SLA sparse branch requires matching q/k head dimensions")
     if q.device != k.device or q.device != v.device or block_lut.device != q.device:
-        raise ValueError("MindIE-SD HSA requires q/k/v and block_lut on the same NPU device")
+        raise ValueError("MindIE-SD SLA sparse branch requires q/k/v and block_lut on the same NPU device")
     if q.dtype != k.dtype or q.dtype != v.dtype:
-        raise ValueError("MindIE-SD HSA requires q/k/v to use the same dtype")
+        raise ValueError("MindIE-SD SLA sparse branch requires q/k/v to use the same dtype")
     if q.dtype not in (torch.float16, torch.bfloat16):
         raise TypeError(
             f"MindIE-SD RainFusionAttention supports FP16/BF16, got {q.dtype}"
         )
     if q.shape[1] % 128 or k.shape[1] % 128:
-        raise ValueError("MindIE-SD HSA requires q and k token lengths divisible by 128")
+        raise ValueError("MindIE-SD SLA sparse branch requires q and k token lengths divisible by 128")
 
     q_blocks = q.shape[1] // 128
     k_blocks = k.shape[1] // 128

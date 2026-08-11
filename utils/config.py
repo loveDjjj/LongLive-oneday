@@ -185,7 +185,7 @@ def normalize_config(config):
     return config
 
 
-def validate_hsa_cag_training_config(config):
+def validate_sla_cag_training_config(config):
     """Validate the only maintained training workflow before model allocation."""
     errors = []
 
@@ -220,21 +220,25 @@ def validate_hsa_cag_training_config(config):
         "sparse backend must be ascend_triton or portable",
     )
     sp_size = int(config.get("sequence_parallel_size", 0))
-    spatial_tokens = 44 * 80
-    frame_tokens = spatial_tokens // max(sp_size, 1)
+    # Patch embedding maps 44x80 latents to 22x40=880 tokens per frame.
+    # Ulysses gathers the full sequence and shards heads, so SLA sees the same
+    # chunk token count for every supported SP size.
+    frame_tokens = 22 * 40
+    block_frames = int(model_kwargs.get("num_frame_per_block", 0))
+    chunk_tokens = frame_tokens * max(block_frames, 1)
     block_q = int(sparse.get("block_q", 0))
     block_k = int(sparse.get("block_k", 0))
     require(
-        sp_size > 0 and spatial_tokens % sp_size == 0,
-        "sequence_parallel_size must divide 3520 spatial tokens per frame",
+        sp_size > 0 and chunk_tokens % sp_size == 0,
+        f"sequence_parallel_size must divide {chunk_tokens} pre-exchange chunk tokens",
     )
     require(
-        block_q > 0 and frame_tokens % block_q == 0,
-        f"sparse block_q must divide {frame_tokens} tokens per frame at SP{sp_size}",
+        block_q > 0 and chunk_tokens % block_q == 0,
+        f"SLA block_q must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
     )
     require(
-        block_k > 0 and frame_tokens % block_k == 0,
-        f"sparse block_k must divide {frame_tokens} tokens per frame at SP{sp_size}",
+        block_k > 0 and chunk_tokens % block_k == 0,
+        f"SLA block_k must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
     )
     require(int(sparse.get("query_block_batch", 0)) > 0, "sparse query_block_batch must be positive")
     require(0.0 <= float(sparse.get("sparsity", -1.0)) < 1.0, "sparse sparsity must be in [0, 1)")
@@ -266,7 +270,6 @@ def validate_hsa_cag_training_config(config):
         require(latent_frames == int(config.get("slice_last_frames", -1)), "latent frames must equal training.slice_last_frames")
         require(latent_frames == int(sparse.get("num_output_frames", -1)), "latent frames must equal sparse_config.num_output_frames")
 
-    block_frames = int(model_kwargs.get("num_frame_per_block", 0))
     require(block_frames > 0 and 32 % block_frames == 0, "num_frame_per_block must divide 32 latent frames")
     require(int(sparse.get("num_frame_per_block", -1)) == block_frames, "sparse and model block sizes must match")
     require(int(sparse.get("local_attn_size", -1)) == int(model_kwargs.get("local_attn_size", -2)), "sparse and model local_attn_size must match")
@@ -288,5 +291,5 @@ def validate_hsa_cag_training_config(config):
 
     if errors:
         formatted = "\n".join(f"  - {message}" for message in errors)
-        raise ValueError(f"Invalid HSA+CAG training configuration:\n{formatted}")
+        raise ValueError(f"Invalid SLA+CAG training configuration:\n{formatted}")
     return config

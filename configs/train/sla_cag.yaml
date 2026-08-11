@@ -1,4 +1,4 @@
-# LongLive2.0-5B 在昇腾上的 HSA+CAG 稀疏后训练配置。
+# LongLive2.0-5B 在昇腾上的 SLA+CAG 稀疏后训练配置。
 # 当前训练只读取提示词，不读取真实视频；生成器使用稀疏注意力，教师和判别器保持稠密注意力。
 
 infra:
@@ -22,17 +22,19 @@ model_kwargs:
   sparse_config:
     enabled: true
     backend: ascend_triton
-    # sparsity 是平均历史 KV 稀疏率目标，sparsity_base 控制长序列后期稀疏率。
-    sparsity: 0.85
-    sparsity_base: 0.95
-    # 44x80 空间网格在默认 SP4 下每 rank 每帧有 880 个 token；block 必须整除每 rank token 数。
-    block_q: 40
-    block_k: 40
-    keep_frames: 6
-    keep_sink: 1
-    keep_near: 2
-    dense_current: true
-    min_sparse_history_frames: 2
+    # SLA 以 5% Top-K 为起点；CAG 为早期 chunk 分配更多历史预算。
+    sparsity: 0.95
+    sparsity_base: 0.97
+    # Ulysses 交换后每个 8 帧 chunk 有 7040 token，可被 128-token block 整除。
+    block_q: 128
+    block_k: 128
+    feature_map: softmax
+    keep_sink_frames: 1
+    keep_recent_frames: 1
+    dense_current: false
+    min_sparse_history_frames: 1
+    linear_cache: true
+    linear_eps: 1.0e-5
     # portable 后端按该值合并 Query Block；Triton 后端直接消费完整 LUT。
     query_block_batch: 1
     num_output_frames: 32
@@ -139,4 +141,4 @@ logging:
   seed: 42
   wandb_key: null
   wandb_entity: null
-  wandb_project: LongLive2-HSA-CAG-NPU
+  wandb_project: LongLive2-SLA-CAG-NPU

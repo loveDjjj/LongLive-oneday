@@ -4,11 +4,11 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from utils.config import normalize_config, validate_hsa_cag_training_config
+from utils.config import normalize_config, validate_sla_cag_training_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "configs" / "train" / "hsa_cag.yaml"
+CONFIG_PATH = ROOT / "configs" / "train" / "sla_cag.yaml"
 
 
 class TrainingConfigContractTest(unittest.TestCase):
@@ -36,7 +36,7 @@ class TrainingConfigContractTest(unittest.TestCase):
                 Path(temporary_dir)
             )
 
-            validated = validate_hsa_cag_training_config(config)
+            validated = validate_sla_cag_training_config(config)
 
             self.assertEqual(validated.sequence_parallel_size, 4)
             self.assertEqual(validated.sampling_steps, 4)
@@ -50,19 +50,18 @@ class TrainingConfigContractTest(unittest.TestCase):
             config.sequence_parallel_size = 12
 
             with self.assertRaisesRegex(ValueError, "num_frame_per_block"):
-                validate_hsa_cag_training_config(config)
+                validate_sla_cag_training_config(config)
 
-    def test_sparse_blocks_must_divide_per_rank_tokens_for_sp8(self):
+    def test_sla_blocks_use_post_exchange_sequence_for_sp8(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             config = self._load_config_with_temporary_paths(
                 Path(temporary_dir)
             )
             config.sequence_parallel_size = 8
-            config.model_kwargs.sparse_config.block_q = 80
-            config.model_kwargs.sparse_config.block_k = 80
 
-            with self.assertRaisesRegex(ValueError, "440 tokens per frame at SP8"):
-                validate_hsa_cag_training_config(config)
+            validated = validate_sla_cag_training_config(config)
+
+            self.assertEqual(validated.sequence_parallel_size, 8)
 
 
 if __name__ == "__main__":

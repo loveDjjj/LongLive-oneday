@@ -84,7 +84,7 @@ def main() -> None:
                 "ASCEND_RT_VISIBLE_DEVICES",
                 "MASTER_ADDR",
                 "MASTER_PORT",
-                "HSA_BACKEND",
+                "SLA_BACKEND",
                 "PYTORCH_NPU_ALLOC_CONF",
             )
         },

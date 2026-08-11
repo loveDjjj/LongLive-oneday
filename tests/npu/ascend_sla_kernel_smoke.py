@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the Ascend Triton HSA kernel with the portable PyTorch reference."""
+"""Compare the Ascend Triton SLA sparse kernel with the portable PyTorch reference."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 print("[smoke] importing Ascend Triton backend", flush=True)
-from wan_5b.modules.sparse_attention_ascend import (
+from wan_5b.modules.sla_attention_ascend import (
     ascend_triton_available,
     ascend_triton_sparse_attention,
     ascend_triton_sparse_attention_blhd,
@@ -71,9 +71,9 @@ def main():
     stage(f"backend available; device={args.device}")
 
     device = torch.device(args.device)
-    shape_q = (1, 2, 80, 128)
-    shape_kv = (1, 2, 160, 128)
-    block_q = block_k = 40
+    shape_q = (1, 2, 256, 128)
+    shape_kv = (1, 2, 512, 128)
+    block_q = block_k = 128
     stage("creating deterministic inputs on CPU")
     cpu_generator = torch.Generator(device="cpu").manual_seed(7)
     lut_cpu = torch.tensor(
@@ -169,7 +169,7 @@ def main():
             if maximum > 0.08 or mean > 0.015:
                 raise AssertionError(f"{name} error exceeds BF16 tolerance")
 
-    print("Ascend Triton HSA smoke test passed", flush=True)
+    print("Ascend Triton SLA sparse smoke test passed", flush=True)
 
 
 if __name__ == "__main__":

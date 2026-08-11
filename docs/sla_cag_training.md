@@ -1,4 +1,4 @@
-# HSA+CAG 训练指南
+# SLA+CAG 训练指南
 
 本文是当前唯一训练流程的权威说明，覆盖训练目标、数据集、并行布局、启动命令、终端输出、日志、checkpoint、恢复和 LoRA 合并。环境安装与 kernel 测试见 [环境安装与测试](getting_started.md)，质量和性能评测见 [推理与评测指南](inference_and_evaluation.md)。
 
@@ -6,7 +6,7 @@
 
 当前训练是 LongLive2.0-5B 的提示词驱动稀疏 DMD 后训练，不读取真实视频，也不维护 AR、I2V、teacher forcing、NVFP4 或非 causal 分支：
 
-1. HSA+CAG Generator 从噪声在线生成 32 个 latent 帧。
+1. SLA+CAG Generator 从噪声在线生成 32 个 latent 帧。
 2. 32 帧按每块 8 帧分成 4 个因果时间块，使用 4 步采样。
 3. Dense Real Teacher 和 Dense Fake Critic 对 Generator 中间状态计算 score。
 4. Critic 每个 optimizer step 更新；Generator 默认每 5 步更新一次。
@@ -14,15 +14,20 @@
 
 四个时间块属于同一个视频样本，和 DP 数量无关。Generator 使用稀疏自注意力，Teacher/Critic 保持稠密，避免监督目标同时引入稀疏偏差。
 
-## 2. HSA+CAG 行为
+## 2. SLA+CAG 行为
 
 - CAG 根据 rollout 位置调整历史 KV 稀疏率；没有历史 KV 的第一块保持稠密。
-- HSA 先选择历史帧，再选择帧内 token block。
-- Sink、最近历史和当前块按配置强制保留，`dense_current=true`。
+- SLA 用每个 Q/K block 的代表向量做全局 Top-K，覆盖历史和当前 KV。
+- Sink 与最近帧对应的 blocks 强制保留；默认 `dense_current=false`，避免当前
+  8 帧稠密造成约 25% 的理论稀疏率上限。
+- 线性注意力分支补偿稀疏 softmax 丢失的信息，其输出投影从零初始化并参与 LoRA 后训练。
 - 正式训练使用 `ascend_triton`，kernel 直接消费 block LUT 并支持前向和反向。
 - 路由索引不可微，但被选中的 Q/K/V 保持梯度传播。
 
-默认空间网格是 `44 x 80`，每帧在 SP 分片前对应 3520 个 token。每 rank 的 token 数为 `3520 / SP_SIZE`；默认 SP4 是 880，SP8 是 440。`block_q` 和 `block_k` 必须整除当前布局的每 rank token 数，默认 40 对 SP1/2/4/8 都合法。
+latent 空间网格是 `44 x 80`，patch embedding 后为 `22 x 40=880` token/帧。
+Ulysses all-to-all 收集完整序列并切分 head，因此 attention 侧每个 rank 都看到
+`8 x 880=7040` 个 query token，只是 head 数变为 `24 / SP_SIZE`。
+`block_q` 和 `block_k` 必须整除 7040，正式配置使用 128。
 
 ## 3. 训练数据集
 
@@ -116,7 +121,7 @@ DP = world_size / SP_SIZE
 唯一源配置：
 
 ```text
-configs/train/hsa_cag.yaml
+configs/train/sla_cag.yaml
 ```
 
 启动器把环境覆盖写到 `runs/training/<run-name>/config.resolved.yaml`，训练进程只读取 resolved 配置。
@@ -133,8 +138,8 @@ configs/train/hsa_cag.yaml
 | `SAVE_INTERVAL` | checkpoint 间隔 | 10 |
 | `VIS_INTERVAL` | 训练内验证间隔，0 关闭 | 100 |
 | `MAX_CHECKPOINTS` | 保留的 checkpoint 数 | 20 |
-| `HSA_BACKEND` | 稀疏后端 | `ascend_triton` |
-| `HSA_QUERY_BLOCK_BATCH` | portable Query block 合并数 | 1 |
+| `SLA_BACKEND` | 稀疏后端 | `ascend_triton` |
+| `SLA_QUERY_BLOCK_BATCH` | portable Query block 合并数 | 1 |
 | `SHARDING_STRATEGY` | 可选 FSDP 策略覆盖 | 空，使用 YAML |
 | `TRAIN_RUN_NAME` | 运行目录与自动恢复标识 | 时间戳名称 |
 | `DISABLE_WANDB` | 1 禁用 W&B | 1 |
@@ -152,8 +157,8 @@ configs/train/hsa_cag.yaml
 ASCEND_RT_VISIBLE_DEVICES=0 \
 NPROC_PER_NODE=1 SP_SIZE=1 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 \
-VIS_INTERVAL=0 TRAIN_RUN_NAME=hsa_cag_1card_smoke \
-bash scripts/training/run_hsa_cag.sh
+VIS_INTERVAL=0 TRAIN_RUN_NAME=sla_cag_1card_smoke \
+bash scripts/training/run_sla_cag.sh
 ```
 
 ### 6.2 12 卡单步烟测
@@ -162,8 +167,8 @@ bash scripts/training/run_hsa_cag.sh
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 \
-VIS_INTERVAL=0 TRAIN_RUN_NAME=hsa_cag_12card_smoke \
-bash scripts/training/run_hsa_cag.sh
+VIS_INTERVAL=0 TRAIN_RUN_NAME=sla_cag_12card_smoke \
+bash scripts/training/run_sla_cag.sh
 ```
 
 ### 6.3 12 卡正式训练
@@ -172,8 +177,8 @@ bash scripts/training/run_hsa_cag.sh
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=16 \
 MAX_ITERS=2000 SAVE_INTERVAL=10 MAX_CHECKPOINTS=20 \
-VIS_INTERVAL=100 TRAIN_RUN_NAME=hsa_cag_12card_2k \
-bash scripts/training/run_hsa_cag.sh
+VIS_INTERVAL=100 TRAIN_RUN_NAME=sla_cag_12card_2k \
+bash scripts/training/run_sla_cag.sh
 ```
 
 有效 batch 是 48。累积 16 会执行 16 个 micro-batch，墙钟时间近似随累积增加；改变有效 batch 后应重新评估学习率和总样本数。
@@ -189,8 +194,8 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NNODES=2 NODE_RANK=0 NPROC_PER_NODE=12 \
 MASTER_ADDR=10.0.0.10 MASTER_PORT=29600 \
 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=8 MAX_ITERS=2000 \
-TRAIN_RUN_NAME=hsa_cag_24card_2k \
-bash scripts/training/run_hsa_cag.sh
+TRAIN_RUN_NAME=sla_cag_24card_2k \
+bash scripts/training/run_sla_cag.sh
 ```
 
 节点 1 运行同一命令，只将 `NODE_RANK=1`。该布局为 SP4 x DP6，有效 batch 为 48。
@@ -204,8 +209,8 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
 NNODES=2 NODE_RANK=<0或1> NPROC_PER_NODE=16 \
 MASTER_ADDR=10.0.0.10 MASTER_PORT=29600 \
 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=12 MAX_ITERS=2000 \
-TRAIN_RUN_NAME=hsa_cag_32card_2k \
-bash scripts/training/run_hsa_cag.sh
+TRAIN_RUN_NAME=sla_cag_32card_2k \
+bash scripts/training/run_sla_cag.sh
 ```
 
 该布局为 SP8 x DP4，有效 batch 为 48。
@@ -215,8 +220,8 @@ bash scripts/training/run_hsa_cag.sh
 启动阶段应看到实际布局、路径和后端：
 
 ```text
-[launch] time=... node=0/1 run=hsa_cag_12card_2k
-[run] Ascend Triton HSA backend is available
+[launch] time=... node=0/1 run=sla_cag_12card_2k
+[run] Ascend Triton SLA backend is available
 [run] node=0/1 devices=... world=12 SP=4 DP=3 effective_batch=48
 [run] prompts=248217 model_root=...
 [run] generator_ckpt=...
@@ -272,6 +277,7 @@ logs/training/<run-name>/
     "critic_optimizer": ...,
     "step": ...,
     "checkpoint_format_version": 3,
+    "sparse_method": "sla_cag",
     "world_size": ...,
     "sequence_parallel_size": ...,
     "data_parallel_size": ...,
@@ -282,9 +288,10 @@ logs/training/<run-name>/
 }
 ```
 
-复用同一 `TRAIN_RUN_NAME` 会同时扫描当前 `checkpoints/step_*/train_state.pt` 和旧 `checkpoint_model_*/model.pt`，按最大 step 自动恢复；同一步优先当前格式。
-
-旧 HSA+CAG LoRA `model.pt` 若包含 `generator_lora` 和 `critic_lora` 可以恢复。缺 optimizer 时 LoRA 和 step 会加载，但 AdamW 从头开始；缺 RNG 时按 rank seed 继续。v2 缺 SP/DP 元数据时按当前 SP 推断，保持原布局最可靠。
+复用同一 `TRAIN_RUN_NAME` 会扫描 `checkpoints/step_*/train_state.pt` 并按最大 step
+自动恢复。恢复状态必须显式包含 `sparse_method: sla_cag`；旧 HSA 或无方法标记的
+checkpoint 会被拒绝，防止混用路由、投影和 optimizer 状态。稠密基础 Generator
+不受此限制，加载时缺失的 `sla_linear` 参数会按零初始化补齐。
 
 `MAX_ITERS` 是最终目标 step。例如 checkpoint 已到 100，设置 `MAX_ITERS=2000` 会继续到 2000，不是额外训练 2000 步。改变 SP/DP/卡数后 optimizer 可重分片，但数据分配和 RNG 不保证逐位一致。
 
@@ -294,17 +301,11 @@ logs/training/<run-name>/
 
 ```bash
 python scripts/checkpoints/merge_lora.py \
-  --config_path configs/train/hsa_cag.yaml \
+  --config_path configs/train/sla_cag.yaml \
   --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
-  --lora_ckpt runs/training/hsa_cag_12card_2k/checkpoints/step_0002000/train_state.pt \
-  --output_path runs/merged/longlive2_hsa_cag_2k.pt \
+  --lora_ckpt runs/training/sla_cag_12card_2k/checkpoints/step_0002000/train_state.pt \
+  --output_path runs/merged/longlive2_sla_cag_2k.pt \
   --device npu:0
-```
-
-旧格式也可直接传入：
-
-```text
---lora_ckpt runs/training/<run-name>/checkpoint_model_000100/model.pt
 ```
 
 脚本只合并 `generator_lora`；`critic_lora` 只用于训练恢复。输出是 `{"generator": state_dict, ...}` 的完整 BF16 checkpoint。不要把 LoRA 合并到原始 Wan 权重，必须使用训练配置中的 `longlive2_merged_generator.pt`。
@@ -313,10 +314,10 @@ python scripts/checkpoints/merge_lora.py \
 
 最低验收：
 
-- Ascend Triton HSA 前向/反向 smoke test 通过。
+- Ascend Triton SLA 前向/反向 smoke test 通过。
 - resolved 配置中的 SP、累积、路径和 `backend` 符合预期。
 - loss 与 grad norm 无 NaN/Inf。
 - checkpoint 能恢复 step、LoRA、optimizer 和数据游标。
-- 使用同一合并权重完成 dense/HSA VBench 对照和 msprof 性能采集。
+- 使用同一合并权重完成 dense/SLA VBench 对照和 msprof 性能采集。
 
 训练卡住时先检查所有节点日志中最早的错误。`ASCEND_LAUNCH_BLOCKING=1` 仅用于单步定位；长期开启会显著降低速度。若不同节点共享目录不可见，非 rank-0 节点会等待 `config.resolved.yaml.ready` 最多 600 秒后失败。

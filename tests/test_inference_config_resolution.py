@@ -38,9 +38,9 @@ def test_vbench_dense_does_not_inject_sparse_model_config(tmp_path, monkeypatch)
     assert metadata["required_devices"] == 16
 
 
-def test_vbench_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
-    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
-    output = tmp_path / "hsa.yaml"
+def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    output = tmp_path / "sla.yaml"
 
     metadata = resolve_vbench(
         _args(VBENCH_CONFIG, "longlive2_standard_5pct", output, seed=0)
@@ -51,11 +51,13 @@ def test_vbench_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
     assert sparse.backend == "mindiesd"
     assert sparse.block_q == 128
     assert sparse.block_k == 128
-    assert metadata["sparsity_method"] == "hsa_cag"
+    assert sparse.feature_map == "softmax"
+    assert sparse.sparsity == 0.95
+    assert metadata["sparsity_method"] == "sla_cag"
 
 
-def test_vbench_rejects_hsa_for_native_wan22(tmp_path, monkeypatch):
-    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+def test_vbench_rejects_sla_for_native_wan22(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
 
     with pytest.raises(ValueError, match="LongLive2 causal inference only"):
         resolve_vbench(
@@ -63,8 +65,8 @@ def test_vbench_rejects_hsa_for_native_wan22(tmp_path, monkeypatch):
         )
 
 
-def test_msprof_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
-    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+def test_msprof_sla_uses_required_fused_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     output = tmp_path / "msprof.yaml"
 
     metadata = resolve_msprof(_args(MSPROF_CONFIG, "32s", output))
@@ -74,5 +76,6 @@ def test_msprof_hsa_uses_required_fused_backend(tmp_path, monkeypatch):
     assert sparse.backend == "mindiesd"
     assert sparse.block_q == 128
     assert sparse.block_k == 128
-    assert metadata["sparsity_method"] == "hsa_cag"
+    assert sparse.linear_cache is True
+    assert metadata["sparsity_method"] == "sla_cag"
     assert metadata["msprof"]["ai_core"] is True

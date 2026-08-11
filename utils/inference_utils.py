@@ -81,14 +81,52 @@ def load_generator_checkpoint(
     """Load a LongLive generator checkpoint into ``generator``."""
     checkpoint = _torch_load(checkpoint_path)
     state_dict = extract_generator_state_dict(checkpoint, use_ema=use_ema)
-    return generator.load_state_dict(state_dict, strict=strict)
+    return load_generator_state_dict(generator, state_dict, strict=strict)
 
 
-def load_lora_state_dict(lora_ckpt_path: str) -> Mapping[str, torch.Tensor]:
+def load_generator_state_dict(
+    generator,
+    state_dict: Mapping[str, torch.Tensor],
+    *,
+    strict: bool = True,
+):
+    """Load a generator while initializing newly introduced SLA projections.
+
+    Dense LongLive checkpoints predate SLA and therefore do not contain the
+    per-layer ``sla_linear`` weights. Their mathematically neutral
+    initialization is zero, so synthesize only those missing entries and keep
+    strict loading for every other model parameter.
+    """
+    expected = generator.state_dict()
+    prepared = dict(state_dict)
+    for key, value in expected.items():
+        if key not in prepared and (
+            key.startswith("sla_linear.") or ".sla_linear." in key
+        ):
+            prepared[key] = torch.zeros_like(value)
+    return generator.load_state_dict(prepared, strict=strict)
+
+
+def load_lora_state_dict(
+    lora_ckpt_path: str,
+    *,
+    expected_sparse_method: str | None = None,
+) -> Mapping[str, torch.Tensor]:
     """Load a LoRA checkpoint, unwrapping ``generator_lora`` when present."""
     checkpoint = _torch_load(lora_ckpt_path)
     if isinstance(checkpoint, Mapping) and "generator_lora" in checkpoint:
+        if expected_sparse_method is not None:
+            from utils.training_state import validate_sparse_checkpoint_method
+
+            validate_sparse_checkpoint_method(checkpoint, expected_sparse_method)
         return checkpoint["generator_lora"]
+    if expected_sparse_method is not None and isinstance(checkpoint, Mapping):
+        from utils.training_state import validate_sparse_checkpoint_method
+
+        validate_sparse_checkpoint_method(checkpoint, expected_sparse_method)
+        raise ValueError(
+            "method-labeled LoRA checkpoints must contain generator_lora"
+        )
     if not isinstance(checkpoint, Mapping) or not checkpoint:
         raise ValueError(f"LoRA checkpoint has an unsupported layout: {lora_ckpt_path}")
     return checkpoint

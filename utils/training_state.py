@@ -7,6 +7,17 @@ import numpy as np
 import torch
 
 
+def validate_sparse_checkpoint_method(checkpoint, expected_method):
+    """Prevent resuming optimizer/LoRA state from another sparse algorithm."""
+    actual_method = checkpoint.get("sparse_method")
+    if actual_method != expected_method:
+        actual_label = actual_method if actual_method is not None else "unlabeled/legacy"
+        raise ValueError(
+            f"checkpoint sparse method is {actual_label}, expected {expected_method}; "
+            "start a new run directory or provide a matching checkpoint"
+        )
+
+
 def list_training_checkpoints(output_dir):
     """Return one checkpoint per step, preferring the current layout."""
     output_dir = Path(output_dir)

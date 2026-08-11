@@ -77,20 +77,22 @@ presets:
   wan22_augmented_5pct: {engine: wan22, category: augmented, subset: 5pct}
   wan22_augmented_20pct: {engine: wan22, category: augmented, subset: 20pct}
 
-# 默认运行稠密对照；设置 LONGLIVE_SPARSE_METHOD=hsa_cag 可启用同一检查点的稀疏评测。
+# 默认运行稠密对照；设置 LONGLIVE_SPARSE_METHOD=sla_cag 可启用同一检查点的稀疏评测。
 sparsity:
   enabled: false
   method: dense
   options:
-    # 推理使用 MindIE-SD 融合 RainFusionAttention；不可用时直接失败。
+    # 稀疏 softmax 分支使用 MindIE-SD 融合算子，线性分支在模型层计算。
     backend: mindiesd
-    sparsity: 0.85
-    sparsity_base: 0.95
+    sparsity: 0.95
+    sparsity_base: 0.97
     block_q: 128
     block_k: 128
-    keep_frames: 6
-    keep_sink: 1
-    keep_near: 2
-    dense_current: true
-    min_sparse_history_frames: 2
+    feature_map: softmax
+    keep_sink_frames: 1
+    keep_recent_frames: 1
+    dense_current: false
+    min_sparse_history_frames: 1
     query_block_batch: 1
+    linear_cache: true
+    linear_eps: 1.0e-5

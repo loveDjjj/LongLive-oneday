@@ -22,14 +22,14 @@ if [[ ! -f "${checkpoint}" ]]; then
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
-run_id_prefix="${RUN_ID_PREFIX:-hsa_cag_20pct_${timestamp}}"
+run_id_prefix="${RUN_ID_PREFIX:-sla_cag_20pct_${timestamp}}"
 if [[ "${run_id_prefix}" == */* ]]; then
   echo "[error] RUN_ID_PREFIX must be a directory-name prefix: ${run_id_prefix}" >&2
   exit 2
 fi
 
 export LONGLIVE_GENERATOR_CKPT="${checkpoint}"
-export LONGLIVE_SPARSE_METHOD=hsa_cag
+export LONGLIVE_SPARSE_METHOD=sla_cag
 
 echo "[suite] checkpoint=${LONGLIVE_GENERATOR_CKPT} method=${LONGLIVE_SPARSE_METHOD}"
 echo "[suite] 1/2 standard 20%"

@@ -41,7 +41,13 @@ def configure_lora_for_model(transformer, model_name, lora_config, is_main_proce
     for name, module in transformer.named_modules():
         if module.__class__.__name__ in adapter_target_modules:
             for full_submodule_name, submodule in module.named_modules(prefix=name):
-                if isinstance(submodule, torch.nn.Linear):
+                if (
+                    isinstance(submodule, torch.nn.Linear)
+                    and not (
+                        model_name == "fake_score"
+                        and full_submodule_name.endswith(".sla_linear")
+                    )
+                ):
                     target_linear_modules.add(full_submodule_name)
     
     target_linear_modules = list(target_linear_modules)
@@ -99,4 +105,4 @@ def load_lora_checkpoint(lora_model, lora_state_dict, model_name, is_main_proces
     peft.set_peft_model_state_dict(lora_model, lora_state_dict)
     
     if is_main_process:
-        print(f"LoRA {model_name} weights loaded successfully") 
+        print(f"LoRA {model_name} weights loaded successfully")

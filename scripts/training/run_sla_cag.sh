@@ -15,8 +15,8 @@ export MAX_ITERS="${MAX_ITERS:-2000}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 export VIS_INTERVAL="${VIS_INTERVAL:-100}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-20}"
-export HSA_BACKEND="${HSA_BACKEND:-ascend_triton}"
-export HSA_QUERY_BLOCK_BATCH="${HSA_QUERY_BLOCK_BATCH:-1}"
+export SLA_BACKEND="${SLA_BACKEND:-ascend_triton}"
+export SLA_QUERY_BLOCK_BATCH="${SLA_QUERY_BLOCK_BATCH:-1}"
 export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
 export LLV2_DEVICE="npu"
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
@@ -25,11 +25,11 @@ export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:Tru
 # ---------- 可覆盖的路径参数 ----------
 export LONGLIVE_ROOT="${LONGLIVE_ROOT:-/mnt/share/r50063443/LongLive-oneday}"
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-export CONFIG_PATH="${CONFIG_PATH:-configs/train/hsa_cag.yaml}"
+export CONFIG_PATH="${CONFIG_PATH:-configs/train/sla_cag.yaml}"
 export MODEL_ROOT="${MODEL_ROOT:-/mnt/share/weight/Wan2.2-TI2V-5B}"
 export GENERATOR_CKPT="${GENERATOR_CKPT:-/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt}"
 export TRAIN_PROMPTS="${TRAIN_PROMPTS:-data/train/vidprom_filtered_extended/prompts_train.txt}"
-export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_hsa_cag_npu_bf16}"
+export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_sla_cag_npu_bf16}"
 export DISABLE_WANDB="${DISABLE_WANDB:-1}"
 
 cd "${LONGLIVE_ROOT}"
@@ -84,19 +84,19 @@ for required in \
     fi
 done
 
-if [[ "${HSA_BACKEND}" == "ascend_triton" ]]; then
+if [[ "${SLA_BACKEND}" == "ascend_triton" ]]; then
     "${PYTHON}" - <<'PY'
-from wan_5b.modules.sparse_attention_ascend import (
+from wan_5b.modules.sla_attention_ascend import (
     ascend_triton_available,
     ascend_triton_unavailable_reason,
 )
 
 if not ascend_triton_available():
     raise RuntimeError(
-        "HSA_BACKEND=ascend_triton is unavailable: "
+        "SLA_BACKEND=ascend_triton is unavailable: "
         + ascend_triton_unavailable_reason()
     )
-print("[run] Ascend Triton HSA backend is available")
+print("[run] Ascend Triton SLA backend is available")
 PY
 fi
 
@@ -134,10 +134,10 @@ config.evaluation.interval = int(os.environ["VIS_INTERVAL"])
 config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
 if os.environ["SHARDING_STRATEGY"]:
     config.infra.sharding_strategy = os.environ["SHARDING_STRATEGY"]
-config.model_kwargs.sparse_config.backend = os.environ["HSA_BACKEND"]
-query_block_batch = int(os.environ["HSA_QUERY_BLOCK_BATCH"])
+config.model_kwargs.sparse_config.backend = os.environ["SLA_BACKEND"]
+query_block_batch = int(os.environ["SLA_QUERY_BLOCK_BATCH"])
 if query_block_batch <= 0:
-    raise ValueError("HSA_QUERY_BLOCK_BATCH must be positive")
+    raise ValueError("SLA_QUERY_BLOCK_BATCH must be positive")
 config.model_kwargs.sparse_config.query_block_batch = query_block_batch
 OmegaConf.save(config, output)
 PY
@@ -188,7 +188,7 @@ fi
 export MASTER_PORT
 echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
 echo "[run] save_interval=${SAVE_INTERVAL} vis_interval=${VIS_INTERVAL} max_checkpoints=${MAX_CHECKPOINTS}"
-echo "[run] hsa_backend=${HSA_BACKEND} hsa_query_block_batch=${HSA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
+echo "[run] sla_backend=${SLA_BACKEND} sla_query_block_batch=${SLA_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
 echo "[run] sharding_strategy=${SHARDING_STRATEGY:-config default}"
 echo "[run] ascend_launch_blocking=${ASCEND_LAUNCH_BLOCKING:-0} task_queue_enable=${TASK_QUEUE_ENABLE:-default}"
 

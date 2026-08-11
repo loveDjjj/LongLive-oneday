@@ -15,6 +15,7 @@ from utils.training_state import (
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
     restore_rng_state,
+    validate_sparse_checkpoint_method,
 )
 
 
@@ -157,6 +158,18 @@ class CheckpointDiscoveryTest(unittest.TestCase):
             self.assertEqual([item[0] for item in checkpoints], [10, 20])
             self.assertEqual(checkpoints[0][3], str(current))
             self.assertEqual(find_latest_training_checkpoint(root), str(later))
+
+
+class SparseCheckpointContractTest(unittest.TestCase):
+    def test_accepts_matching_sla_checkpoint(self):
+        validate_sparse_checkpoint_method(
+            {"sparse_method": "sla_cag"}, "sla_cag"
+        )
+
+    def test_rejects_legacy_or_hsa_checkpoint(self):
+        for checkpoint in ({}, {"sparse_method": "hsa_cag"}):
+            with self.assertRaisesRegex(ValueError, "expected sla_cag"):
+                validate_sparse_checkpoint_method(checkpoint, "sla_cag")
 
 
 class FullTrainingStateTest(unittest.TestCase):
