@@ -208,7 +208,11 @@ class Trainer:
                 if isinstance(generator_checkpoint, dict) and "critic" in generator_checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained critic from {generator_checkpoint_path}")
-                    self.model.fake_score.load_state_dict(generator_checkpoint["critic"], strict=True)
+                    load_generator_state_dict(
+                        self.model.fake_score,
+                        generator_checkpoint["critic"],
+                        strict=True,
+                    )
                     if self.is_main_process:
                         print("Critic weights loaded successfully")
                 # Load training step from checkpoint metadata.
