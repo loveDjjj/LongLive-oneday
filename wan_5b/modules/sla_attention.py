@@ -352,6 +352,7 @@ def build_sla_block_lut(
     sparsity: float,
     config: SLAAttentionConfig,
     cache: dict[str, Any] | None = None,
+    cache_token: Any = None,
 ) -> torch.Tensor:
     """Build a global SLA Top-K LUT with optional fixed sink/recent blocks."""
     batch, query_tokens, heads, dim = q.shape
@@ -365,6 +366,7 @@ def build_sla_block_lut(
         batch, query_count, config.block_q, heads, dim
     ).mean(dim=2).permute(0, 2, 1, 3)
     cache_key = (
+        cache_token,
         history_tokens,
         config.block_k,
         heads,
@@ -561,6 +563,7 @@ def sla_cag_attention(
         sparsity=sparsity,
         config=config,
         cache=router_cache,
+        cache_token=chunk_id,
     )
     sparse_output = _run_sparse_backend(q, k, v, block_lut, config)
     linear_output = _linear_attention(

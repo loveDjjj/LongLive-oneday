@@ -208,6 +208,51 @@ def test_cached_linear_history_preserves_output():
     torch.testing.assert_close(first, uncached)
 
 
+def test_router_cache_invalidates_when_rolling_chunk_changes():
+    torch.manual_seed(5)
+    q = torch.randn(1, 4, 2, 4)
+    k = torch.randn(1, 12, 2, 4)
+    config = _config()
+    cache = {}
+
+    with torch.no_grad():
+        build_sla_block_lut(
+            q,
+            k,
+            frame_seq=2,
+            sparsity=config.sparsity,
+            config=config,
+            cache=cache,
+            cache_token=3,
+        )
+        first = cache["history_block_keys"]
+        build_sla_block_lut(
+            q,
+            k,
+            frame_seq=2,
+            sparsity=config.sparsity,
+            config=config,
+            cache=cache,
+            cache_token=3,
+        )
+        assert cache["history_block_keys"] is first
+
+        shifted = k.clone()
+        shifted[:, :8].add_(10.0)
+        build_sla_block_lut(
+            q,
+            shifted,
+            frame_seq=2,
+            sparsity=config.sparsity,
+            config=config,
+            cache=cache,
+            cache_token=4,
+        )
+
+    assert cache["history_block_keys"] is not first
+    assert not torch.equal(cache["history_block_keys"], first)
+
+
 def test_backend_aliases_and_mindiesd_block_contract():
     assert SLAAttentionConfig.from_mapping({"backend": "triton"}).backend == "ascend_triton"
     assert SLAAttentionConfig.from_mapping({"backend": "torch"}).backend == "portable"
