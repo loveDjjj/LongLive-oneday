@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from utils.device import create_event
 from utils.wan_5b_wrapper import WanVAEWrapper
 
 
@@ -63,15 +64,22 @@ def _load_latent(path: Path) -> torch.Tensor:
 
 def _decode_cached_pipeline(
     model, latent, scale, chunk_frames: int
-) -> tuple[torch.Tensor, float, float]:
+) -> tuple[torch.Tensor, float, float, float, float]:
     """Reproduce worker-side decode, pinned DtoH, and CPU postprocessing."""
     model.clear_cache()
     cpu_chunks = []
+    vae_device_ms = 0.0
+    dtoh_device_ms = 0.0
     decode_started = time.perf_counter()
     for start in range(0, latent.shape[2], chunk_frames):
+        vae_start = create_event(latent.device, enable_timing=True)
+        vae_end = create_event(latent.device, enable_timing=True)
+        dtoh_end = create_event(latent.device, enable_timing=True)
+        vae_start.record()
         decoded = model.cached_decode(
             latent[:, :, start : start + chunk_frames], scale
         ).float().clamp_(-1, 1)
+        vae_end.record()
         pinned = torch.empty(
             decoded.shape,
             dtype=decoded.dtype,
@@ -79,7 +87,10 @@ def _decode_cached_pipeline(
             pin_memory=True,
         )
         pinned.copy_(decoded, non_blocking=True)
+        dtoh_end.record()
         torch.npu.synchronize()
+        vae_device_ms += vae_start.elapsed_time(vae_end)
+        dtoh_device_ms += vae_end.elapsed_time(dtoh_end)
         cpu_chunks.append(pinned)
         del decoded
     decode_seconds = time.perf_counter() - decode_started
@@ -89,7 +100,13 @@ def _decode_cached_pipeline(
     output = (output * 0.5 + 0.5).clamp_(0, 1)
     post_seconds = time.perf_counter() - post_started
     model.clear_cache()
-    return output, decode_seconds, post_seconds
+    return (
+        output,
+        decode_seconds,
+        post_seconds,
+        vae_device_ms / 1000.0,
+        dtoh_device_ms / 1000.0,
+    )
 
 
 def main() -> None:
@@ -147,7 +164,13 @@ def main() -> None:
         for iteration in range(args.iterations):
             _reset_peak_memory(device)
             started = time.perf_counter()
-            output, decode_seconds, post_seconds = _decode_cached_pipeline(
+            (
+                output,
+                decode_seconds,
+                post_seconds,
+                vae_device_seconds,
+                dtoh_device_seconds,
+            ) = _decode_cached_pipeline(
                 vae.model, latent, scale, args.chunk_frames
             )
             elapsed = time.perf_counter() - started
@@ -156,6 +179,8 @@ def main() -> None:
                 f"iteration={iteration} decode_seconds={elapsed:.3f} "
                 f"decode_dtoh_seconds={decode_seconds:.3f} "
                 f"cpu_post_seconds={post_seconds:.3f} "
+                f"vae_device_seconds={vae_device_seconds:.3f} "
+                f"dtoh_device_seconds={dtoh_device_seconds:.3f} "
                 f"latent_fps={latent.shape[2] / elapsed:.3f} "
                 f"pixel_fps={output.shape[1] / elapsed:.3f} "
                 f"peak_memory_gb={_peak_memory_gb(device):.2f}",

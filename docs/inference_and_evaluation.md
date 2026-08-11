@@ -334,8 +334,9 @@ python tests/npu/benchmark_vae_decode.py \
 
 该工具先用两个 chunk 预热，再复现当前 dedicated VAE worker 内的 cached decode、逐
 chunk pinned DtoH、CPU 拼接和归一化，分别报告 `decode_dtoh_seconds` 与
-`cpu_post_seconds`，同时给出 latent/pixel FPS 和峰值显存。它不包含 DiT 卡到 VAE 卡的
-队列传输；后续 VAE 优化必须复用同一个 latent、chunk 大小和设备环境进行对照。
+`cpu_post_seconds`；NPU Event 进一步拆出 `vae_device_seconds` 与
+`dtoh_device_seconds`。工具同时给出 latent/pixel FPS 和峰值显存。它不包含 DiT 卡到
+VAE 卡的队列传输；后续 VAE 优化必须复用同一个 latent、chunk 大小和设备环境进行对照。
 
 ### 7.2 msprof 算子分析
 

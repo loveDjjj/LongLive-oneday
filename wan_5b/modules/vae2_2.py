@@ -816,22 +816,27 @@ class WanVAE_(nn.Module):
             z = z / scale[1] + scale[0]
         iter_ = z.shape[2]
         x = self.conv2(z)
+        outputs = []
         for i in range(iter_):
             self._conv_idx = [0]
             if i == 0:
-                out = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
-                    first_chunk=True,
+                outputs.append(
+                    self.decoder(
+                        x[:, :, i:i + 1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx,
+                        first_chunk=True,
+                    )
                 )
             else:
-                out_ = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
+                outputs.append(
+                    self.decoder(
+                        x[:, :, i:i + 1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx,
+                    )
                 )
-                out = torch.cat([out, out_], 2)
+        out = torch.cat(outputs, dim=2)
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
         return out
@@ -846,28 +851,27 @@ class WanVAE_(nn.Module):
         iter_ = z.shape[2]
         x = self.conv2(z)
         is_first_chunk = self._feat_map[0] is None
+        outputs = []
         for i in range(iter_):
             self._conv_idx = [0]
             if i == 0 and is_first_chunk:
-                out = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
-                    first_chunk=True,
-                )
-            elif i == 0:
-                out = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
+                outputs.append(
+                    self.decoder(
+                        x[:, :, i:i + 1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx,
+                        first_chunk=True,
+                    )
                 )
             else:
-                out_ = self.decoder(
-                    x[:, :, i:i + 1, :, :],
-                    feat_cache=self._feat_map,
-                    feat_idx=self._conv_idx,
+                outputs.append(
+                    self.decoder(
+                        x[:, :, i:i + 1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx,
+                    )
                 )
-                out = torch.cat([out, out_], 2)
+        out = torch.cat(outputs, dim=2)
         return unpatchify(out, patch_size=2)
 
     def reparameterize(self, mu, log_var):
