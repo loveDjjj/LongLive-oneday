@@ -2,7 +2,9 @@ import torch
 
 from wan_5b.modules.sla_attention import (
     SLAAttentionConfig,
+    _linear_attention,
     _portable_sparse_attention,
+    _projected_linear_attention,
     build_sla_block_lut,
     calculate_chunk_sparsities,
     sla_cag_attention,
@@ -165,6 +167,125 @@ def test_sla_is_differentiable_for_qkv_and_projection():
     assert projection.weight.grad.abs().sum() > 0
 
 
+def test_folded_linear_projection_matches_explicit_projection_and_gradients():
+    torch.manual_seed(31)
+    config = _config(feature_map="elu", linear_cache=False)
+    base_q = torch.randn(1, 4, 2, 4)
+    base_k = torch.randn(1, 12, 2, 4)
+    base_v = torch.randn_like(base_k)
+    base_projection = torch.nn.Linear(4, 4)
+
+    explicit_inputs = [
+        tensor.clone().requires_grad_() for tensor in (base_q, base_k, base_v)
+    ]
+    folded_inputs = [
+        tensor.clone().requires_grad_() for tensor in (base_q, base_k, base_v)
+    ]
+    explicit_projection = torch.nn.Linear(4, 4)
+    folded_projection = torch.nn.Linear(4, 4)
+    explicit_projection.load_state_dict(base_projection.state_dict())
+    folded_projection.load_state_dict(base_projection.state_dict())
+
+    explicit = explicit_projection(
+        _linear_attention(
+            *explicit_inputs,
+            history_tokens=8,
+            chunk_id=1,
+            config=config,
+            cache=None,
+        )
+    )
+    folded = _projected_linear_attention(
+        *folded_inputs,
+        history_tokens=8,
+        chunk_id=1,
+        config=config,
+        cache=None,
+        projection=folded_projection,
+    )
+    torch.testing.assert_close(folded, explicit, rtol=2.0e-5, atol=2.0e-6)
+
+    gradient = torch.randn_like(explicit)
+    explicit.backward(gradient)
+    folded.backward(gradient)
+    for actual, expected in zip(folded_inputs, explicit_inputs):
+        torch.testing.assert_close(actual.grad, expected.grad, rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(
+        folded_projection.weight.grad,
+        explicit_projection.weight.grad,
+        rtol=2.0e-5,
+        atol=2.0e-6,
+    )
+    torch.testing.assert_close(
+        folded_projection.bias.grad,
+        explicit_projection.bias.grad,
+        rtol=2.0e-5,
+        atol=2.0e-6,
+    )
+
+
+def test_linear_attention_matches_upstream_sla_formula():
+    torch.manual_seed(33)
+    q = torch.randn(1, 4, 2, 4)
+    k = torch.randn(1, 12, 2, 4)
+    v = torch.randn_like(k)
+    config = _config(feature_map="softmax", linear_cache=False, linear_eps=1.0e-5)
+
+    output = _linear_attention(
+        q,
+        k,
+        v,
+        history_tokens=8,
+        chunk_id=1,
+        config=config,
+        cache=None,
+    )
+    q_heads = torch.softmax(q, dim=-1).permute(0, 2, 1, 3)
+    k_heads = torch.softmax(k, dim=-1).permute(0, 2, 1, 3)
+    v_heads = v.permute(0, 2, 1, 3)
+    kv_sum = k_heads.transpose(-1, -2) @ v_heads
+    key_sum = k_heads.sum(dim=-2, keepdim=True)
+    reference = (q_heads @ kv_sum) / (
+        config.linear_eps + (q_heads * key_sum).sum(dim=-1, keepdim=True)
+    )
+
+    torch.testing.assert_close(output.permute(0, 2, 1, 3), reference)
+
+
+def test_folded_linear_projection_stays_within_bf16_rounding_error():
+    for feature_map in ("softmax", "elu", "relu"):
+        torch.manual_seed(32)
+        q = torch.randn(1, 16, 2, 8, dtype=torch.bfloat16)
+        k = torch.randn(1, 64, 2, 8, dtype=torch.bfloat16)
+        v = torch.randn_like(k)
+        projection = torch.nn.Linear(8, 8, dtype=torch.bfloat16)
+        config = _config(feature_map=feature_map, linear_cache=False)
+
+        explicit = projection(
+            _linear_attention(
+                q,
+                k,
+                v,
+                history_tokens=48,
+                chunk_id=1,
+                config=config,
+                cache=None,
+            )
+        )
+        folded = _projected_linear_attention(
+            q,
+            k,
+            v,
+            history_tokens=48,
+            chunk_id=1,
+            config=config,
+            cache=None,
+            projection=projection,
+        )
+
+        torch.testing.assert_close(folded, explicit, rtol=0.02, atol=0.002)
+
+
 def test_cached_linear_history_preserves_output():
     torch.manual_seed(4)
     q = torch.randn(1, 4, 2, 4)
@@ -254,6 +375,40 @@ def test_router_cache_invalidates_when_rolling_chunk_changes():
 
     assert cache["history_block_keys"] is not first
     assert not torch.equal(cache["history_block_keys"], first)
+
+
+def test_router_matches_smooth_k_and_is_invariant_to_global_key_shift():
+    torch.manual_seed(51)
+    q = torch.randn(1, 4, 2, 4)
+    k = torch.randn(1, 12, 2, 4)
+    config = _config(
+        sparsity=0.5,
+        keep_sink_frames=0,
+        keep_recent_frames=0,
+    )
+
+    actual = build_sla_block_lut(
+        q,
+        k,
+        frame_seq=2,
+        sparsity=config.sparsity,
+        config=config,
+    )
+    q_blocks = q.reshape(1, 2, 2, 2, 4).mean(dim=2).permute(0, 2, 1, 3)
+    smooth_k = k - k.mean(dim=1, keepdim=True)
+    k_blocks = smooth_k.reshape(1, 6, 2, 2, 4).mean(dim=2).permute(0, 2, 1, 3)
+    scores = q_blocks @ k_blocks.transpose(-1, -2)
+    expected = torch.topk(scores, 3, dim=-1, sorted=False).indices.sort(dim=-1).values
+    torch.testing.assert_close(actual, expected)
+
+    shifted = build_sla_block_lut(
+        q,
+        k + torch.randn(1, 1, 2, 4),
+        frame_seq=2,
+        sparsity=config.sparsity,
+        config=config,
+    )
+    torch.testing.assert_close(shifted, actual)
 
 
 def test_backend_aliases_and_mindiesd_block_contract():

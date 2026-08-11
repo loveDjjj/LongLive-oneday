@@ -39,7 +39,8 @@ SLA+CAG 的依据、实现边界和验收规则。
 
 1. 训练使用从 MindSpeed-MM-SLA 思路适配的 Ascend Triton kernel，分别接收
    Q 长度和 KV 长度，支持矩形前向及 Q/K/V 反向。
-2. 每个 Q/K 128-token block 求代表向量，对全部滚动 KV 做全局 Top-K。
+2. 每个 Q/K 128-token block 求代表向量，按官方 Smooth-K 对 K 代表向量中心化，
+   再对全部滚动 KV 做全局 Top-K。路由保持 BF16，不额外扩张成 FP32。
 3. CAG 按 AR chunk 分配 Top-K 预算；sink/recent blocks 强制保留。
 4. 默认 `dense_current=false`。尾部强制块约 14/220，实际稀疏率约 93.6%；若保持
    当前 8 帧稠密，理论稀疏率最多 75%，不够覆盖线性补偿分支开销。
@@ -50,6 +51,9 @@ SLA+CAG 的依据、实现边界和验收规则。
 7. 默认推理稀疏分支复用 MindIE-SD RainFusionAttention；实验性的
    `mindiesd_bsa` 使用同一 LUT 调用官方 BlockSparseAttention。线性分支仍由
    PyTorch NPU 算子执行，两个后端必须以完整 SLA 延迟 A/B 后再决定默认值。
+8. `sla_linear` 的权重折叠进每头的 `K^T V` 统计量，严格等价于对每个 query
+   token 投影。SP4 尾部每层的投影计算由约 `7040x6x128x128` 降为
+   `6x128x128x128`，不改变参数、checkpoint 或训练梯度。
 
 旧 HSA LoRA 不能直接转换为 SLA LoRA。训练 checkpoint 写入
 `sparse_method: sla_cag`，恢复时拒绝旧 HSA 和无标签状态。旧的稠密 LongLive

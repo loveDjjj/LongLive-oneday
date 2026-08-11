@@ -91,8 +91,10 @@ sparse_config:
   linear_eps: 1.0e-5
 ```
 
-正式推理的稀疏 softmax 分支固定使用 MindIE-SD `RainFusionAttention`；不可用时
-直接失败。线性补偿分支由 PyTorch NPU 算子计算。训练使用支持反向的
+正式推理的稀疏 softmax 分支默认使用 MindIE-SD `RainFusionAttention`；不可用时
+直接失败。通过显式后端覆盖可验证官方 BSA，但在完整 SLA 实测通过前不会自动切换。
+线性补偿分支由 PyTorch NPU 算子计算，其中输出投影已等价折叠进 `K^T V` 统计量。
+训练使用支持反向的
 `ascend_triton`。第一块或历史不足时回到 dense；之后对全部滚动 KV 做全局
 128-token block Top-K，并强制保留 sink/recent blocks。默认不保持当前 chunk
 稠密，以免 8/32 帧当前块把理论稀疏率限制在 75%。
@@ -113,8 +115,9 @@ python tests/npu/benchmark_sla_inference.py --device npu:0 \
   --backend ascend_triton
 ```
 
-输出分别报告路由、稀疏 kernel、缓存后的线性分支以及完整 SLA 延迟。判断稳态收益
-必须比较 `cached_full_ms` 与同次运行的 `dense median_ms`，再用 msprof 验证整网收益。
+输出分别报告未缓存/缓存路由、稀疏 kernel、显式/折叠投影线性分支以及完整 SLA
+延迟。`linear_projection_speedup` 只衡量线性分支的代数优化；判断稳态收益必须比较
+`cached_full_ms` 与同次运行的 `dense median_ms`，再用 msprof 验证整网收益。
 
 正式启用前，`cached_full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
 或 kernel 正确性不能证明加速。

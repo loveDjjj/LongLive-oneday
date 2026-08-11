@@ -408,7 +408,7 @@ def build_sla_block_lut(
         history_k = k[:, :history_tokens]
         history_block_keys = history_k.reshape(
             batch, history_count, config.block_k, heads, dim
-        ).mean(dim=2).permute(0, 2, 1, 3).float()
+        ).mean(dim=2).permute(0, 2, 1, 3)
         if cache is not None and not torch.is_grad_enabled():
             cache.clear()
             cache.update({"key": cache_key, "history_block_keys": history_block_keys})
@@ -416,12 +416,16 @@ def build_sla_block_lut(
     current_count = key_count - history_count
     current_block_keys = k[:, history_tokens:].reshape(
         batch, current_count, config.block_k, heads, dim
-    ).mean(dim=2).permute(0, 2, 1, 3).float()
+    ).mean(dim=2).permute(0, 2, 1, 3)
     key_block_keys = (
         current_block_keys
         if history_block_keys is None
         else torch.cat((history_block_keys, current_block_keys), dim=2)
     )
+    # Upstream SLA applies Smooth-K before block scoring. Since every KV block
+    # has the same size, centering the block representatives is equivalent to
+    # centering all K tokens and then pooling, without rescanning cached K.
+    key_block_keys = key_block_keys - key_block_keys.mean(dim=2, keepdim=True)
 
     fixed_mask = _fixed_key_blocks(
         key_tokens=k.shape[1],
@@ -445,7 +449,7 @@ def build_sla_block_lut(
             ).view(1, 1, 1, -1).expand(batch, heads, query_count, -1)
         else:
             scores = torch.matmul(
-                q_blocks.detach().float(), key_block_keys.transpose(-1, -2)
+                q_blocks.detach(), key_block_keys.transpose(-1, -2)
             )
             dynamic_count = selected_count - fixed_ids.numel()
             parts = []
@@ -484,7 +488,7 @@ def _linear_statistics(
     return torch.matmul(key_heads, value_heads), key_features.sum(dim=1)
 
 
-def _linear_attention(
+def _linear_attention_terms(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -493,7 +497,7 @@ def _linear_attention(
     chunk_id: int,
     config: SLAAttentionConfig,
     cache: dict[str, Any] | None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     q_features = _feature_map(q, config.feature_map)
     use_cache = (
         config.linear_cache
@@ -533,11 +537,89 @@ def _linear_attention(
         kv_sum = kv_sum + history_kv
         key_sum = key_sum + history_sum
     q_heads = q_features.permute(0, 2, 1, 3)
+    return q_heads, kv_sum, key_sum
+
+
+def _linear_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    history_tokens: int,
+    chunk_id: int,
+    config: SLAAttentionConfig,
+    cache: dict[str, Any] | None,
+) -> torch.Tensor:
+    q_heads, kv_sum, key_sum = _linear_attention_terms(
+        q,
+        k,
+        v,
+        history_tokens=history_tokens,
+        chunk_id=chunk_id,
+        config=config,
+        cache=cache,
+    )
     numerator = torch.matmul(q_heads, kv_sum).permute(0, 2, 1, 3)
     denominator = torch.matmul(
         q_heads, key_sum.unsqueeze(-1)
     ).permute(0, 2, 1, 3)
-    return numerator / denominator.clamp_min(config.linear_eps)
+    return numerator / (denominator + config.linear_eps)
+
+
+def _projected_linear_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    history_tokens: int,
+    chunk_id: int,
+    config: SLAAttentionConfig,
+    cache: dict[str, Any] | None,
+    projection: torch.nn.Module,
+) -> torch.Tensor:
+    """Apply the SLA projection inside the compact K^T V statistics.
+
+    For ``Linear(x) = x W^T + b`` and linear attention
+    ``x = q (K^T V) / q (K^T 1)``, associativity lets us evaluate
+    ``q ((K^T V) W^T)``. This avoids projecting every query token.
+    """
+    if not isinstance(projection, torch.nn.Linear):
+        output = _linear_attention(
+            q,
+            k,
+            v,
+            history_tokens=history_tokens,
+            chunk_id=chunk_id,
+            config=config,
+            cache=cache,
+        )
+        projection_dtype = next(projection.parameters()).dtype
+        return projection(output.to(projection_dtype)).to(q.dtype)
+
+    q_heads, kv_sum, key_sum = _linear_attention_terms(
+        q,
+        k,
+        v,
+        history_tokens=history_tokens,
+        chunk_id=chunk_id,
+        config=config,
+        cache=cache,
+    )
+    weight = projection.weight
+    if weight.shape != (q.shape[-1], q.shape[-1]):
+        raise ValueError(
+            "SLA linear projection must preserve the attention head dimension; "
+            f"got weight shape {tuple(weight.shape)} for head dim {q.shape[-1]}."
+        )
+    projected_kv = torch.matmul(kv_sum.to(weight.dtype), weight.transpose(0, 1))
+    numerator = torch.matmul(q_heads.to(weight.dtype), projected_kv)
+    denominator = torch.matmul(
+        q_heads, key_sum.unsqueeze(-1)
+    ).to(weight.dtype)
+    output = numerator / (denominator + config.linear_eps)
+    if projection.bias is not None:
+        output = output + projection.bias
+    return output.permute(0, 2, 1, 3).to(q.dtype)
 
 
 def sla_cag_attention(
@@ -592,7 +674,7 @@ def sla_cag_attention(
         cache_token=chunk_id,
     )
     sparse_output = _run_sparse_backend(q, k, v, block_lut, config)
-    linear_output = _linear_attention(
+    projected = _projected_linear_attention(
         q,
         k,
         v,
@@ -600,9 +682,8 @@ def sla_cag_attention(
         chunk_id=chunk_id,
         config=config,
         cache=linear_cache,
+        projection=linear_projection,
     )
-    projection_dtype = next(linear_projection.parameters()).dtype
-    projected = linear_projection(linear_output.to(projection_dtype)).to(q.dtype)
     return sparse_output + projected
 
 

@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from wan_5b.modules.sla_attention import (
     SLAAttentionConfig,
     _linear_attention,
+    _projected_linear_attention,
     build_sla_block_lut,
     resolve_chunk_sparsity,
     sla_cag_attention,
@@ -196,9 +197,10 @@ def main() -> None:
             sparse_operation, warmup=args.warmup, iterations=args.iterations
         )
 
-        linear_cache = {}
-        linear_median, linear_min = _measure(
-            lambda: projection(
+        explicit_linear_cache = {}
+
+        def explicit_linear_operation():
+            return projection(
                 _linear_attention(
                     q,
                     k,
@@ -206,12 +208,37 @@ def main() -> None:
                     history_tokens=k.shape[1] - q.shape[1],
                     chunk_id=chunk_id,
                     config=config,
-                    cache=linear_cache,
+                    cache=explicit_linear_cache,
                 )
-            ),
+            )
+
+        explicit_linear_median, explicit_linear_min = _measure(
+            explicit_linear_operation,
             warmup=args.warmup,
             iterations=args.iterations,
         )
+        folded_linear_cache = {}
+
+        def folded_linear_operation():
+            return _projected_linear_attention(
+                q,
+                k,
+                v,
+                history_tokens=k.shape[1] - q.shape[1],
+                chunk_id=chunk_id,
+                config=config,
+                cache=folded_linear_cache,
+                projection=projection,
+            )
+
+        folded_linear_median, folded_linear_min = _measure(
+            folded_linear_operation,
+            warmup=args.warmup,
+            iterations=args.iterations,
+        )
+        linear_delta = (
+            explicit_linear_operation().float() - folded_linear_operation().float()
+        ).abs()
 
         attention_cache = {}
         full_median, full_min = _measure(
@@ -235,7 +262,13 @@ def main() -> None:
             f"uncached_route_ms={route_median:.3f} uncached_route_min_ms={route_min:.3f} "
             f"cached_route_ms={cached_route_median:.3f} cached_route_min_ms={cached_route_min:.3f} "
             f"sparse_kernel_ms={kernel_median:.3f} sparse_kernel_min_ms={kernel_min:.3f} "
-            f"cached_linear_ms={linear_median:.3f} cached_linear_min_ms={linear_min:.3f} "
+            f"explicit_linear_ms={explicit_linear_median:.3f} "
+            f"explicit_linear_min_ms={explicit_linear_min:.3f} "
+            f"folded_linear_ms={folded_linear_median:.3f} "
+            f"folded_linear_min_ms={folded_linear_min:.3f} "
+            f"linear_projection_speedup={explicit_linear_median / folded_linear_median:.3f}x "
+            f"linear_max_abs={linear_delta.max().item():.6f} "
+            f"linear_mean_abs={linear_delta.mean().item():.6f} "
             f"cached_full_ms={full_median:.3f} cached_full_min_ms={full_min:.3f} "
             f"selected={selected}/{key_blocks} "
             f"effective_sparsity={1.0 - selected / key_blocks:.3f} "
