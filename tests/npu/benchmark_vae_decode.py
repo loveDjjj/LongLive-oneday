@@ -120,14 +120,23 @@ def main() -> None:
     )
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--chunk-frames", type=int, default=8)
+    parser.add_argument(
+        "--max-latent-frames",
+        type=int,
+        help="profile only the leading latent frames; defaults to the full tensor",
+    )
     parser.add_argument("--iterations", type=int, default=1)
     args = parser.parse_args()
     if args.chunk_frames <= 0 or args.iterations <= 0:
         raise ValueError("chunk-frames and iterations must be positive")
+    if args.max_latent_frames is not None and args.max_latent_frames <= 0:
+        raise ValueError("max-latent-frames must be positive")
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
     latent = _load_latent(args.latent).to(device=device, dtype=torch.bfloat16)
+    if args.max_latent_frames is not None:
+        latent = latent[:, :, : args.max_latent_frames]
     if latent.shape[2] % args.chunk_frames:
         raise ValueError(
             f"latent frames {latent.shape[2]} are not divisible by "

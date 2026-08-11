@@ -338,6 +338,18 @@ chunk pinned DtoH、CPU 拼接和归一化，分别报告 `decode_dtoh_seconds` 
 `dtoh_device_seconds`。工具同时给出 latent/pixel FPS 和峰值显存。它不包含 DiT 卡到
 VAE 卡的队列传输；后续 VAE 优化必须复用同一个 latent、chunk 大小和设备环境进行对照。
 
+使用同一个 latent 采集 VAE-only 算子 profile。默认只采集 16 个 latent 帧，覆盖首块和
+稳态块，避免对完整 32 秒视频重复插桩：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=15 RUN_ID=vae-16f-baseline \
+bash scripts/evaluation/run_vae_msprof.sh \
+  runs/benchmark/dense-dit-32s-3run/videos/rank0-1-0_regular_sp4.pt
+```
+
+重点检查 `profiling/analysis/compute_op_sum` 中 Conv3D、上采样、归一化和 TransData/格式
+转换的累计耗时。该结果用于决定是否需要算子替换或多卡 VAE，并不能替代无 profiler 延迟。
+
 ### 7.2 msprof 算子分析
 
 msprof 当前只测试 LongLive2。三个 preset：
