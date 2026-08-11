@@ -59,6 +59,8 @@ def _save(config: dict, output: Path | None) -> None:
 
 def _sparse_model_config(sparsity) -> dict | None:
     method_override = os.environ.get("LONGLIVE_SPARSE_METHOD", "").strip()
+    if method_override == "dense":
+        return None
     enabled = bool(sparsity.enabled) or bool(method_override)
     if not enabled:
         return None
@@ -74,6 +76,26 @@ def _sparse_method(sparsity) -> str:
     if method_override:
         return method_override
     return str(sparsity.method) if bool(sparsity.enabled) else "dense"
+
+
+def _sparse_backend(sparsity) -> str:
+    if _sparse_method(sparsity) == "dense":
+        return "dense"
+    return str(sparsity.options.backend)
+
+
+def _resolved_sparsity(sparsity, sparse_model_config: dict | None) -> dict:
+    output = OmegaConf.to_container(sparsity, resolve=True)
+    if sparse_model_config is None:
+        output["enabled"] = False
+        output["method"] = "dense"
+        return output
+    output["enabled"] = True
+    output["method"] = "hsa_cag"
+    output["options"] = {
+        key: value for key, value in sparse_model_config.items() if key != "enabled"
+    }
+    return output
 
 
 def resolve_msprof(args) -> dict:
@@ -92,18 +114,32 @@ def resolve_msprof(args) -> dict:
     if vae_mode == "async_dedicated" and dp_size != 1:
         raise ValueError("async_dedicated VAE requires dp_size=1")
 
-    num_prompts = int(measurement.num_prompts)
+    num_prompts_override = getattr(args, "num_prompts", None)
+    num_prompts = int(
+        measurement.num_prompts
+        if num_prompts_override is None
+        else num_prompts_override
+    )
     available_prompts = _prompt_count(str(measurement.prompts))
     if not 1 <= num_prompts <= available_prompts:
         raise ValueError(
             f"measurement.num_prompts={num_prompts} but {measurement.prompts} "
             f"contains {available_prompts} prompts"
         )
-    warmup = int(measurement.warmup_per_rank)
+    warmup_override = getattr(args, "warmup_per_rank", None)
+    warmup = int(
+        measurement.warmup_per_rank
+        if warmup_override is None
+        else warmup_override
+    )
+    if warmup < 0:
+        raise ValueError("warmup_per_rank must be non-negative")
     if warmup >= num_prompts:
         raise ValueError("warmup_per_rank must be smaller than num_prompts")
 
-    async_vae = vae_mode == "async_dedicated"
+    save_latents_only = bool(getattr(args, "save_latents_only", False))
+    async_vae = vae_mode == "async_dedicated" and not save_latents_only
+    effective_vae_mode = "disabled" if save_latents_only else vae_mode
     vae_device = f"npu:{nproc}" if async_vae else None
     output_folder = args.output_folder or "videos/msprof"
     model = config.model
@@ -126,7 +162,7 @@ def resolve_msprof(args) -> dict:
         "use_ema": False,
         "output_folder": output_folder,
         "num_samples": 1,
-        "save_latents_only": False,
+        "save_latents_only": save_latents_only,
         "save_with_index": True,
         "inference_iter": num_prompts - 1,
         "num_output_frames": frames,
@@ -157,13 +193,14 @@ def resolve_msprof(args) -> dict:
             "lora_ckpt": None,
         },
         "model_quant": False,
-        "sparsity": OmegaConf.to_container(config.sparsity, resolve=True),
+        "sparsity": _resolved_sparsity(config.sparsity, sparse_config),
         "logging": {"seed": int(measurement.seed)},
     }
     _save(resolved, args.output)
 
     pixel_frames = (frames - 1) * 4 + 1
     sparse_method = _sparse_method(config.sparsity)
+    sparse_backend = _sparse_backend(config.sparsity)
     metadata = {
         "task": "msprof",
         "engine": "longlive2",
@@ -174,14 +211,25 @@ def resolve_msprof(args) -> dict:
         "sp_size": sp_size,
         "dp_size": dp_size,
         "nproc_per_node": nproc,
-        "vae_mode": vae_mode,
+        "vae_mode": effective_vae_mode,
         "required_devices": nproc + int(async_vae),
         "num_prompts": num_prompts,
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
-        "run_tag": f"msprof-longlive2-{args.preset}-{vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}",
+        "sparsity_backend": sparse_backend,
+        "run_tag": f"msprof-longlive2-{args.preset}-{effective_vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
+    return metadata
+
+
+def resolve_benchmark(args) -> dict:
+    metadata = resolve_msprof(args)
+    metadata["task"] = "benchmark"
+    metadata["run_tag"] = metadata["run_tag"].replace(
+        "msprof-", "benchmark-", 1
+    )
+    metadata.pop("msprof", None)
     return metadata
 
 
@@ -333,18 +381,26 @@ def resolve_vbench(args) -> dict:
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=("msprof", "vbench"))
+    parser.add_argument("kind", choices=("benchmark", "msprof", "vbench"))
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--preset", required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--output-folder")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--num-prompts", type=int)
+    parser.add_argument("--warmup-per-rank", type=int)
+    parser.add_argument("--save-latents-only", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    metadata = resolve_msprof(args) if args.kind == "msprof" else resolve_vbench(args)
+    if args.kind == "benchmark":
+        metadata = resolve_benchmark(args)
+    elif args.kind == "msprof":
+        metadata = resolve_msprof(args)
+    else:
+        metadata = resolve_vbench(args)
     print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
 
 

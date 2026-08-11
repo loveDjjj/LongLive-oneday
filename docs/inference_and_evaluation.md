@@ -273,7 +273,25 @@ logs/vbench/<run-id>/
 
 `RUN_ID` 只能是目录名，不能包含 `/`。中断后使用相同 `RUN_ID` 会按 seed 目录中的 mp4 数量继续，完整 seed 会显示 `[resume] ... already complete`；评测阶段每次创建新的 session 目录。
 
-## 7. msprof 性能测试
+## 7. 性能测试
+
+首先使用 latent-only 模式分别测试 Dense 与 HSA 的 DiT 时间。该模式完全关闭 VAE，
+只需 SP4 的四张 NPU；默认预热一次并统计三次无 profiler 结果：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=dense \
+RUN_ID=hsa-dense-dit-32s bash scripts/evaluation/run_benchmark.sh 32s
+
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=hsa_cag \
+RUN_ID=hsa-sparse-dit-32s bash scripts/evaluation/run_benchmark.sh 32s
+```
+
+只有 HSA 的 DiT-only p50 明确优于 Dense，才能说明稀疏 attention 对完整 DiT 有效。
+完整异步 VAE 结果用于评估视频交付时间，不能替代这组 DiT 对照。
+
+### 7.1 msprof 性能测试
 
 msprof 当前只测试 LongLive2。三个 preset：
 

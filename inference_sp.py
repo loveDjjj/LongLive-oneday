@@ -285,6 +285,13 @@ pipeline.generator.to(device=device)
 
 pipeline.generator.model.eval().requires_grad_(False)
 
+save_latents_only = section_get(
+    config,
+    "inference",
+    "save_latents_only",
+    getattr(config, "save_latents_only", getattr(config, "save_latent_only", False)),
+    aliases=("save_latent_only", "return_latents"),
+)
 vae_device_str = getattr(config, "vae_device", None)
 use_dedicated_vae_device = bool(getattr(config, "streaming_vae", False)) and bool(vae_device_str)
 decode_on_this_rank = not use_effective_sp or sp_rank == 0
@@ -310,7 +317,11 @@ if use_dedicated_vae_device and is_npu():
             f"vae_device={requested_vae_device} is unavailable; "
             f"ASCEND_RT_VISIBLE_DEVICES exposes {torch.npu.device_count()} logical NPUs."
         )
-if use_dedicated_vae_device and decode_on_this_rank:
+if save_latents_only:
+    pipeline.vae.to(device="cpu")
+    if is_main_process:
+        print("[SP] Latent-only benchmark: VAE decode disabled")
+elif use_dedicated_vae_device and decode_on_this_rank:
     vae_device = torch.device(vae_device_str)
     dedicated_vae_device = vae_device
     pipeline.vae.to(device="cpu")
@@ -326,7 +337,7 @@ else:
     # SP produces the same gathered latent on every rank. Only the group leader
     # needs a VAE copy on the accelerator because only that rank saves output.
     pipeline.vae.to(device="cpu")
-if is_main_process and use_effective_sp:
+if is_main_process and use_effective_sp and not save_latents_only:
     print("[SP] VAE decode enabled on one leader per SP group")
 
 nfpb = getattr(config, "num_frame_per_block", 8)
@@ -356,14 +367,6 @@ if is_main_process:
     os.makedirs(config.output_folder, exist_ok=True)
 if dist.is_initialized():
     dist.barrier()
-
-save_latents_only = section_get(
-    config,
-    "inference",
-    "save_latents_only",
-    getattr(config, "save_latents_only", getattr(config, "save_latent_only", False)),
-    aliases=("save_latent_only", "return_latents"),
-)
 
 for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
     idx = batch_data["idx"].item()
