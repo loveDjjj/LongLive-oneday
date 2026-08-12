@@ -92,7 +92,8 @@ class UlyssesCausalWanSelfAttention(nn.Module):
     """Causal self-attention with Ulysses sequence/head exchange."""
 
     def __init__(self, dim, num_heads, local_attn_size=-1, sink_size=0,
-                 sparse_config=None, qk_norm=True, eps=1e-6):
+                 sparse_config=None, qk_norm=True, eps=1e-6,
+                 defer_sla_linear_init=False):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -119,9 +120,18 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
-        self.sla_linear = nn.Linear(self.head_dim, self.head_dim)
+        self.sla_linear = None
+        if not defer_sla_linear_init:
+            self.initialize_sla_linear()
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def initialize_sla_linear(self):
+        """Materialize the compensation layer missing from native Wan weights."""
+        if self.sla_linear is None:
+            self.sla_linear = nn.Linear(self.head_dim, self.head_dim)
+        nn.init.zeros_(self.sla_linear.weight)
+        nn.init.zeros_(self.sla_linear.bias)
 
     def set_sparse_config(self, sparse_config):
         from wan_5b.modules.sparse_attention import parse_sparse_config
@@ -387,11 +397,13 @@ class UlyssesCausalWanSelfAttention(nn.Module):
 class UlyssesCausalWanAttentionBlock(nn.Module):
     def __init__(self, dim, ffn_dim, num_heads, local_attn_size=-1,
                  sink_size=0, sparse_config=None, qk_norm=True,
-                 cross_attn_norm=False, eps=1e-6):
+                 cross_attn_norm=False, eps=1e-6,
+                 defer_sla_linear_init=False):
         super().__init__()
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = UlyssesCausalWanSelfAttention(
-            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm, eps
+            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm,
+            eps, defer_sla_linear_init
         )
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = MultiShotT2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
@@ -505,7 +517,8 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
                  text_dim=4096, out_dim=48, num_heads=24, num_layers=30,
                  local_attn_size=-1, sink_size=0, num_frame_per_block=1,
                  sparse_config=None,
-                 qk_norm=True, cross_attn_norm=True, eps=1e-6):
+                 qk_norm=True, cross_attn_norm=True, eps=1e-6,
+                 defer_sla_linear_init=False):
         super().__init__()
         assert model_type in ["t2v", "i2v", "ti2v"]
         self.model_type = model_type
@@ -544,6 +557,7 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
             UlyssesCausalWanAttentionBlock(
                 dim, ffn_dim, num_heads, local_attn_size, sink_size,
                 self.sparse_config, qk_norm, cross_attn_norm, eps,
+                defer_sla_linear_init,
             )
             for _ in range(num_layers)
         ])
@@ -557,9 +571,8 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         ], dim=1)
 
         self.init_weights()
-        for block in self.blocks:
-            nn.init.zeros_(block.self_attn.sla_linear.weight)
-            nn.init.zeros_(block.self_attn.sla_linear.bias)
+        if not defer_sla_linear_init:
+            self.initialize_sla_linear()
         self.gradient_checkpointing = False
         self.num_frame_per_block = num_frame_per_block
         self.t_scale = 1.0
@@ -568,6 +581,10 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.original_seq_len = None
         self.rope_temporal_offset = 0.0
         self.kv_quant_config = None
+
+    def initialize_sla_linear(self):
+        for block in self.blocks:
+            block.self_attn.initialize_sla_linear()
 
     def configure_sparse_attention(self, num_output_frames):
         from wan_5b.modules.sparse_attention import with_cag_schedule

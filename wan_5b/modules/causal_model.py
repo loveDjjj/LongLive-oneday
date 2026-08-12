@@ -388,7 +388,8 @@ class CausalWanSelfAttention(nn.Module):
                  sink_size=0,
                  sparse_config=None,
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 defer_sla_linear_init=False):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -409,9 +410,18 @@ class CausalWanSelfAttention(nn.Module):
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
-        self.sla_linear = nn.Linear(self.head_dim, self.head_dim)
+        self.sla_linear = None
+        if not defer_sla_linear_init:
+            self.initialize_sla_linear()
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def initialize_sla_linear(self):
+        """Materialize the compensation layer missing from native Wan weights."""
+        if self.sla_linear is None:
+            self.sla_linear = nn.Linear(self.head_dim, self.head_dim)
+        nn.init.zeros_(self.sla_linear.weight)
+        nn.init.zeros_(self.sla_linear.bias)
 
     def set_sparse_config(self, sparse_config):
         from .sparse_attention import parse_sparse_config
@@ -866,7 +876,8 @@ class CausalWanAttentionBlock(nn.Module):
                  sparse_config=None,
                  qk_norm=True,
                  cross_attn_norm=False,
-                 eps=1e-6):
+                 eps=1e-6,
+                 defer_sla_linear_init=False):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -879,7 +890,8 @@ class CausalWanAttentionBlock(nn.Module):
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = CausalWanSelfAttention(
-            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm, eps
+            dim, num_heads, local_attn_size, sink_size, sparse_config, qk_norm,
+            eps, defer_sla_linear_init
         )
         self.norm3 = WanLayerNorm(
             dim, eps,
@@ -1056,7 +1068,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  sparse_config=None,
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 defer_sla_linear_init=False):
         r"""
         Initialize the diffusion model backbone.
 
@@ -1141,7 +1154,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(dim, ffn_dim, num_heads,
                                   local_attn_size, sink_size, self.sparse_config,
-                                  qk_norm, cross_attn_norm, eps)
+                                  qk_norm, cross_attn_norm, eps,
+                                  defer_sla_linear_init)
             for _ in range(num_layers)
         ])
 
@@ -1160,9 +1174,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         # initialize weights
         self.init_weights()
-        for block in self.blocks:
-            nn.init.zeros_(block.self_attn.sla_linear.weight)
-            nn.init.zeros_(block.self_attn.sla_linear.bias)
+        if not defer_sla_linear_init:
+            self.initialize_sla_linear()
 
         self.gradient_checkpointing = False
 
@@ -1177,6 +1190,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.original_seq_len = None
         self.rope_temporal_offset = 0.0
         self.kv_quant_config = None
+
+    def initialize_sla_linear(self):
+        for block in self.blocks:
+            block.self_attn.initialize_sla_linear()
 
     def configure_sparse_attention(self, num_output_frames):
         from .sparse_attention import with_cag_schedule

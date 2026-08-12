@@ -4,12 +4,9 @@
 
 ## 测试目标
 
-验证 HSA+SLA+CAG 的两种训练范围：
+验证 Wan2.2 分片 checkpoint 的低内存加载修复，以及 HSA+SLA+CAG 主方案 `lora_plus_linear` 的 4 卡单步训练。此前算子前向、反向已经通过，本轮不重复运行算子测试。
 
-- 主方案 `lora_plus_linear`：Generator attention 主干 LoRA 与 30 层原始 `sla_linear` 联合训练；
-- 对照方案 `linear_only`：Generator 主干冻结，只训练相同的 60 个 `sla_linear` 张量。
-
-两次 smoke 必须使用不同 `TRAIN_RUN_NAME`，checkpoint 不可交叉恢复。
+故障根因是原生 Wan checkpoint 不包含新增的 `sla_linear`。Diffusers/Accelerate 在 meta device 上构造 5B 模型时，这些缺失参数无法被 checkpoint 物化，最终 `.to(npu)` 报 `Cannot copy out of meta tensor`。修复后只延迟创建 `sla_linear`，其余 5B 参数仍使用分片低内存加载。
 
 ## 1. 更新与主机回归
 
@@ -19,46 +16,35 @@ git pull origin feat/unified-sparse-attention
 
 conda activate /mnt/share/r50063443/conda_envs/longlive
 PYTHONPATH=. pytest -q \
+  tests/test_sparse_linear_materialization.py \
   tests/test_training_config_contract.py \
   tests/test_training_resume.py \
-  tests/test_inference_checkpoint_contract.py \
-  tests/test_linear_checkpoint_validation.py \
-  tests/test_shell_launchers.py
+  tests/test_inference_checkpoint_contract.py
 ```
 
-## 2. 训练算子完整反向
+## 2. LoRA+linear 主方案单步训练
+
+使用新 run 名保留此前失败目录，不允许覆盖 `hsa_sla_cag_lora_plus_linear_4card_smoke`。
 
 ```bash
 source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
 
-ASCEND_RT_VISIBLE_DEVICES=4 \
-python tests/npu/benchmark_sparse_attention.py \
-  --method hsa_sla_cag --backend ascend_triton --device npu:0 \
-  --latent-frames 32 --warmup 1 --iterations 1 \
-  --check-training-backward
-```
-
-预期包含 `training_backward=passed`。
-
-## 3. LoRA+linear 主方案单步训练
-
-```bash
 ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 \
 NPROC_PER_NODE=4 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
-TRAIN_RUN_NAME=hsa_sla_cag_lora_plus_linear_4card_smoke \
+TRAIN_RUN_NAME=hsa_sla_cag_lora_plus_linear_loadfix_4card_smoke \
 bash scripts/training/run_hsa_sla_cag.sh
 ```
 
-检查：
+加载阶段预期不再出现 `Cannot copy out of meta tensor`。训练完成后检查：
 
 ```bash
-run_dir=runs/training/hsa_sla_cag_lora_plus_linear_4card_smoke
+run_dir=runs/training/hsa_sla_cag_lora_plus_linear_loadfix_4card_smoke
 step_dir="${run_dir}/checkpoints/step_0000001"
 
 grep -E 'generator_train_scope|lr:|lr_linear' "${run_dir}/config.resolved.yaml"
 grep -E 'linear_grad_(tensors|with_gradient|nonzero|finite)' \
-  logs/training/hsa_sla_cag_lora_plus_linear_4card_smoke/metrics.jsonl
+  logs/training/hsa_sla_cag_lora_plus_linear_loadfix_4card_smoke/metrics.jsonl
 
 python - "${step_dir}/generator_adapter.pt" <<'PY'
 import sys, torch
@@ -70,27 +56,4 @@ print("lora_plus_linear_checkpoint=passed")
 PY
 ```
 
-预期 resolved scope 为 `lora_plus_linear`，学习率为 LoRA `2e-6`、linear `2e-5`，四个 linear 梯度计数均为 60，并输出 `lora_plus_linear_checkpoint=passed`。
-
-## 4. linear-only 对照单步训练
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 \
-NPROC_PER_NODE=4 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
-MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
-TRAIN_RUN_NAME=hsa_sla_cag_linear_only_4card_smoke \
-bash scripts/training/run_hsa_sla_cag_linear_only.sh
-```
-
-检查：
-
-```bash
-run_dir=runs/training/hsa_sla_cag_linear_only_4card_smoke
-step_dir="${run_dir}/checkpoints/step_0000001"
-
-grep 'generator_train_scope' "${run_dir}/config.resolved.yaml"
-python scripts/checkpoints/validate_linear_checkpoint.py \
-  "${step_dir}/generator_linear.pt" --expected-step 1
-```
-
-预期 resolved scope 为 `linear_only`，并输出 `linear_checkpoint=passed`。主机测试不能替代这两次真实 NPU 训练，服务器结果回填前均视为待验证。
+预期 resolved scope 为 `lora_plus_linear`，LoRA 学习率为 `2e-6`、linear 学习率为 `2e-5`，四个 linear 梯度计数均为 60，并输出 `lora_plus_linear_checkpoint=passed`。在服务器结果回填前，真实 5B 权重加载和单步训练仍视为待验证。

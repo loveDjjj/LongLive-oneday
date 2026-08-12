@@ -308,7 +308,12 @@ class WanDiffusionWrapper(torch.nn.Module):
             self.model = model_cls.from_pretrained(
                 self.model_root, local_attn_size=local_attn_size, sink_size=sink_size,
                 num_frame_per_block=num_frame_per_block,
-                sparse_config=sparse_config)
+                sparse_config=sparse_config, defer_sla_linear_init=True)
+            # Native Wan checkpoints do not contain SLA compensation weights.
+            # Create them after Diffusers leaves its low-memory meta context,
+            # then persist the normal construction contract for future saves.
+            self.model.initialize_sla_linear()
+            self.model.register_to_config(defer_sla_linear_init=False)
         else:
             self.model = WanModel.from_pretrained(self.model_root)
         self.model.eval()
