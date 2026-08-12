@@ -35,6 +35,16 @@ from wan_5b.modules.sla_attention import (
     resolve_chunk_sparsity,
     sla_cag_attention,
 )
+from wan_5b.modules.sla_attention_ascend import (
+    ascend_triton_available,
+    ascend_triton_unavailable_reason,
+)
+from wan_5b.modules.sla_attention_mindiesd import (
+    mindiesd_available,
+    mindiesd_bsa_available,
+    mindiesd_bsa_unavailable_reason,
+    mindiesd_unavailable_reason,
+)
 from wan_5b.modules.sparse_attention import calculate_chunk_sparsities
 
 
@@ -175,6 +185,14 @@ def main() -> None:
         raise ValueError(
             "--check-training-backward requires --backend ascend_triton; "
             "MindIE-SD sparse operators are forward-only"
+        )
+    if args.backend == "mindiesd" and not mindiesd_available():
+        raise RuntimeError("MindIE-SD RainFusion is unavailable: " + mindiesd_unavailable_reason())
+    if args.backend == "mindiesd_bsa" and not mindiesd_bsa_available():
+        raise RuntimeError("MindIE-SD BSA is unavailable: " + mindiesd_bsa_unavailable_reason())
+    if args.backend == "ascend_triton" and not ascend_triton_available():
+        raise RuntimeError(
+            "Ascend Triton is unavailable: " + ascend_triton_unavailable_reason()
         )
 
     device = torch.device(args.device)
