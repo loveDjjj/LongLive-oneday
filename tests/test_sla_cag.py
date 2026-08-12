@@ -9,7 +9,7 @@ from wan_5b.modules.sla_attention import (
     calculate_chunk_sparsities,
     sla_cag_attention,
 )
-from wan_5b.modules.sla_attention_ascend import _requires_autograd
+from wan_5b.modules.sla_attention_ascend import _kernel_tiles, _requires_autograd
 from wan_5b.modules.sla_attention_mindiesd import (
     _prepare_mindiesd_bsa_mask,
     _prepare_mindiesd_lut,
@@ -445,3 +445,19 @@ def test_ascend_autograd_gate_detects_projection_inputs():
     q = torch.randn(1, 2, 4, 8)
     assert not _requires_autograd(q, q, q)
     assert _requires_autograd(q.requires_grad_(), q, q)
+
+
+def test_ascend_kernel_tiles_fit_a2_a3_ub_budget():
+    assert _kernel_tiles(40, 40) == (64, 64, 1, 1)
+    assert _kernel_tiles(128, 128) == (64, 64, 2, 2)
+    assert _kernel_tiles(65, 97) == (64, 64, 2, 2)
+
+
+def test_ascend_kernel_tiles_reject_invalid_blocks():
+    for block_q, block_k in ((0, 128), (128, 0), (129, 128), (128, 129)):
+        try:
+            _kernel_tiles(block_q, block_k)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid block sizes: {block_q}, {block_k}")

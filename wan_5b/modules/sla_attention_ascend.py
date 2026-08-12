@@ -44,6 +44,23 @@ def ascend_triton_unavailable_reason() -> str:
     return "Ascend Triton is available"
 
 
+def _kernel_tiles(block_q: int, block_k: int) -> tuple[int, int, int, int]:
+    """Keep each Ascend Triton attention tile within the A2/A3 UB budget."""
+    if block_q <= 0 or block_k <= 0:
+        raise ValueError("Ascend Triton SLA block sizes must be positive.")
+    if triton is None:
+        block_q_pad = 1 << (block_q - 1).bit_length()
+        block_k_pad = 1 << (block_k - 1).bit_length()
+    else:
+        block_q_pad = triton.next_power_of_2(block_q)
+        block_k_pad = triton.next_power_of_2(block_k)
+    if block_q_pad > 128 or block_k_pad > 128:
+        raise ValueError("Ascend Triton SLA supports block sizes up to 128.")
+    tile_q = min(block_q_pad, 64)
+    tile_k = min(block_k_pad, 64)
+    return tile_q, tile_k, math.ceil(block_q / tile_q), math.ceil(block_k / tile_k)
+
+
 if triton is not None:
 
     @triton.jit
@@ -72,25 +89,31 @@ if triton is not None:
         D: tl.constexpr,
         HEADS: tl.constexpr,
         Q_BLOCKS: tl.constexpr,
+        Q_TILES: tl.constexpr,
+        Q_SUBTILES: tl.constexpr,
         SELECTED_BLOCKS: tl.constexpr,
         BLOCK_Q: tl.constexpr,
         BLOCK_K: tl.constexpr,
-        BLOCK_Q_PAD: tl.constexpr,
-        BLOCK_K_PAD: tl.constexpr,
+        TILE_Q: tl.constexpr,
+        TILE_K: tl.constexpr,
+        K_SUBTILES: tl.constexpr,
         PIPELINE_STAGES: tl.constexpr,
         STORE_LSE: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        bh = pid // Q_BLOCKS
-        query_block = pid - bh * Q_BLOCKS
+        bh = pid // Q_TILES
+        query_tile = pid - bh * Q_TILES
+        query_block = query_tile // Q_SUBTILES
+        query_subtile = query_tile - query_block * Q_SUBTILES
+        query_start = query_block * BLOCK_Q + query_subtile * TILE_Q
         batch_index = bh // HEADS
         head_index = bh - batch_index * HEADS
 
-        q_offsets = tl.arange(0, BLOCK_Q_PAD)
-        k_offsets = tl.arange(0, BLOCK_K_PAD)
+        q_offsets = tl.arange(0, TILE_Q)
+        k_offsets = tl.arange(0, TILE_K)
         d_offsets = tl.arange(0, D)
-        q_indices = query_block * BLOCK_Q + q_offsets
-        q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+        q_indices = query_start + q_offsets
+        q_mask = (q_indices < LQ) & (q_indices < (query_block + 1) * BLOCK_Q)
 
         q_base = batch_index * q_stride_b + head_index * q_stride_h
         k_base = batch_index * k_stride_b + head_index * k_stride_h
@@ -101,40 +124,44 @@ if triton is not None:
             other=0.0,
         )
 
-        row_max = tl.full([BLOCK_Q_PAD], -float("inf"), tl.float32)
-        row_sum = tl.zeros([BLOCK_Q_PAD], tl.float32)
-        accumulator = tl.zeros([BLOCK_Q_PAD, D], tl.float32)
-        lut_base = pid * SELECTED_BLOCKS
+        row_max = tl.full([TILE_Q], -float("inf"), tl.float32)
+        row_sum = tl.zeros([TILE_Q], tl.float32)
+        accumulator = tl.zeros([TILE_Q, D], tl.float32)
+        lut_base = (bh * Q_BLOCKS + query_block) * SELECTED_BLOCKS
 
         for selected_index in tl.range(
             0, SELECTED_BLOCKS, num_stages=PIPELINE_STAGES
         ):
             key_block = tl.load(lut_ptr + lut_base + selected_index)
-            k_indices = key_block * BLOCK_K + k_offsets
-            k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
-            k = tl.load(
-                k_ptr + k_base + k_indices[:, None] * k_stride_l + d_offsets[None, :],
-                mask=k_mask[:, None],
-                other=0.0,
-            )
-            scores = tl.dot(q, tl.trans(k)) * (scale * 1.4426950408889634)
-            scores = tl.where(q_mask[:, None] & k_mask[None, :], scores, -float("inf"))
+            for key_subtile in tl.static_range(0, K_SUBTILES):
+                key_offsets = key_subtile * TILE_K + k_offsets
+                k_indices = key_block * BLOCK_K + key_offsets
+                k_mask = (key_offsets < BLOCK_K) & (k_indices < LKV)
+                k = tl.load(
+                    k_ptr + k_base + k_indices[:, None] * k_stride_l + d_offsets[None, :],
+                    mask=k_mask[:, None],
+                    other=0.0,
+                )
+                scores = tl.dot(q, tl.trans(k)) * (scale * 1.4426950408889634)
+                scores = tl.where(
+                    q_mask[:, None] & k_mask[None, :], scores, -float("inf")
+                )
 
-            block_max = tl.max(scores, axis=1)
-            new_max = tl.maximum(row_max, block_max)
-            probabilities = tl.math.exp2(scores - new_max[:, None])
-            alpha = tl.math.exp2(row_max - new_max)
-            block_sum = tl.sum(probabilities, axis=1)
+                block_max = tl.max(scores, axis=1)
+                new_max = tl.maximum(row_max, block_max)
+                probabilities = tl.math.exp2(scores - new_max[:, None])
+                alpha = tl.math.exp2(row_max - new_max)
+                block_sum = tl.sum(probabilities, axis=1)
 
-            v = tl.load(
-                v_ptr + v_base + k_indices[:, None] * v_stride_l + d_offsets[None, :],
-                mask=k_mask[:, None],
-                other=0.0,
-            )
-            accumulator = accumulator * alpha[:, None]
-            accumulator += tl.dot(probabilities.to(v.dtype), v)
-            row_sum = row_sum * alpha + block_sum
-            row_max = new_max
+                v = tl.load(
+                    v_ptr + v_base + k_indices[:, None] * v_stride_l + d_offsets[None, :],
+                    mask=k_mask[:, None],
+                    other=0.0,
+                )
+                accumulator = accumulator * alpha[:, None]
+                accumulator += tl.dot(probabilities.to(v.dtype), v)
+                row_sum = row_sum * alpha + block_sum
+                row_max = new_max
 
         output = accumulator / row_sum[:, None]
         out_base = batch_index * out_stride_b + head_index * out_stride_h
@@ -180,21 +207,27 @@ if triton is not None:
         LKV: tl.constexpr,
         D: tl.constexpr,
         Q_BLOCKS: tl.constexpr,
+        Q_TILES: tl.constexpr,
+        Q_SUBTILES: tl.constexpr,
         SELECTED_BLOCKS: tl.constexpr,
         BLOCK_Q: tl.constexpr,
         BLOCK_K: tl.constexpr,
-        BLOCK_Q_PAD: tl.constexpr,
-        BLOCK_K_PAD: tl.constexpr,
+        TILE_Q: tl.constexpr,
+        TILE_K: tl.constexpr,
+        K_SUBTILES: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        bh = pid // Q_BLOCKS
-        query_block = pid - bh * Q_BLOCKS
+        bh = pid // Q_TILES
+        query_tile = pid - bh * Q_TILES
+        query_block = query_tile // Q_SUBTILES
+        query_subtile = query_tile - query_block * Q_SUBTILES
+        query_start = query_block * BLOCK_Q + query_subtile * TILE_Q
 
-        q_offsets = tl.arange(0, BLOCK_Q_PAD)
-        k_offsets = tl.arange(0, BLOCK_K_PAD)
+        q_offsets = tl.arange(0, TILE_Q)
+        k_offsets = tl.arange(0, TILE_K)
         d_offsets = tl.arange(0, D)
-        q_indices = query_block * BLOCK_Q + q_offsets
-        q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+        q_indices = query_start + q_offsets
+        q_mask = (q_indices < LQ) & (q_indices < (query_block + 1) * BLOCK_Q)
         q_base = bh * LQ * D
         kv_base = bh * LKV * D
 
@@ -208,24 +241,28 @@ if triton is not None:
         )
         lse = tl.load(lse_ptr + bh * LQ + q_indices, mask=q_mask, other=float("inf"))
         delta = tl.load(delta_ptr + bh * LQ + q_indices, mask=q_mask, other=0.0)
-        grad_q = tl.zeros([BLOCK_Q_PAD, D], tl.float32)
-        lut_base = pid * SELECTED_BLOCKS
+        grad_q = tl.zeros([TILE_Q, D], tl.float32)
+        lut_base = (bh * Q_BLOCKS + query_block) * SELECTED_BLOCKS
 
-        for selected_index in tl.range(0, SELECTED_BLOCKS, num_stages=2):
+        for selected_index in tl.range(0, SELECTED_BLOCKS, num_stages=1):
             key_block = tl.load(lut_ptr + lut_base + selected_index)
-            k_indices = key_block * BLOCK_K + k_offsets
-            k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
-            k_ptrs = k_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :]
-            v_ptrs = v_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :]
-            k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)
-            v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)
+            for key_subtile in tl.static_range(0, K_SUBTILES):
+                key_offsets = key_subtile * TILE_K + k_offsets
+                k_indices = key_block * BLOCK_K + key_offsets
+                k_mask = (key_offsets < BLOCK_K) & (k_indices < LKV)
+                k_ptrs = k_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :]
+                v_ptrs = v_ptr + kv_base + k_indices[:, None] * D + d_offsets[None, :]
+                k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)
+                v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)
 
-            scores = tl.dot(q, tl.trans(k)) * (scale * 1.4426950408889634)
-            probabilities = tl.math.exp2(scores - lse[:, None])
-            probabilities = tl.where(q_mask[:, None] & k_mask[None, :], probabilities, 0.0)
-            grad_probabilities = tl.dot(grad_out, tl.trans(v)).to(tl.float32)
-            grad_scores = probabilities * (grad_probabilities - delta[:, None])
-            grad_q += tl.dot(grad_scores.to(k.dtype), k)
+                scores = tl.dot(q, tl.trans(k)) * (scale * 1.4426950408889634)
+                probabilities = tl.math.exp2(scores - lse[:, None])
+                probabilities = tl.where(
+                    q_mask[:, None] & k_mask[None, :], probabilities, 0.0
+                )
+                grad_probabilities = tl.dot(grad_out, tl.trans(v)).to(tl.float32)
+                grad_scores = probabilities * (grad_probabilities - delta[:, None])
+                grad_q += tl.dot(grad_scores.to(k.dtype), k)
 
         tl.store(grad_q_ptr + q_linear_offsets, grad_q * scale, mask=q_mask[:, None])
 
@@ -245,21 +282,28 @@ if triton is not None:
         LKV: tl.constexpr,
         D: tl.constexpr,
         Q_BLOCKS: tl.constexpr,
+        Q_TILES: tl.constexpr,
+        Q_SUBTILES: tl.constexpr,
         K_BLOCKS: tl.constexpr,
+        K_SUBTILES: tl.constexpr,
         BLOCK_Q: tl.constexpr,
         BLOCK_K: tl.constexpr,
-        BLOCK_Q_PAD: tl.constexpr,
-        BLOCK_K_PAD: tl.constexpr,
+        TILE_Q: tl.constexpr,
+        TILE_K: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        bh = pid // K_BLOCKS
-        key_block = pid - bh * K_BLOCKS
+        key_tiles = K_BLOCKS * K_SUBTILES
+        bh = pid // key_tiles
+        key_tile = pid - bh * key_tiles
+        key_block = key_tile // K_SUBTILES
+        key_subtile = key_tile - key_block * K_SUBTILES
+        key_start = key_block * BLOCK_K + key_subtile * TILE_K
 
-        q_offsets = tl.arange(0, BLOCK_Q_PAD)
-        k_offsets = tl.arange(0, BLOCK_K_PAD)
+        q_offsets = tl.arange(0, TILE_Q)
+        k_offsets = tl.arange(0, TILE_K)
         d_offsets = tl.arange(0, D)
-        k_indices = key_block * BLOCK_K + k_offsets
-        k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
+        k_indices = key_start + k_offsets
+        k_mask = (k_indices < LKV) & (k_indices < (key_block + 1) * BLOCK_K)
         q_base = bh * LQ * D
         kv_base = bh * LKV * D
 
@@ -268,14 +312,17 @@ if triton is not None:
         v_ptrs = v_ptr + kv_linear_offsets
         k = tl.load(k_ptrs, mask=k_mask[:, None], other=0.0)
         v = tl.load(v_ptrs, mask=k_mask[:, None], other=0.0)
-        grad_k = tl.zeros([BLOCK_K_PAD, D], tl.float32)
+        grad_k = tl.zeros([TILE_K, D], tl.float32)
 
-        for query_block in tl.range(0, Q_BLOCKS, num_stages=1):
+        for query_tile in tl.range(0, Q_TILES, num_stages=1):
+            query_block = query_tile // Q_SUBTILES
+            query_subtile = query_tile - query_block * Q_SUBTILES
+            query_start = query_block * BLOCK_Q + query_subtile * TILE_Q
             selected = tl.load(
                 sparse_map_ptr + (bh * Q_BLOCKS + query_block) * K_BLOCKS + key_block
             )
-            q_indices = query_block * BLOCK_Q + q_offsets
-            q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+            q_indices = query_start + q_offsets
+            q_mask = (q_indices < LQ) & (q_indices < (query_block + 1) * BLOCK_Q)
             q_ptrs = q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
             grad_out_ptrs = (
                 grad_out_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :]
@@ -322,21 +369,28 @@ if triton is not None:
         LKV: tl.constexpr,
         D: tl.constexpr,
         Q_BLOCKS: tl.constexpr,
+        Q_TILES: tl.constexpr,
+        Q_SUBTILES: tl.constexpr,
         K_BLOCKS: tl.constexpr,
+        K_SUBTILES: tl.constexpr,
         BLOCK_Q: tl.constexpr,
         BLOCK_K: tl.constexpr,
-        BLOCK_Q_PAD: tl.constexpr,
-        BLOCK_K_PAD: tl.constexpr,
+        TILE_Q: tl.constexpr,
+        TILE_K: tl.constexpr,
     ):
         pid = tl.program_id(0)
-        bh = pid // K_BLOCKS
-        key_block = pid - bh * K_BLOCKS
+        key_tiles = K_BLOCKS * K_SUBTILES
+        bh = pid // key_tiles
+        key_tile = pid - bh * key_tiles
+        key_block = key_tile // K_SUBTILES
+        key_subtile = key_tile - key_block * K_SUBTILES
+        key_start = key_block * BLOCK_K + key_subtile * TILE_K
 
-        q_offsets = tl.arange(0, BLOCK_Q_PAD)
-        k_offsets = tl.arange(0, BLOCK_K_PAD)
+        q_offsets = tl.arange(0, TILE_Q)
+        k_offsets = tl.arange(0, TILE_K)
         d_offsets = tl.arange(0, D)
-        k_indices = key_block * BLOCK_K + k_offsets
-        k_mask = (k_offsets < BLOCK_K) & (k_indices < LKV)
+        k_indices = key_start + k_offsets
+        k_mask = (k_indices < LKV) & (k_indices < (key_block + 1) * BLOCK_K)
         q_base = bh * LQ * D
         kv_base = bh * LKV * D
 
@@ -346,14 +400,17 @@ if triton is not None:
             mask=k_mask[:, None],
             other=0.0,
         )
-        grad_v = tl.zeros([BLOCK_K_PAD, D], tl.float32)
+        grad_v = tl.zeros([TILE_K, D], tl.float32)
 
-        for query_block in tl.range(0, Q_BLOCKS, num_stages=1):
+        for query_tile in tl.range(0, Q_TILES, num_stages=1):
+            query_block = query_tile // Q_SUBTILES
+            query_subtile = query_tile - query_block * Q_SUBTILES
+            query_start = query_block * BLOCK_Q + query_subtile * TILE_Q
             selected = tl.load(
                 sparse_map_ptr + (bh * Q_BLOCKS + query_block) * K_BLOCKS + key_block
             )
-            q_indices = query_block * BLOCK_Q + q_offsets
-            q_mask = (q_offsets < BLOCK_Q) & (q_indices < LQ)
+            q_indices = query_start + q_offsets
+            q_mask = (q_indices < LQ) & (q_indices < (query_block + 1) * BLOCK_Q)
             q = tl.load(
                 q_ptr + q_base + q_indices[:, None] * D + d_offsets[None, :],
                 mask=q_mask[:, None],
@@ -405,14 +462,11 @@ class _AscendSparseAttention(torch.autograd.Function):
         q_blocks = math.ceil(lq / block_q)
         k_blocks = math.ceil(lkv / block_k)
         selected_blocks = block_lut.shape[-1]
-        block_q_pad = triton.next_power_of_2(block_q)
-        block_k_pad = triton.next_power_of_2(block_k)
-        pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
+        tile_q, tile_k, q_subtiles, k_subtiles = _kernel_tiles(block_q, block_k)
+        q_tiles = q_blocks * q_subtiles
+        pipeline_stages = 1
         if dim not in (64, 128, 256):
             raise ValueError(f"unsupported SLA head dimension: {dim}")
-        if block_q_pad > 128 or block_k_pad > 128:
-            raise ValueError("Ascend Triton SLA supports block sizes up to 128.")
-
         output = torch.empty_like(q)
         lse = torch.empty((b, heads, lq), dtype=torch.float32, device=q.device)
         sparse_map = torch.zeros(
@@ -421,7 +475,7 @@ class _AscendSparseAttention(torch.autograd.Function):
         sparse_map.scatter_(-1, lut_indices, 1)
         sparse_map = sparse_map.contiguous()
 
-        grid = (b * heads * q_blocks,)
+        grid = (b * heads * q_tiles,)
         _sla_sparse_fwd[grid](
             q,
             k,
@@ -447,11 +501,14 @@ class _AscendSparseAttention(torch.autograd.Function):
             D=dim,
             HEADS=heads,
             Q_BLOCKS=q_blocks,
+            Q_TILES=q_tiles,
+            Q_SUBTILES=q_subtiles,
             SELECTED_BLOCKS=selected_blocks,
             BLOCK_Q=block_q,
             BLOCK_K=block_k,
-            BLOCK_Q_PAD=block_q_pad,
-            BLOCK_K_PAD=block_k_pad,
+            TILE_Q=tile_q,
+            TILE_K=tile_k,
+            K_SUBTILES=k_subtiles,
             PIPELINE_STAGES=pipeline_stages,
             STORE_LSE=True,
         )
@@ -472,8 +529,8 @@ class _AscendSparseAttention(torch.autograd.Function):
         block_k = ctx.block_k
         q_blocks = math.ceil(lq / block_q)
         k_blocks = math.ceil(lkv / block_k)
-        block_q_pad = triton.next_power_of_2(block_q)
-        block_k_pad = triton.next_power_of_2(block_k)
+        tile_q, tile_k, q_subtiles, k_subtiles = _kernel_tiles(block_q, block_k)
+        q_tiles = q_blocks * q_subtiles
 
         delta = torch.empty_like(lse)
         grad_q = torch.empty_like(q)
@@ -486,7 +543,7 @@ class _AscendSparseAttention(torch.autograd.Function):
             ROWS=b * heads * lq,
             D=dim,
         )
-        _sla_sparse_bwd_dq[(b * heads * q_blocks,)](
+        _sla_sparse_bwd_dq[(b * heads * q_tiles,)](
             q,
             k,
             v,
@@ -500,13 +557,16 @@ class _AscendSparseAttention(torch.autograd.Function):
             LKV=lkv,
             D=dim,
             Q_BLOCKS=q_blocks,
+            Q_TILES=q_tiles,
+            Q_SUBTILES=q_subtiles,
             SELECTED_BLOCKS=block_lut.shape[-1],
             BLOCK_Q=block_q,
             BLOCK_K=block_k,
-            BLOCK_Q_PAD=block_q_pad,
-            BLOCK_K_PAD=block_k_pad,
+            TILE_Q=tile_q,
+            TILE_K=tile_k,
+            K_SUBTILES=k_subtiles,
         )
-        kv_grid = (b * heads * k_blocks,)
+        kv_grid = (b * heads * k_blocks * k_subtiles,)
         _sla_sparse_bwd_dk[kv_grid](
             q,
             k,
@@ -521,11 +581,14 @@ class _AscendSparseAttention(torch.autograd.Function):
             LKV=lkv,
             D=dim,
             Q_BLOCKS=q_blocks,
+            Q_TILES=q_tiles,
+            Q_SUBTILES=q_subtiles,
             K_BLOCKS=k_blocks,
+            K_SUBTILES=k_subtiles,
             BLOCK_Q=block_q,
             BLOCK_K=block_k,
-            BLOCK_Q_PAD=block_q_pad,
-            BLOCK_K_PAD=block_k_pad,
+            TILE_Q=tile_q,
+            TILE_K=tile_k,
         )
         _sla_sparse_bwd_dv[kv_grid](
             q,
@@ -539,11 +602,14 @@ class _AscendSparseAttention(torch.autograd.Function):
             LKV=lkv,
             D=dim,
             Q_BLOCKS=q_blocks,
+            Q_TILES=q_tiles,
+            Q_SUBTILES=q_subtiles,
             K_BLOCKS=k_blocks,
+            K_SUBTILES=k_subtiles,
             BLOCK_Q=block_q,
             BLOCK_K=block_k,
-            BLOCK_Q_PAD=block_q_pad,
-            BLOCK_K_PAD=block_k_pad,
+            TILE_Q=tile_q,
+            TILE_K=tile_k,
         )
         return grad_q, grad_k, grad_v, None, None, None, None
 
@@ -570,12 +636,12 @@ def _ascend_triton_sparse_attention_forward(
     b, heads, lq, dim = q.shape
     lkv = k.shape[2]
     q_blocks = math.ceil(lq / block_q)
-    block_q_pad = triton.next_power_of_2(block_q)
-    block_k_pad = triton.next_power_of_2(block_k)
-    pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
+    tile_q, tile_k, q_subtiles, k_subtiles = _kernel_tiles(block_q, block_k)
+    q_tiles = q_blocks * q_subtiles
+    pipeline_stages = 1
     output = torch.empty_like(q)
 
-    _sla_sparse_fwd[(b * heads * q_blocks,)](
+    _sla_sparse_fwd[(b * heads * q_tiles,)](
         q,
         k,
         v,
@@ -600,11 +666,14 @@ def _ascend_triton_sparse_attention_forward(
         D=dim,
         HEADS=heads,
         Q_BLOCKS=q_blocks,
+        Q_TILES=q_tiles,
+        Q_SUBTILES=q_subtiles,
         SELECTED_BLOCKS=block_lut.shape[-1],
         BLOCK_Q=block_q,
         BLOCK_K=block_k,
-        BLOCK_Q_PAD=block_q_pad,
-        BLOCK_K_PAD=block_k_pad,
+        TILE_Q=tile_q,
+        TILE_K=tile_k,
+        K_SUBTILES=k_subtiles,
         PIPELINE_STAGES=pipeline_stages,
         STORE_LSE=False,
     )
@@ -651,17 +720,14 @@ def ascend_triton_sparse_attention_blhd(
         raise ValueError("block_lut contains an out-of-range key block index.")
 
     block_lut = block_lut.contiguous().to(torch.int32)
-    block_q_pad = triton.next_power_of_2(block_q)
-    block_k_pad = triton.next_power_of_2(block_k)
-    pipeline_stages = 1 if max(block_q_pad, block_k_pad) >= 128 else 2
+    tile_q, tile_k, q_subtiles, k_subtiles = _kernel_tiles(block_q, block_k)
+    q_tiles = q_blocks * q_subtiles
+    pipeline_stages = 1
     if dim not in (64, 128, 256):
         raise ValueError(f"unsupported SLA head dimension: {dim}")
-    if block_q_pad > 128 or block_k_pad > 128:
-        raise ValueError("Ascend Triton SLA supports block sizes up to 128.")
-
     output = torch.empty_like(q)
     attention_scale = float(scale) if scale is not None else dim ** -0.5
-    _sla_sparse_fwd[(b * heads * q_blocks,)](
+    _sla_sparse_fwd[(b * heads * q_tiles,)](
         q,
         k,
         v,
@@ -686,11 +752,14 @@ def ascend_triton_sparse_attention_blhd(
         D=dim,
         HEADS=heads,
         Q_BLOCKS=q_blocks,
+        Q_TILES=q_tiles,
+        Q_SUBTILES=q_subtiles,
         SELECTED_BLOCKS=block_lut.shape[-1],
         BLOCK_Q=block_q,
         BLOCK_K=block_k,
-        BLOCK_Q_PAD=block_q_pad,
-        BLOCK_K_PAD=block_k_pad,
+        TILE_Q=tile_q,
+        TILE_K=tile_k,
+        K_SUBTILES=k_subtiles,
         PIPELINE_STAGES=pipeline_stages,
         STORE_LSE=False,
     )
