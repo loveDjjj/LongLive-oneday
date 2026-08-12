@@ -25,6 +25,7 @@ from utils.training_state import (
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
     restore_rng_state,
+    should_save_final_checkpoint,
     validate_sparse_checkpoint_method,
 )
 from utils.device import current_device, empty_cache
@@ -1049,7 +1050,17 @@ class Trainer:
 
                 if self.vis_interval > 0 and (self.step % self.vis_interval == 0):
                     self._visualize()
-                
+
+            if should_save_final_checkpoint(
+                start_step=start_step,
+                final_step=self.step,
+                save_interval=int(self.config.log_iters),
+                no_save=bool(self.config.no_save),
+            ):
+                empty_cache()
+                self.save()
+                empty_cache()
+
 
         except Exception as e:
             print(f"[ERROR] [Rank {dist.get_rank()}] Training crashed at step {self.step} with exception: {e}")

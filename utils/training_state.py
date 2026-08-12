@@ -89,6 +89,15 @@ def find_latest_training_checkpoint(output_dir):
     return checkpoints[-1][3] if checkpoints else None
 
 
+def should_save_final_checkpoint(*, start_step, final_step, save_interval, no_save):
+    """Return whether a completed run needs a checkpoint outside its cadence."""
+    return (
+        not no_save
+        and final_step > start_step
+        and final_step % save_interval != 0
+    )
+
+
 def resume_samples_per_rank(
     checkpoint,
     *,

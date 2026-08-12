@@ -36,6 +36,7 @@ export GENERATOR_CKPT="${GENERATOR_CKPT:-/mnt/share/weight/LongLive/checkpoints/
 export TRAIN_PROMPTS="${TRAIN_PROMPTS:-data/train/vidprom_filtered_extended/prompts_train.txt}"
 export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_${SPARSE_METHOD}_npu_bf16}"
 export DISABLE_WANDB="${DISABLE_WANDB:-1}"
+export VALIDATE_LINEAR_CHECKPOINT="${VALIDATE_LINEAR_CHECKPOINT:-1}"
 
 cd "${LONGLIVE_ROOT}"
 
@@ -62,6 +63,10 @@ if (( NNODES <= 0 || NODE_RANK < 0 || NODE_RANK >= NNODES )); then
 fi
 if (( MAX_ITERS <= 0 || SAVE_INTERVAL <= 0 || VIS_INTERVAL < 0 || MAX_CHECKPOINTS <= 0 )); then
     echo "[error] require MAX_ITERS, SAVE_INTERVAL, MAX_CHECKPOINTS > 0 and VIS_INTERVAL >= 0" >&2
+    exit 2
+fi
+if [[ ! "${VALIDATE_LINEAR_CHECKPOINT}" =~ ^[01]$ ]]; then
+    echo "[error] VALIDATE_LINEAR_CHECKPOINT must be 0 or 1" >&2
     exit 2
 fi
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
@@ -228,3 +233,17 @@ fi
     --metrics-path "${METRICS_LOG}" \
     --wandb-save-dir "${WANDB_DIR}" \
     "${extra_args[@]}"
+
+if [[ "${SPARSE_METHOD}" == "hsa_sla_cag" && "${VALIDATE_LINEAR_CHECKPOINT}" == "1" ]] \
+    && (( NODE_RANK == 0 )); then
+    FINAL_CHECKPOINT_DIR="${ARTIFACT_DIR}/checkpoints/step_$(printf '%07d' "${MAX_ITERS}")"
+    echo "[validate] hybrid final checkpoint=${FINAL_CHECKPOINT_DIR}"
+    "${PYTHON}" scripts/checkpoints/validate_linear_checkpoint.py \
+        "${FINAL_CHECKPOINT_DIR}/train_state.pt" \
+        --expected-step "${MAX_ITERS}" \
+        --require-resume-state \
+        --json-output "${FINAL_CHECKPOINT_DIR}/validation.json"
+    "${PYTHON}" scripts/checkpoints/validate_linear_checkpoint.py \
+        "${FINAL_CHECKPOINT_DIR}/generator_linear.pt" \
+        --expected-step "${MAX_ITERS}"
+fi

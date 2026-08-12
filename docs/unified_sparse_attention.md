@@ -202,6 +202,11 @@ under `generator_linear` and can be exported with `merge_lora.py` using
 
 Validate the compact linear sidecar before loading the full 5B model:
 
+The hybrid launcher performs this validation automatically on rank 0 after a
+successful run and writes `validation.json` beside the final checkpoint. It
+also saves the final step when it falls outside `SAVE_INTERVAL`. Set
+`VALIDATE_LINEAR_CHECKPOINT=0` only when debugging the validator itself.
+
 ```bash
 python scripts/checkpoints/validate_linear_checkpoint.py \
   /path/to/checkpoints/step_0001000/generator_linear.pt \

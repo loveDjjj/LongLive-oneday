@@ -16,6 +16,7 @@ from utils.training_state import (
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
     restore_rng_state,
+    should_save_final_checkpoint,
     validate_sparse_checkpoint_method,
 )
 
@@ -182,6 +183,23 @@ class CheckpointDiscoveryTest(unittest.TestCase):
             self.assertEqual([item[0] for item in checkpoints], [10, 20])
             self.assertEqual(checkpoints[0][3], str(current))
             self.assertEqual(find_latest_training_checkpoint(root), str(later))
+
+
+class FinalCheckpointTest(unittest.TestCase):
+    def test_saves_final_step_when_it_is_outside_periodic_cadence(self):
+        self.assertTrue(
+            should_save_final_checkpoint(
+                start_step=0, final_step=1001, save_interval=10, no_save=False
+            )
+        )
+
+    def test_does_not_duplicate_periodic_or_unchanged_checkpoint(self):
+        for values in (
+            dict(start_step=0, final_step=1000, save_interval=10, no_save=False),
+            dict(start_step=1000, final_step=1000, save_interval=10, no_save=False),
+            dict(start_step=0, final_step=1001, save_interval=10, no_save=True),
+        ):
+            self.assertFalse(should_save_final_checkpoint(**values))
 
 
 class SparseCheckpointContractTest(unittest.TestCase):

@@ -298,7 +298,11 @@ checkpoint 会被拒绝，防止混用路由、投影和 optimizer 状态。稠�
 
 Hybrid 每次保存完整 `train_state.pt` 时，还会原子写入同目录下的小型
 `generator_linear.pt`。前者包含 critic、optimizer、RNG 和数据游标，用于恢复训练；
-后者只包含 30 层线性投影及必要元数据，用于快速验收和导出。训练后先执行：
+后者只包含 30 层线性投影及必要元数据，用于快速验收和导出。训练正常结束时，
+即使 `MAX_ITERS` 不能被 `SAVE_INTERVAL` 整除，也会补存最终 step。Hybrid launcher
+默认在 rank 0 验收完整恢复包和 sidecar，并将结果写入最终 checkpoint 目录的
+`validation.json`；全零、非有限值、层数或元数据错误会令 launcher 返回失败。仅在
+排查验收器本身时设置 `VALIDATE_LINEAR_CHECKPOINT=0`。也可手工执行：
 
 ```bash
 python scripts/checkpoints/validate_linear_checkpoint.py \
