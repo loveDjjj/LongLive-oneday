@@ -43,7 +43,7 @@ class TrainingConfigContractTest(unittest.TestCase):
 
                 validated = validate_sla_cag_training_config(config)
 
-                expected_sp = 8 if method == "hsa_sla_cag" else 4
+                expected_sp = 8 if method in {"sla_cag", "hsa_sla_cag"} else 4
                 self.assertEqual(validated.sequence_parallel_size, expected_sp)
                 self.assertEqual(validated.sampling_steps, 4)
                 self.assertEqual(validated.image_or_video_shape, [1, 32, 48, 44, 80])
@@ -51,11 +51,12 @@ class TrainingConfigContractTest(unittest.TestCase):
                 expected_scope = "lora_plus_linear" if method == "hsa_sla_cag" else "lora"
                 self.assertEqual(validated.generator_train_scope, expected_scope)
 
-                if method == "hsa_sla_cag":
+                if method in {"sla_cag", "hsa_sla_cag"}:
                     self.assertEqual(validated.gradient_accumulation_steps, 4)
                     self.assertEqual(validated.log_iters, 20)
                     self.assertEqual(validated.max_checkpoints, 5)
                     self.assertEqual(validated.max_iters, 1000)
+                    self.assertEqual(validated.dfake_gen_update_ratio, 1)
 
     def test_hybrid_linear_only_override_remains_supported(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -3,7 +3,8 @@
 
 infra:
   # SP 组内多卡共同计算一个视频样本；有效数据并行数为 world_size / sequence_parallel_size。
-  sequence_parallel_size: 4
+  # 16 卡正式训练使用 SP8 x DP2；每个 SP rank 处理 3 个 attention head。
+  sequence_parallel_size: 8
   sharding_strategy: hybrid_full
   mixed_precision: true
   gradient_checkpointing: true
@@ -91,18 +92,18 @@ training:
   # 每个 DP 副本一次处理一个提示词；SP rank 不计入 batch。
   batch_size: 1
   # 有效 batch = DP 数量 x batch_size x gradient_accumulation_steps。
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 4
   max_grad_norm_generator: 10.0
   max_grad_norm_critic: 10.0
   # LoRA 模式不维护 EMA。
   ema_weight: 0.0
-  # 每 10 步保存恢复状态，最多保留最近 20 份。
-  log_iters: 10
-  max_checkpoints: 20
-  max_iters: 2000
+  # 每 20 次 optimizer update 保存一次，只保留最近 5 个完整 checkpoint。
+  log_iters: 20
+  max_checkpoints: 5
+  max_iters: 1000
   gc_interval: 50
-  # 判别器每步更新，生成器每 5 步更新一次。
-  dfake_gen_update_ratio: 5
+  # 与混合主方案对齐：Generator 与 Critic 每个 optimizer step 都更新。
+  dfake_gen_update_ratio: 1
   num_training_frames: 32
   slice_last_frames: 32
 

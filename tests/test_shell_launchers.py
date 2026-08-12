@@ -49,6 +49,16 @@ def test_hybrid_launchers_expose_main_and_linear_only_scopes():
     assert 'MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"' in linear_only
 
 
+def test_sla_launcher_exposes_16_card_training_defaults():
+    script = _read("scripts/training/run_sla_cag.sh")
+    assert "SPARSE_METHOD=sla_cag" in script
+    assert 'SP_SIZE="${SP_SIZE:-8}"' in script
+    assert 'GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-4}"' in script
+    assert 'MAX_ITERS="${MAX_ITERS:-1000}"' in script
+    assert 'SAVE_INTERVAL="${SAVE_INTERVAL:-20}"' in script
+    assert 'MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"' in script
+
+
 def test_merge_script_exposes_scope_override_for_linear_only_export():
     script = (ROOT / "scripts/checkpoints/merge_lora.py").read_text(encoding="utf-8")
     assert '"--generator_train_scope"' in script
