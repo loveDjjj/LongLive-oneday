@@ -35,10 +35,18 @@ def test_hybrid_launchers_expose_main_and_linear_only_scopes():
     linear_only = _read("scripts/training/run_hsa_sla_cag_linear_only.sh")
     assert "SPARSE_METHOD=hsa_sla_cag" in main
     assert "GENERATOR_TRAIN_SCOPE" not in main
+    assert 'SP_SIZE="${SP_SIZE:-8}"' in main
+    assert 'GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-4}"' in main
     assert 'MAX_ITERS="${MAX_ITERS:-1000}"' in main
+    assert 'SAVE_INTERVAL="${SAVE_INTERVAL:-20}"' in main
+    assert 'MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"' in main
     assert "SPARSE_METHOD=hsa_sla_cag" in linear_only
     assert "GENERATOR_TRAIN_SCOPE=linear_only" in linear_only
+    assert 'SP_SIZE="${SP_SIZE:-8}"' in linear_only
+    assert 'GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-4}"' in linear_only
     assert 'MAX_ITERS="${MAX_ITERS:-1000}"' in linear_only
+    assert 'SAVE_INTERVAL="${SAVE_INTERVAL:-20}"' in linear_only
+    assert 'MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"' in linear_only
 
 
 def test_merge_script_exposes_scope_override_for_linear_only_export():

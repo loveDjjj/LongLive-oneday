@@ -91,7 +91,7 @@ DP = world_size / SP_SIZE
 有效 batch = DP x batch_size x GRADIENT_ACCUMULATION_STEPS
 ```
 
-当前 `batch_size=1`。模型有 24 个 attention head，每个 chunk 有 8 个 latent 帧，因此合法的 `SP_SIZE` 为 `1/2/4/8`。例如 12 卡使用 SP4 x DP3、梯度累积 16 时，有效 batch 为 48。
+当前 `batch_size=1`。模型有 24 个 attention head，每个 chunk 有 8 个 latent 帧，因此合法的 `SP_SIZE` 为 `1/2/4/8`。HSA+SLA+CAG 的 16 卡正式配置使用 SP8 x DP2、梯度累积 4，有效 batch 为 8。
 
 一个 step 表示一次 optimizer 更新，不是一条提示词或一个时间块。增加 SP 主要改变单样本分片和通信，增加 DP 才直接提高样本吞吐。跨节点 SP 会增加 HCCL 开销，推荐让每个 SP 组位于单一节点内。
 
@@ -131,12 +131,12 @@ configs/train/hsa_sla_cag.yaml
 | `NPROC_PER_NODE` | 每节点 worker 数 | 16 |
 | `NNODES` / `NODE_RANK` | 节点数 / 当前节点编号 | 1 / 0 |
 | `MASTER_ADDR` | 多节点 rendezvous 所在的 rank 0 地址；单节点忽略 | `127.0.0.1` |
-| `SP_SIZE` | Ulysses SP 大小 | 4 |
-| `GRADIENT_ACCUMULATION_STEPS` | 梯度累积次数 | 16 |
+| `SP_SIZE` | Ulysses SP 大小；混合方法入口默认 8 | 4 |
+| `GRADIENT_ACCUMULATION_STEPS` | 梯度累积次数；混合方法入口默认 4 | 16 |
 | `MAX_ITERS` | 训练结束目标 step | 2000 |
-| `SAVE_INTERVAL` | checkpoint 间隔 | 10 |
+| `SAVE_INTERVAL` | checkpoint 间隔；混合方法入口默认 20 | 10 |
 | `VIS_INTERVAL` | 训练内验证间隔，0 关闭 | 100 |
-| `MAX_CHECKPOINTS` | 最多保留 checkpoint 数 | 20 |
+| `MAX_CHECKPOINTS` | 最多保留 checkpoint 数；混合方法入口默认 5 | 20 |
 | `SPARSE_BACKEND` | 训练稀疏后端 | `ascend_triton` |
 | `GENERATOR_TRAIN_SCOPE` | Generator 范围；通常由具体入口设置 | 配置文件 |
 | `GENERATOR_LR` / `LINEAR_LR` | 主干 LoRA / 原始补偿层学习率 | 配置文件 |
@@ -167,13 +167,13 @@ TRAIN_RUN_NAME=hsa_sla_cag_linear_only_12card_smoke \
 bash scripts/training/run_hsa_sla_cag_linear_only.sh
 ```
 
-12 卡、1000 step 混合训练：
+16 卡、1000 step 混合正式训练：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=16 \
-MAX_ITERS=1000 SAVE_INTERVAL=10 MAX_CHECKPOINTS=20 VIS_INTERVAL=100 \
-TRAIN_RUN_NAME=hsa_sla_cag_12card_1k \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+NPROC_PER_NODE=16 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
+MAX_ITERS=1000 SAVE_INTERVAL=20 MAX_CHECKPOINTS=5 VIS_INTERVAL=100 \
+TRAIN_RUN_NAME=hsa_sla_cag_16card_1k \
 bash scripts/training/run_hsa_sla_cag.sh
 ```
 
@@ -237,12 +237,12 @@ linear_grad_l2_max
 
 ```bash
 python scripts/checkpoints/validate_linear_checkpoint.py \
-  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/train_state.pt \
+  runs/training/hsa_sla_cag_16card_1k/checkpoints/step_0001000/train_state.pt \
   --expected-step 1000 --require-resume-state \
-  --json-output runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/validation.json
+  --json-output runs/training/hsa_sla_cag_16card_1k/checkpoints/step_0001000/validation.json
 
 python scripts/checkpoints/validate_linear_checkpoint.py \
-  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_adapter.pt \
+  runs/training/hsa_sla_cag_16card_1k/checkpoints/step_0001000/generator_adapter.pt \
   --expected-step 1000
 ```
 
@@ -267,7 +267,7 @@ python scripts/checkpoints/merge_lora.py \
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/hsa_sla_cag.yaml \
   --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
-  --lora_ckpt runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_adapter.pt \
+  --lora_ckpt runs/training/hsa_sla_cag_16card_1k/checkpoints/step_0001000/generator_adapter.pt \
   --output_path runs/merged/longlive2_hsa_sla_cag_lora_plus_linear_1k.pt \
   --device npu:0
 ```

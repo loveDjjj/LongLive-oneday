@@ -2,7 +2,8 @@
 # Generator 主干使用 LoRA，同时直接训练 30 层 sla_linear；Fake Critic 使用 LoRA。
 infra:
   # SP 组共同计算一个视频；DP 数为 world_size / sequence_parallel_size。
-  sequence_parallel_size: 4
+  # 16 卡正式训练使用 SP8 x DP2；每个 SP rank 处理 3 个 attention head。
+  sequence_parallel_size: 8
   # 三个 5B 网络使用 FSDP hybrid full 分片，BF16 计算并开启激活重计算。
   sharding_strategy: hybrid_full
   mixed_precision: true
@@ -93,12 +94,13 @@ training:
   beta2_critic: 0.999
   batch_size: 1
   # 有效 batch = DP 数 x batch_size x gradient_accumulation_steps。
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 4
   max_grad_norm_generator: 10.0
   max_grad_norm_critic: 10.0
   ema_weight: 0.0
-  log_iters: 10
-  max_checkpoints: 20
+  # 每 20 次 optimizer update 保存一次，只保留最近 5 个完整 checkpoint。
+  log_iters: 20
+  max_checkpoints: 5
   max_iters: 1000
   gc_interval: 50
   # 线性补偿与 Critic 每个 optimizer step 都更新。
