@@ -4,7 +4,7 @@
 
 ## 测试目标
 
-1. 在 16 卡 `SP8 × DP2` 下验证 `VIS_INTERVAL=1`：step 1 生成验证 latent 后，训练必须继续并完成 step 2。
+1. 在 16 卡 `SP8 × DP2` 下验证 SLA 的 PEFT/FSDP activation-checkpoint 重计算修复，并以 `VIS_INTERVAL=1` 确认 step 1 验证后能继续完成 step 2。
 2. 正式运行 `HSA+SLA+CAG` 与 `SLA+CAG` 各 200 次 optimizer update。
 
 两种正式训练均保持梯度累积 4、有效 batch 8、每 20 step 保存、最多保留 5 个 checkpoint，并在 step 100 和 200 保存验证 latent。
@@ -21,33 +21,32 @@ source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
 conda activate /mnt/share/r50063443/conda_envs/longlive
 ```
 
-使用混合主方案运行 2 step。累积保持 4，以覆盖正式训练相同的 optimizer 路径：
+使用 SLA+CAG 运行 2 step。累积保持 4，以覆盖正式训练相同的 PEFT/FSDP backward 和 optimizer 路径：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
 NPROC_PER_NODE=16 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
 MAX_ITERS=2 SAVE_INTERVAL=1 MAX_CHECKPOINTS=2 VIS_INTERVAL=1 \
-TRAIN_RUN_NAME=hsa_sla_cag_vis_interval_1_16card_smoke \
-bash scripts/training/run_hsa_sla_cag.sh
+TRAIN_RUN_NAME=sla_cag_fsdp_recompute_vis_interval_1_16card_smoke \
+bash scripts/training/run_sla_cag.sh
 ```
 
 训练结束后执行：
 
 ```bash
-run_dir=runs/training/hsa_sla_cag_vis_interval_1_16card_smoke
-log_file=logs/training/hsa_sla_cag_vis_interval_1_16card_smoke/metrics.jsonl
+run_dir=runs/training/sla_cag_fsdp_recompute_vis_interval_1_16card_smoke
+log_file=logs/training/sla_cag_fsdp_recompute_vis_interval_1_16card_smoke/metrics.jsonl
 
 grep -E 'sequence_parallel_size|gradient_accumulation_steps|max_iters|log_iters|max_checkpoints|generator_train_scope' \
   "${run_dir}/config.resolved.yaml"
 test -f "${run_dir}/checkpoints/step_0000002/train_state.pt"
-test -f "${run_dir}/checkpoints/step_0000002/generator_adapter.pt"
 test "$(find "${run_dir}/vis/step_0000001" -name 'latents_*.pt' | wc -l)" -eq 16
 test "$(find "${run_dir}/vis/step_0000002" -name 'latents_*.pt' | wc -l)" -eq 16
 test "$(wc -l < "${log_file}")" -eq 2
 tail -n 2 "${log_file}"
 ```
 
-预期 resolved 配置包含 `SP8`、累积 4、`max_iters: 2`、`generator_train_scope: lora_plus_linear`。两个验证目录应各有 16 个 latent；metrics 必须同时出现 step 1 和 step 2，loss、梯度范数均有限。这证明 step 1 的同步验证、缓存清理和 barrier 返回后训练能够继续。该真实 NPU 准入在结果回填前视为待验证。
+预期 resolved 配置包含 `SP8`、累积 4、`max_iters: 2`、`generator_train_scope: lora`。日志不得再出现 `_projected_linear_attention` 的 `StopIteration`。两个验证目录应各有 16 个 latent；metrics 必须同时出现 step 1 和 step 2，loss、梯度范数均有限。这同时证明 SLA backward 修复有效，且 step 1 的同步验证、缓存清理和 barrier 返回后训练能够继续。该真实 NPU 准入在结果回填前视为待验证。
 
 ## 2. HSA+SLA+CAG 正式 200 step
 

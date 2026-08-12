@@ -594,8 +594,10 @@ def _projected_linear_attention(
             config=config,
             cache=cache,
         )
-        projection_dtype = next(projection.parameters()).dtype
-        return projection(output.to(projection_dtype)).to(q.dtype)
+        # PEFT/FSDP wrappers may temporarily expose no registered parameters
+        # during activation-checkpoint recomputation. The wrapper owns its
+        # input dtype conversion, so do not infer dtype through parameters().
+        return projection(output).to(q.dtype)
 
     q_heads, kv_sum, key_sum = _linear_attention_terms(
         q,

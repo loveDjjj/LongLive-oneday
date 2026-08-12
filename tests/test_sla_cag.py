@@ -231,6 +231,46 @@ def test_folded_linear_projection_matches_explicit_projection_and_gradients():
     )
 
 
+def test_parameterless_projection_wrapper_survives_checkpoint_recomputation():
+    """模拟 FSDP 重计算时 PEFT wrapper 暂时不暴露 registered parameter。"""
+
+    class ParameterlessProjection(torch.nn.Module):
+        def __init__(self, linear):
+            super().__init__()
+            object.__setattr__(self, "linear", linear)
+
+        def forward(self, value):
+            return self.linear(value)
+
+    torch.manual_seed(34)
+    q = torch.randn(1, 4, 2, 4, requires_grad=True)
+    k = torch.randn(1, 12, 2, 4, requires_grad=True)
+    v = torch.randn(1, 12, 2, 4, requires_grad=True)
+    linear = torch.nn.Linear(4, 4)
+    projection = ParameterlessProjection(linear)
+    assert list(projection.parameters()) == []
+
+    def run(query, key, value):
+        return _projected_linear_attention(
+            query,
+            key,
+            value,
+            history_tokens=8,
+            chunk_id=1,
+            config=_config(feature_map="elu", linear_cache=False),
+            cache=None,
+            projection=projection,
+        )
+
+    output = torch.utils.checkpoint.checkpoint(
+        run, q, k, v, use_reentrant=False
+    )
+    output.square().mean().backward()
+
+    assert all(tensor.grad is not None for tensor in (q, k, v))
+    assert linear.weight.grad is not None and linear.weight.grad.abs().sum() > 0
+
+
 def test_linear_attention_matches_upstream_sla_formula():
     torch.manual_seed(33)
     q = torch.randn(1, 4, 2, 4)
