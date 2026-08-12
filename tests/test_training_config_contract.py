@@ -55,7 +55,7 @@ class TrainingConfigContractTest(unittest.TestCase):
                     self.assertEqual(validated.gradient_accumulation_steps, 4)
                     self.assertEqual(validated.log_iters, 20)
                     self.assertEqual(validated.max_checkpoints, 5)
-                    self.assertEqual(validated.max_iters, 1000)
+                    self.assertEqual(validated.max_iters, 200)
                     self.assertEqual(validated.dfake_gen_update_ratio, 1)
 
     def test_hybrid_linear_only_override_remains_supported(self):

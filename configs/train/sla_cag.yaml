@@ -100,7 +100,8 @@ training:
   # 每 20 次 optimizer update 保存一次，只保留最近 5 个完整 checkpoint。
   log_iters: 20
   max_checkpoints: 5
-  max_iters: 1000
+  # 正式微调执行 200 次 optimizer update；不要与上面的扩散时间步 1000 混淆。
+  max_iters: 200
   gc_interval: 50
   # 与混合主方案对齐：Generator 与 Critic 每个 optimizer step 都更新。
   dfake_gen_update_ratio: 1
