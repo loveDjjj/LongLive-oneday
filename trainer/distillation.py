@@ -19,6 +19,7 @@ from utils.misc import (
 )
 from utils.training_state import (
     capture_rng_state,
+    build_generator_linear_sidecar,
     find_latest_training_checkpoint,
     list_training_checkpoints,
     resume_samples_per_rank,
@@ -794,6 +795,15 @@ class Trainer:
             torch.save(state_dict, temporary_file)
             os.replace(temporary_file, checkpoint_file)
             print("Model saved to", checkpoint_file)
+            if self.generator_train_scope == "linear_only":
+                linear_checkpoint_file = os.path.join(
+                    checkpoint_dir, "generator_linear.pt"
+                )
+                linear_temporary_file = linear_checkpoint_file + ".tmp"
+                linear_state = build_generator_linear_sidecar(state_dict)
+                torch.save(linear_state, linear_temporary_file)
+                os.replace(linear_temporary_file, linear_checkpoint_file)
+                print("Generator linear state saved to", linear_checkpoint_file)
             
             # Cleanup old checkpoints if max_checkpoints is set
             max_checkpoints = getattr(self.config, "max_checkpoints", 0)

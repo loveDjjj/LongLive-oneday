@@ -47,9 +47,12 @@ def _torch_load(path: str):
 def clean_fsdp_state_dict_keys(
     state_dict: Mapping[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Remove wrapper prefixes found in historical FSDP checkpoints."""
+    """Remove FSDP/checkpoint/compile wrapper prefixes from state dict keys."""
     return {
-        str(key).replace("_fsdp_wrapped_module.", ""): value
+        str(key)
+        .replace("_fsdp_wrapped_module.", "")
+        .replace("_checkpoint_wrapped_module.", "")
+        .replace("_orig_mod.", ""): value
         for key, value in state_dict.items()
     }
 

@@ -33,7 +33,10 @@ def test_extract_generator_rejects_training_metadata_as_state_dict():
 
 
 def test_clean_fsdp_state_dict_keys():
-    state = {"_fsdp_wrapped_module.model.weight": torch.ones(1)}
+    state = {
+        "_fsdp_wrapped_module._checkpoint_wrapped_module._orig_mod.model.weight":
+            torch.ones(1)
+    }
     assert list(clean_fsdp_state_dict_keys(state)) == ["model.weight"]
 
 

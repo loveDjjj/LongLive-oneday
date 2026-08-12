@@ -267,7 +267,8 @@ logs/training/<run-name>/
 
 ## 9. Checkpoint 格式和恢复
 
-当前 `train_state.pt` 格式版本为 3：
+当前 `train_state.pt` 格式版本为 4。原生 HSA/SLA 的 Generator 使用
+`generator_lora`；hybrid `linear_only` 使用 `generator_linear`：
 
 ```python
 {
@@ -276,7 +277,9 @@ logs/training/<run-name>/
     "generator_optimizer": ...,
     "critic_optimizer": ...,
     "step": ...,
-    "checkpoint_format_version": 3,
+    "checkpoint_format_version": 4,
+    "generator_train_scope": "lora",  # hybrid 为 linear_only
+    "generator_trainable_parameters": ...,
     "sparse_method": "sla_cag",
     "world_size": ...,
     "sequence_parallel_size": ...,
@@ -292,6 +295,24 @@ logs/training/<run-name>/
 自动恢复。恢复状态必须显式包含 `sparse_method: sla_cag`；旧 HSA 或无方法标记的
 checkpoint 会被拒绝，防止混用路由、投影和 optimizer 状态。稠密基础 Generator
 不受此限制，加载时缺失的 `sla_linear` 参数会按零初始化补齐。
+
+Hybrid 每次保存完整 `train_state.pt` 时，还会原子写入同目录下的小型
+`generator_linear.pt`。前者包含 critic、optimizer、RNG 和数据游标，用于恢复训练；
+后者只包含 30 层线性投影及必要元数据，用于快速验收和导出。训练后先执行：
+
+```bash
+python scripts/checkpoints/validate_linear_checkpoint.py \
+  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/train_state.pt \
+  --expected-step 1000 --require-resume-state \
+  --json-output runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/validation.json
+
+python scripts/checkpoints/validate_linear_checkpoint.py \
+  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_linear.pt \
+  --expected-step 1000
+```
+
+默认检查 30 层 weight/bias 配对、形状、有限值和非零更新，并拒绝其他算法或
+训练 scope。仅验证零初始化测试文件时才使用 `--allow-zero`。
 
 `MAX_ITERS` 是最终目标 step。例如 checkpoint 已到 100，设置 `MAX_ITERS=2000` 会继续到 2000，不是额外训练 2000 步。改变 SP/DP/卡数后 optimizer 可重分片，但数据分配和 RNG 不保证逐位一致。
 

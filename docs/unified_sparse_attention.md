@@ -200,11 +200,19 @@ fake-score critic still uses LoRA for DMD. Checkpoints save the generator tensor
 under `generator_linear` and can be exported with `merge_lora.py` using
 `configs/train/hsa_sla_cag.yaml`.
 
+Validate the compact linear sidecar before loading the full 5B model:
+
+```bash
+python scripts/checkpoints/validate_linear_checkpoint.py \
+  /path/to/checkpoints/step_0001000/generator_linear.pt \
+  --expected-step 1000
+```
+
 ```bash
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/hsa_sla_cag.yaml \
   --generator_ckpt /path/to/longlive2_merged_generator.pt \
-  --lora_ckpt /path/to/checkpoints/step_0001000/train_state.pt \
+  --lora_ckpt /path/to/checkpoints/step_0001000/generator_linear.pt \
   --output_path /path/to/hsa_sla_cag_linear_1000.pt \
   --device npu:0 --dtype bf16
 ```

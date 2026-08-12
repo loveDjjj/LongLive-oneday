@@ -7,6 +7,38 @@ import numpy as np
 import torch
 
 
+def build_generator_linear_sidecar(checkpoint):
+    """Extract the portable hybrid generator state from a full train checkpoint."""
+    required = {
+        "generator_linear",
+        "step",
+        "generator_train_scope",
+        "generator_trainable_parameters",
+        "sparse_method",
+        "world_size",
+        "sequence_parallel_size",
+        "data_parallel_size",
+    }
+    missing = sorted(required - checkpoint.keys())
+    if missing:
+        raise ValueError(f"cannot build generator linear sidecar; missing {missing}")
+    if checkpoint["generator_train_scope"] != "linear_only":
+        raise ValueError("generator linear sidecar requires linear_only scope")
+    return {
+        "generator_linear": checkpoint["generator_linear"],
+        "step": checkpoint["step"],
+        "checkpoint_format": "longlive_generator_linear_v1",
+        "generator_train_scope": checkpoint["generator_train_scope"],
+        "generator_trainable_parameters": checkpoint[
+            "generator_trainable_parameters"
+        ],
+        "sparse_method": checkpoint["sparse_method"],
+        "world_size": checkpoint["world_size"],
+        "sequence_parallel_size": checkpoint["sequence_parallel_size"],
+        "data_parallel_size": checkpoint["data_parallel_size"],
+    }
+
+
 def validate_sparse_checkpoint_method(checkpoint, expected_method):
     """Prevent resuming optimizer/LoRA state from another sparse algorithm."""
     actual_method = checkpoint.get("sparse_method")

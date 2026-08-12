@@ -9,6 +9,7 @@ import torch
 
 from utils.dataset import ResumableDistributedSampler
 from utils.training_state import (
+    build_generator_linear_sidecar,
     capture_rng_state,
     find_latest_training_checkpoint,
     list_training_checkpoints,
@@ -17,6 +18,29 @@ from utils.training_state import (
     restore_rng_state,
     validate_sparse_checkpoint_method,
 )
+
+
+def test_builds_portable_generator_linear_sidecar():
+    linear = {"blocks.0.self_attn.sla_linear.weight": torch.ones(2, 2)}
+    full = {
+        "generator_linear": linear,
+        "step": 10,
+        "generator_train_scope": "linear_only",
+        "generator_trainable_parameters": list(linear),
+        "sparse_method": "hsa_sla_cag",
+        "world_size": 12,
+        "sequence_parallel_size": 4,
+        "data_parallel_size": 3,
+        "critic_lora": {"large": torch.ones(1)},
+        "generator_optimizer": {"large": torch.ones(1)},
+    }
+
+    sidecar = build_generator_linear_sidecar(full)
+
+    assert sidecar["generator_linear"] is linear
+    assert sidecar["checkpoint_format"] == "longlive_generator_linear_v1"
+    assert "critic_lora" not in sidecar
+    assert "generator_optimizer" not in sidecar
 
 
 class ResumableDistributedSamplerTest(unittest.TestCase):
