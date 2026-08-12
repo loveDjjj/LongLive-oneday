@@ -2,7 +2,38 @@
 
 本文是当前推理、性能和质量评测的统一说明。环境与算子测试见[环境安装与测试](setup_and_validation.md)，checkpoint 训练和导出见[训练指南](training.md)。
 
-## 1. 支持矩阵
+## 1. 脚本层级
+
+`scripts/evaluation/` 按调用职责分为三层。日常实验优先使用主入口；只有调试单个 case 或采集专项 profile 时才直接调用单项入口。内部 helper 由启动脚本调用，不作为日常实验入口。
+
+### 1.1 主入口
+
+| 脚本 | 职责 |
+| --- | --- |
+| `run_performance_matrix.sh` | 编排方法、时长、SP 布局和 VAE 模式，调用 benchmark 或 msprof 单项入口并生成统一汇总。 |
+| `run_vbench_matrix.sh` | 编排多个方法与 VBench preset，支持方法级 checkpoint、断点续跑和统一汇总。 |
+
+### 1.2 单项入口
+
+| 脚本 | 职责 |
+| --- | --- |
+| `run_benchmark.sh` | 运行一个无 profiler 性能 case，保存 resolved 配置、视频或 latent、原始日志和延迟汇总。 |
+| `run_msprof.sh` | 运行一个生成过程 profile case，并执行 DiT、通信和慢 rank 分析。 |
+| `run_vae_msprof.sh` | 从已有 latent 单独采集 VAE decode profile，不重复运行 DiT。 |
+| `run_vbench.sh` | 运行一个 VBench preset，负责多 seed 生成、断点恢复、视频整理、AISBench 评测和结果汇总。 |
+
+### 1.3 内部 helper
+
+| 脚本 | 职责 |
+| --- | --- |
+| `resolve_config.py` | 将紧凑 YAML preset 和环境变量解析为运行时 resolved YAML 与 manifest 元数据。 |
+| `summarize_benchmark.py` | 从单 case 日志提取延迟、吞吐、显存和异步 VAE 指标。 |
+| `summarize_vbench.py` | 从 AISBench 产物提取 16 个官方维度及官方聚合分数。 |
+| `summarize_suite.py` | 汇总性能、msprof 或 VBench 矩阵为 CSV/JSON，并按相同 SP/DP 匹配 dense 基线。 |
+
+不要为固定方法、固定时长或固定数据子集增加一次性包装脚本。使用矩阵入口的 `METHODS`、`DURATIONS`、`MODES`、`SP_SIZES` 和 `VBENCH_PRESETS` 缩小范围，避免入口功能重复。
+
+## 2. 支持矩阵
 
 LongLive2.0 入口 `inference_sp.py` 支持：
 
@@ -17,7 +48,7 @@ Wan2.2 原生入口 `inference_wan22_sp.py` 只支持 dense。设置稀疏方法
 
 训练后的权重与运行时稀疏是两个变量。正式质量对比至少包含：基础 checkpoint dense、训练后 checkpoint dense、训练后 checkpoint sparse。前两者衡量后训练影响，后两者衡量运行时稀疏影响。
 
-## 2. 配置与路径
+## 3. 配置与路径
 
 ```text
 configs/inference/msprof.yaml
@@ -35,19 +66,19 @@ export LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt
 
 `train_state.pt` 不能直接当作完整 Generator。先按照[训练指南](training.md)导出合并权重。推理加载器支持 `{"generator": state_dict}`、`{"model": state_dict}`、raw state dict，以及配置开启 EMA 时的 `generator_ema`。
 
-## 3. 稀疏方法与稀疏率
+## 4. 稀疏方法与稀疏率
 
 LongLive2.0 采用 32 个 latent 帧的滚动 KV 窗口，每个 AR chunk 生成 8 帧。超过 32 帧后丢弃最旧 KV，这是模型训练和推理契约的一部分；不要为了追求更高稀疏率直接改变窗口长度，除非重新训练并完成质量评测。
 
-### 3.1 HSA+CAG
+### 4.1 HSA+CAG
 
 HSA 先在 latent 帧层面筛选历史，默认保留 6 帧，其中包含 1 个 sink 帧、2 个相邻帧和动态重要帧；当前 8 帧保持 dense。之后只对保留帧对应的 blocks 计算注意力。CAG 根据 AR chunk 位置调整目标预算，默认目标/基准稀疏率为 `0.85/0.95`。
 
-### 3.2 SLA+CAG
+### 4.2 SLA+CAG
 
 SLA 不先丢弃 latent 帧，而是对滚动 KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink 与 recent 帧 blocks 强制保留，当前 chunk 默认也参与稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.90/0.93`，与混合方法一致，以保证两种路由的性能和质量对比使用相同预算。
 
-### 3.3 HSA+SLA+CAG
+### 4.3 HSA+SLA+CAG
 
 混合方法先由 HSA 将 32 帧缩小为 8 个候选帧，再由 SLA 在候选帧的 blocks 中继续 Top-K，最终只计算选中 blocks 的稀疏 softmax；线性补偿仍覆盖完整 KV。默认目标/基准稀疏率为 `0.90/0.93`。
 
@@ -55,7 +86,7 @@ SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。混合方法
 
 第一块或历史不足时会回退 dense。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
 
-### 3.4 物理稀疏边界
+### 4.4 物理稀疏边界
 
 当前稀疏 softmax 不是“先算完整 QK，再用 mask 清零”的逻辑稀疏：
 
@@ -65,7 +96,7 @@ SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。混合方法
 
 但 SLA 与混合方法的完整 attention 模块并非只访问选中 KV：路由阶段需要读取 K 的 block/frame 代表，线性补偿分支有意使用完整 KV 统计量。准确表述应为“稀疏 softmax 主分支只计算选中 blocks，路由和线性补偿仍覆盖完整 KV”。HSA+CAG 没有线性补偿，但仍需计算帧/block 路由摘要。
 
-## 4. 算子微基准
+## 5. 算子微基准
 
 ```bash
 test_id="sparse-kernel-$(date +%Y%m%d-%H%M%S)"
@@ -85,7 +116,7 @@ done
 
 `mindiesd_bsa` 需要 `libopapi.so` 提供 `aclnnBlockSparseAttentionV2`。若报该符号缺失，应继续使用 RainFusion；重复 `source` 同一 CANN 不会补充算子。
 
-## 5. 性能模式
+## 6. 性能模式
 
 统一支持三种模式，并支持通过 `LONGLIVE_SP_SIZE` 或性能矩阵的 `SP_SIZES` 在 SP1 与 SP4 间切换：
 
@@ -97,7 +128,7 @@ done
 
 当前 `async_vae` 确实使用后台队列/线程，在独立 NPU 上执行分块 `cached_decode`。它不是把 DiT 时间和 VAE 时间简单相加；最终墙钟时间由重叠后的关键路径和 drain 决定。应同时查看 `ar_loop_seconds`、`vae_decode_seconds`、`vae_enqueue_seconds`、`vae_drain_seconds`、`vae_overlap_seconds`、chunk 数和队列峰值。
 
-## 6. 单项无 profiler 基准
+## 7. 单项无 profiler 基准
 
 默认执行 1 次预热和 3 次有效测量。先做相同 checkpoint 的 dense/sparse DiT-only：
 
@@ -129,7 +160,7 @@ bash scripts/evaluation/run_benchmark.sh 32s
 
 已有历史实验中，32 秒 SP4 的 SLA DiT-only p50 从 `48.656 s` 降至 `36.240 s`，降低约 25.5%；HSA 从 `48.614 s` 降至 `40.059 s`，降低约 17.6%。但当时包含异步 VAE 的 SLA p50 为 `127.555 s`，dense 为 `121.983 s`，端到端反而变慢。这些数据只说明“稀疏 DiT 有收益，但旧端到端关键路径未获益”，不能作为当前代码的发布结论，必须按统一矩阵重测。
 
-## 7. 完整性能矩阵
+## 8. 完整性能矩阵
 
 默认矩阵包含 4 种方法、3 个时长、SP1/SP4 和 3 种模式，共 72 个 case：
 
@@ -165,7 +196,7 @@ HSA_SLA_CAG_GENERATOR_CKPT
 
 未指定时统一使用 `LONGLIVE_GENERATOR_CKPT`。`RESUME_SUITE=1` 会跳过已有 `summary.json` 的完整用例；不完整目录不会被覆盖。无 profiler 汇总写入 `runs/suites/<suite-id>/performance/`，生成过程 msprof 汇总写入 `runs/suites/<suite-id>/msprof/dit/`。
 
-## 8. VAE-only 测试
+## 9. VAE-only 测试
 
 复用 DiT-only 产物，避免重复生成 latent：
 
@@ -190,7 +221,7 @@ bash scripts/evaluation/run_vae_msprof.sh \
   runs/performance/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt
 ```
 
-## 9. msprof
+## 10. msprof
 
 msprof 用于定位算子和通信，不用于发布延迟。profile 插桩本身有开销，必须先得到稳定的无 profiler p50。
 
@@ -212,7 +243,7 @@ bash scripts/evaluation/run_performance_matrix.sh
 
 默认启用 AICore PMU。若环境在 PMU 初始化时报 `DrvFftsProfileStart failed` 或 `561103`，可用新的 `RUN_ID` 和 `MSPROF_AI_CORE=false` 重跑，以区分模型问题和 PMU 环境问题；关闭 PMU 的结果不能用于 AICore 流水线利用率结论。
 
-## 10. VBench 质量评测
+## 11. VBench 质量评测
 
 当前维护 VBench Standard 的 Full、5% 和 20%，以及与其逐行对齐的增强提示词版本。5% 与 20% 是独立抽样，5% 不是 20% 的子集。原生 Wan2.2 仅运行 dense。
 
@@ -240,7 +271,7 @@ bash scripts/evaluation/run_vbench_matrix.sh
 
 正式对比必须固定提示词版本、checkpoint、seed、分辨率、帧数、FPS 和采样步数。最终只采用 AISBench 输出的 16 个官方维度及 `quality`、`semantic`、`total` 汇总，不自行更改维度权重。
 
-## 11. 结果判定
+## 12. 结果判定
 
 一项稀疏方法进入默认推理路径前，应同时满足：
 
