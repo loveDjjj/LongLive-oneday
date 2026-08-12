@@ -1,134 +1,95 @@
-# LongLive2.0 昇腾 SLA+CAG
+# LongLive2.0 昇腾稀疏注意力
 
-本仓库维护 LongLive2.0-5B 在昇腾 NPU 上的 BF16 稀疏后训练、推理和评测流程。当前唯一训练目标是提示词驱动的 DMD 后训练：Generator 使用 SLA+CAG 稀疏注意力，Real Teacher 和 Fake Critic 使用稠密注意力，Generator 与 Critic 均通过 LoRA 更新。
+本仓库维护 LongLive2.0-5B 在昇腾 NPU 上的 BF16 训练、推理和评测，并在同一套模型与评测入口中支持四种注意力方法：
 
-## 当前范围
+- `dense`：LongLive2.0 原生滚动 KV 稠密注意力。
+- `hsa_cag`：参考 Light Forcing，先按 latent 帧筛选历史，再执行块稀疏注意力与 CAG。
+- `sla_cag`：对滚动 KV 全局执行 Smooth-K 块路由，并加入线性补偿与 CAG。
+- `hsa_sla_cag`：先用 HSA 筛选候选帧，再用 SLA 选择 token block，以 CAG 控制预算，并使用全 KV 线性补偿。
 
-- 模型：`Wan2.2-TI2V-5B` 与 LongLive2.0 合并后的 Generator。
-- 训练：纯提示词、32 latent 帧、每块 8 帧、4 步 backward simulation。
-- 并行：FSDP + Ulysses SP + DP，支持单机和多机。
-- 稀疏后端：训练使用可反向的 `ascend_triton`；推理使用 MindIE-SD
-  `RainFusionAttention` 融合算子；`portable` 仅用于正确性对照。
-- 推理：BF16 Ulysses SP，支持稠密和 SLA+CAG 对照；SLA 对全部滚动 KV
-  执行全局 128-token block Top-K，并强制保留 sink/recent blocks。
-- 评测：无 profiler 重复性能基准、VBench Standard 与 msprof。
+三种稀疏方法使用独立训练配置。`hsa_cag` 和 `sla_cag` 训练 Generator LoRA；`hsa_sla_cag` 冻结 Generator 主干，只训练 30 层 `sla_linear` 投影，DMD Fake Critic 仍训练 LoRA。
 
-不再维护源仓库的 AR、I2V、NVFP4、FourOverSix、CUDA/Hopper 和非 SP 推理入口。配置若启用这些能力会在启动阶段直接失败。
+## 支持范围
 
-## 目录规范
+- 基础模型：Wan2.2-TI2V-5B 与 LongLive2.0 合并 Generator。
+- 训练：提示词驱动 DMD，32 个 latent 帧，每个 AR chunk 8 帧，4 步采样，FSDP + Ulysses SP + DP。
+- 训练稀疏算子：`ascend_triton`，必须支持 Q/K/V 反向。
+- 推理稀疏算子：MindIE-SD `RainFusionAttention`。
+- 推理模式：仅 DiT、同步 VAE、独立 NPU 异步 VAE。
+- 性能时长：5 秒、32 秒和 64 秒。
+- 评测：无 profiler 延迟、VBench Standard、msprof 与 VAE-only 分析。
 
-```text
-configs/
-  train/sla_cag.yaml               # 唯一训练源配置
-  inference/                        # VBench 和 msprof 紧凑预设
-scripts/                            # 按 data/training/evaluation/checkpoints 分组
-data/train/                         # 训练提示词与数据 manifest
-runs/                               # checkpoint、配置、manifest、视频和评测产物
-logs/                               # 仅保存文本日志和 JSONL 指标
-docs/                               # 中文操作文档
-```
-
-一次训练运行的产物如下：
-
-```text
-runs/training/<run-name>/
-  config.source.yaml
-  config.resolved.yaml
-  manifest.json
-  checkpoints/step_0000010/train_state.pt
-
-logs/training/<run-name>/
-  node_0.log
-  metrics.jsonl
-```
+当前昇腾版本不维护 CUDA/Hopper、NVFP4、FourOverSix 和原生非 SP 部署路径。
 
 ## 快速开始
 
-1. 按 [环境安装指南](docs/getting_started.md) 配置 CANN、PyTorch、`torch_npu` 和 Ascend Triton。
-2. 准备提示词：
+安装环境并执行分层验收：
+
+```bash
+conda activate /mnt/share/r50063443/conda_envs/longlive
+source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+cd /mnt/share/r50063443/LongLive-oneday
+PYTHONPATH=. pytest -q
+```
+
+准备训练提示词：
 
 ```bash
 bash scripts/data/prepare_training_data.sh
 ```
 
-3. 验证 Ascend Triton 前向和反向：
+启动多卡训练前，先验证混合方法的完整 Q/K/V 反向：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=15 PYTHONUNBUFFERED=1 \
-python tests/npu/ascend_sla_kernel_smoke.py --device npu:0
+ASCEND_RT_VISIBLE_DEVICES=15 \
+python tests/npu/benchmark_sparse_attention.py \
+  --method hsa_sla_cag --backend ascend_triton --device npu:0 \
+  --latent-frames 32 --warmup 1 --iterations 1 \
+  --check-training-backward
 ```
 
-4. 运行 12 卡单步训练烟测：
+输出必须包含 `training_backward=passed`。
+
+三种训练入口：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
-MAX_ITERS=1 TRAIN_RUN_NAME=sla_cag_smoke \
-VIS_INTERVAL=0 \
+bash scripts/training/run_hsa_cag.sh
 bash scripts/training/run_sla_cag.sh
+bash scripts/training/run_hsa_sla_cag.sh
 ```
 
-5. 正式训练时复用同一脚本并明确设置步数和梯度累积。完整命令、批量含义、恢复规则和双节点示例见 [SLA+CAG 训练指南](docs/sla_cag_training.md)。
-
-## 推理与评测
-
-训练 checkpoint 保存的是 LoRA 和恢复状态。先合并 Generator LoRA：
+运行单个 32 秒 DiT-only 性能用例：
 
 ```bash
-python scripts/checkpoints/merge_lora.py \
-  --config_path configs/train/sla_cag.yaml \
-  --generator_ckpt /path/to/longlive2_merged_generator.pt \
-  --lora_ckpt runs/training/<run-name>/checkpoints/step_0002000/train_state.pt \
-  --output_path runs/merged/longlive2_sla_cag_2k.pt \
-  --device npu:0
-```
-
-再使用同一权重运行稠密对照和稀疏实验：
-
-```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-RUN_ID=sla_cag_dense \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
-
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=sla_cag RUN_ID=sla_cag_sparse \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
-```
-
-先运行无 profiler 的三次性能对照：
-
-```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=dense RUN_ID=dense-32s-3run \
-bash scripts/evaluation/run_benchmark.sh 32s
-
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=sla_cag \
-LONGLIVE_SLA_BACKEND=mindiesd RUN_ID=sla-32s-3run \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+LONGLIVE_SPARSE_METHOD=hsa_sla_cag BENCHMARK_MODE=dit_only \
+RUN_ID=hybrid-dit-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
 ```
 
-确认端到端收益后再采集 msprof：
+检查完整性能矩阵，不占用 NPU：
 
 ```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=sla_cag LONGLIVE_SLA_BACKEND=mindiesd \
-bash scripts/evaluation/run_msprof.sh 32s
+DRY_RUN=1 PERF_DEVICES=0,1,2,3,4 \
+bash scripts/evaluation/run_performance_matrix.sh
 ```
-
-推理预设、设备数量和输出格式见 [推理与评测指南](docs/inference_and_evaluation.md)。
-当前 SP4 实测 SLA 将 32 秒 latent-only DiT p50 从 `48.656 s` 降至 `36.240 s`
-（`1.343x`），但 dedicated VAE 仍主导约 127 秒的完整生成临界路径，因此默认发布
-配置继续保持 Dense，直到 VAE 优化后重新通过完整端到端验收。
 
 ## 文档
 
-- [环境安装、依赖检查与烟测](docs/getting_started.md)
-- [训练、数据集、日志、checkpoint 与恢复](docs/sla_cag_training.md)
-- [推理、VBench、msprof 与评测产物](docs/inference_and_evaluation.md)
-- [Dense/HSA+CAG/SLA+CAG 统一基线与性能矩阵](docs/unified_sparse_attention.md)
-- [昇腾稀疏注意力上游调研与技术选型](docs/ascend_sparse_attention_design.md)
+- [环境安装与测试](docs/setup_and_validation.md)
+- [训练指南](docs/training.md)
+- [推理与评测指南](docs/inference_and_evaluation.md)
+- [参考论文索引](reference/README.md)
 
-## 上游项目
+## 运行产物
 
-本项目基于 NVIDIA LongLive2.0 代码演进，并保留原项目适用的许可证和版权声明。论文与上游实现请参考 [NVlabs/LongLive](https://github.com/NVlabs/LongLive)。
+```text
+runs/training/<run-id>/       配置、manifest 和 checkpoint
+runs/benchmark/<run-id>/      视频或 latent 与延迟汇总
+runs/msprof/<run-id>/         profiler 数据和分析结果
+runs/vbench/<run-id>/         生成视频与 AISBench 结果
+runs/suites/<suite-id>/       可比较的 CSV/JSON 矩阵汇总
+logs/<task>/<run-id>/         文本日志与 JSONL 指标
+```
+
+本项目基于 [NVlabs/LongLive](https://github.com/NVlabs/LongLive) 开发，并保留适用的上游许可证和版权声明。

@@ -1,439 +1,241 @@
-# 昇腾 NPU 推理与评测指南
+# LongLive2.0 昇腾推理与评测指南
 
-本文覆盖当前维护的两条评测工作流：`scripts/evaluation/run_vbench.sh` 生成视频并执行 AISBench VBench Standard，`scripts/evaluation/run_msprof.sh` 采集 LongLive2 推理性能。环境准备见 [环境安装与测试](getting_started.md)，LoRA checkpoint 和合并方法见 [SLA+CAG 训练指南](sla_cag_training.md)。
+本文是当前推理、性能和质量评测的统一说明。环境与算子测试见[环境安装与测试](setup_and_validation.md)，checkpoint 训练和导出见[训练指南](training.md)。
 
 ## 1. 支持矩阵
 
-| 工作流 | 模型类别 | Dense | SLA+CAG | 入口 |
-| --- | --- | --- | --- | --- |
-| VBench | LongLive2 causal Generator | 支持 | 支持 | `inference_sp.py` |
-| VBench | Wan2.2-TI2V-5B 原生模型 | 支持 | 不支持 | `inference_wan22_sp.py` |
-| msprof | LongLive2 causal Generator | 支持 | 支持 | `inference_sp.py` |
+LongLive2.0 入口 `inference_sp.py` 支持：
 
-SLA+CAG 是运行时 attention 路由，不是另一份 checkpoint。同一合并权重分别跑 dense 和 sparse，才能隔离稀疏计算造成的质量与性能变化。Wan2.2 原生入口启用 SLA 会在配置解析阶段报错。
+| 方法 | 稀疏路径 | 推理后端 |
+| --- | --- | --- |
+| `dense` | 不启用 | 原生 dense attention |
+| `hsa_cag` | 帧级 HSA + block sparse + CAG | MindIE-SD RainFusion |
+| `sla_cag` | 全局 Smooth-K block Top-K + CAG + 线性补偿 | MindIE-SD RainFusion |
+| `hsa_sla_cag` | HSA 候选帧 + SLA block Top-K + CAG + 线性补偿 | MindIE-SD RainFusion |
 
-当前 VBench 只执行 Standard 评测协议。`data/benchmarks/vbench_long/` 保留 Long 所需映射和 clip 配置，但 AISBench/NPU Long 适配尚未完成，不能通过当前 preset 启动。
+Wan2.2 原生入口 `inference_wan22_sp.py` 只支持 dense。设置稀疏方法时会在配置解析阶段失败。
 
-## 2. 配置、环境变量和权重
+训练后的权重与运行时稀疏是两个变量。正式质量对比至少包含：基础 checkpoint dense、训练后 checkpoint dense、训练后 checkpoint sparse。前两者衡量后训练影响，后两者衡量运行时稀疏影响。
+
+## 2. 配置与路径
 
 ```text
-configs/inference/vbench.yaml
 configs/inference/msprof.yaml
+configs/inference/vbench.yaml
 ```
 
-YAML 管理模型结构、SP/DP、帧数、seed、数据和稀疏参数；Shell 变量管理部署路径、可见卡和端口。
-
-通用覆盖：
+常用路径覆盖：
 
 ```bash
-export GENERATION_ENV=/path/to/longlive-env
+export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
 export CANN_ENV_SCRIPT=/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-export LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B
+export LONGLIVE_MODEL_ROOT=/mnt/share/weight/Wan2.2-TI2V-5B
 export LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt
 ```
 
-`LONGLIVE_GENERATOR_CKPT` 只影响 LongLive2；Wan2.2 原生入口从 `LONGLIVE_MODEL_ROOT` 加载官方模型目录。
+`train_state.pt` 不能直接当作完整 Generator。先按照[训练指南](training.md)导出合并权重。推理加载器支持 `{"generator": state_dict}`、`{"model": state_dict}`、raw state dict，以及配置开启 EMA 时的 `generator_ema`。
 
-训练生成的 `train_state.pt` 或旧 `checkpoint_model_*/model.pt` 只包含 LoRA 时，不能直接作为 Generator。先运行：
+## 3. 稀疏方法与稀疏率
 
-```bash
-python scripts/checkpoints/merge_lora.py \
-  --config_path configs/train/sla_cag.yaml \
-  --generator_ckpt /path/to/longlive2_merged_generator.pt \
-  --lora_ckpt /path/to/train_state.pt \
-  --output_path runs/merged/longlive2_sla_cag_2k.pt \
-  --device npu:0
-```
+LongLive2.0 采用 32 个 latent 帧的滚动 KV 窗口，每个 AR chunk 生成 8 帧。超过 32 帧后丢弃最旧 KV，这是模型训练和推理契约的一部分；不要为了追求更高稀疏率直接改变窗口长度，除非重新训练并完成质量评测。
 
-推理加载器支持完整 BF16 `{"generator": state_dict}`、`{"model": state_dict}`、raw state dict，或在 `use_ema=true` 时加载 `generator_ema`。VBench resolver 不现场加载 LoRA，因此正式评测使用预先合并的 checkpoint。
+### 3.1 HSA+CAG
 
-## 3. SLA+CAG 推理开关
+HSA 先在 latent 帧层面筛选历史，默认保留 6 帧，其中包含 1 个 sink 帧、2 个相邻帧和动态重要帧；当前 8 帧保持 dense。之后只对保留帧对应的 blocks 计算注意力。CAG 根据 AR chunk 位置调整目标预算，默认目标/基准稀疏率为 `0.85/0.95`。
 
-Dense 不设置环境变量：
+### 3.2 SLA+CAG
 
-```bash
-bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
-```
+SLA 不先丢弃 latent 帧，而是对滚动 KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink 与 recent 帧 blocks 强制保留，当前 chunk 默认也参与稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.95/0.97`。
 
-SLA+CAG 设置：
+### 3.3 HSA+SLA+CAG
 
-```bash
-LONGLIVE_SPARSE_METHOD=sla_cag \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
-```
+混合方法先由 HSA 将 32 帧缩小为 8 个候选帧，再由 SLA 在候选帧的 blocks 中继续 Top-K，最终只计算选中 blocks 的稀疏 softmax；线性补偿仍覆盖完整 KV。默认目标/基准稀疏率为 `0.90/0.93`。
 
-默认稀疏 kernel 是 RainFusion。仅在 BSA smoke 与 microbenchmark 通过后，用下面的
-覆盖变量做同 checkpoint 对照；resolved YAML、metadata 和 run tag 会记录后端：
+SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。混合方法当前通常选中约 20 至 22 个/220 个 KV blocks，即约 90% 有效稀疏率。CAG 会使不同 chunk 的实际值变化，必须以 `selected/total` 日志为准，不能只引用配置中的目标值。
+
+第一块或历史不足时会回退 dense。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
+
+## 4. 算子微基准
 
 ```bash
-LONGLIVE_SPARSE_METHOD=sla_cag \
-LONGLIVE_SLA_BACKEND=mindiesd_bsa \
-bash scripts/evaluation/run_msprof.sh 32s
+mkdir -p logs/benchmarks
+for method in hsa_cag sla_cag hsa_sla_cag; do
+  ASCEND_RT_VISIBLE_DEVICES=15 \
+  python tests/npu/benchmark_sparse_attention.py \
+    --method "${method}" --backend mindiesd --device npu:0 \
+    --latent-frames 192 --warmup 5 --iterations 20 \
+    | tee "logs/benchmarks/${method}-mindiesd-32s.txt"
+done
 ```
 
-resolver 会向 `model_kwargs` 注入：
+报告中应同时记录 dense、未缓存路由、缓存路由、稀疏 kernel、线性补偿、完整稀疏路径、选中 block 数与有效稀疏率。只有完整稀疏路径低于同次 dense，才有进入整网测试的价值。
 
-```yaml
-sparse_config:
-  enabled: true
-  backend: mindiesd
-  sparsity: 0.95
-  sparsity_base: 0.97
-  block_q: 128
-  block_k: 128
-  feature_map: softmax
-  keep_sink_frames: 1
-  keep_recent_frames: 1
-  dense_current: false
-  min_sparse_history_frames: 1
-  query_block_batch: 1
-  linear_cache: true
-  linear_eps: 1.0e-5
-```
+微基准不能替代 DiT-only：它不包含 30 层调用、缓存命中差异、SP 通信、其他 attention 分支和 Python 调度开销。
 
-正式推理的稀疏 softmax 分支默认使用 MindIE-SD `RainFusionAttention`；不可用时
-直接失败。通过显式后端覆盖可验证官方 BSA，但在完整 SLA 实测通过前不会自动切换。
-线性补偿分支由 PyTorch NPU 算子计算，其中输出投影已等价折叠进 `K^T V` 统计量。
-训练使用支持反向的
-`ascend_triton`。第一块或历史不足时回到 dense；之后对全部滚动 KV 做全局
-128-token block Top-K，并强制保留 sink/recent blocks。默认不保持当前 chunk
-稠密，以免 8/32 帧当前块把理论稀疏率限制在 75%。
+`mindiesd_bsa` 需要 `libopapi.so` 提供 `aclnnBlockSparseAttentionV2`。若报该符号缺失，应继续使用 RainFusion；重复 `source` 同一 CANN 不会补充算子。
 
-SP4 尾部形状是 `Q=7040=55x128`、`KV=28160=220x128`。CAG 在不同 AR chunk
-调整 Top-K 预算。相同 chunk 的多个去噪 step 会复用历史 K 的 block summaries
-和线性注意力统计量；query、当前 K、Top-K 和最终 LUT 仍逐层逐步更新。
-`selectIdx` 保持紧凑且升序，满足 RainFusionAttention 契约。
+## 5. 性能模式
 
-先用真实 SP4 尾部形状运行 microbenchmark。默认测试正式推理使用的
-MindIE-SD 128 block；Ascend Triton 用于训练 kernel 回归：
+统一支持三种模式：
 
-```bash
-python tests/npu/benchmark_sla_inference.py --device npu:0
-python tests/npu/benchmark_sla_inference.py --device npu:0 \
-  --backend mindiesd_bsa
-python tests/npu/benchmark_sla_inference.py --device npu:0 \
-  --backend ascend_triton
-```
+| 模式 | NPU 数 | 行为 | 用途 |
+| --- | ---: | --- | --- |
+| `dit_only` | 4 | 不加载 VAE，只保存 latent | 判断稀疏是否加速 DiT |
+| `sync_vae` | 4 | SP leader 同步解码完整视频 | 观察串行 VAE 代价 |
+| `async_vae` | 5 | 4 张 SP worker + 1 张专用 VAE 卡 | 测量真实异步关键路径 |
 
-输出分别报告未缓存/缓存路由、稀疏 kernel、显式/折叠投影线性分支以及完整 SLA
-延迟。`linear_projection_speedup` 只衡量线性分支的代数优化；判断稳态收益必须比较
-`cached_full_ms` 与同次运行的 `dense median_ms`，再用 msprof 验证整网收益。
+当前 `async_vae` 确实使用后台队列/线程，在独立 NPU 上执行分块 `cached_decode`。它不是把 DiT 时间和 VAE 时间简单相加；最终墙钟时间由重叠后的关键路径和 drain 决定。应同时查看 `ar_loop_seconds`、`vae_decode_seconds`、`vae_enqueue_seconds`、`vae_drain_seconds`、`vae_overlap_seconds`、chunk 数和队列峰值。
 
-在 MindIE-SD 3.0.0 + CANN 8.5 上，RainFusion 实测支持矩形 SLA。该环境虽然注册了
-`block_sparse_attention` 的 PyTorch wrapper，但 `libopapi.so` 不包含
-`aclnnBlockSparseAttentionV2`，因此不能使用 `mindiesd_bsa`。单独 source 同一套 CANN
-环境不会补出缺失符号；必须整体升级支持该算子的 CANN/MindIE-SD 栈。
+## 6. 单项无 profiler 基准
 
-正式启用前，`cached_full_ms` 必须小于同次运行的 `dense median_ms`。只比较理论稀疏率
-或 kernel 正确性不能证明加速。
-
-可在启动前只展开配置确认：
-
-```bash
-LONGLIVE_SPARSE_METHOD=sla_cag \
-python scripts/evaluation/resolve_config.py vbench \
-  --config configs/inference/vbench.yaml \
-  --preset longlive2_standard_5pct \
-  --seed 0 \
-  --output /tmp/vbench_sla.yaml
-
-sed -n '1,35p' /tmp/vbench_sla.yaml
-```
-
-## 4. VBench 数据集和 preset
-
-```text
-data/benchmarks/
-├── performance/prompts.txt
-├── vbench_standard/{full,5pct,20pct}/
-│   ├── prompts.txt
-│   └── full_info.json
-├── vbench_augmented/{full,5pct,20pct}/prompts.txt
-└── vbench_long/evaluator_configs/
-```
-
-- Standard Full：944 条唯一提示词。
-- Standard 5%：43 条，AISBench K-Means Mini。
-- Standard 20%：186 条，另一轮独立 K-Means 抽样。
-- Augmented：Qwen2.5 seed-42 生成且与 Standard 逐行对齐；命名和 `full_info.json` 复用对应 Standard 子集。
-
-5% 与 20% 是独立抽样，5% 不是 20% 的子集。
-
-VBench 提供 12 个 preset：
-
-```text
-longlive2_standard_{full,5pct,20pct}
-longlive2_augmented_{full,5pct,20pct}
-wan22_standard_{full,5pct,20pct}
-wan22_augmented_{full,5pct,20pct}
-```
-
-默认参数是 125 个像素帧、24 FPS、SP2 x DP8、seed 0 到 4，共需 16 张 worker NPU。LongLive2 会换算为 32 个 latent 帧；Wan2.2 原生入口直接生成 125 个像素帧。
-
-## 5. VBench 常用命令
-
-VBench 需要生成环境、AISBench 环境和 VBench 模型缓存：
-
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export GENERATION_ENV=/path/to/longlive-env
-export AISBENCH_ENV=/path/to/aisbench-env
-export VBENCH_CACHE_DIR=/mnt/share/weights/vbench_models/
-```
-
-### 5.1 LongLive2 原始权重 Dense
-
-```bash
-LONGLIVE_GENERATOR_CKPT=/path/to/longlive2_merged_generator.pt \
-RUN_ID=longlive2_base_dense_5pct \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
-```
-
-### 5.2 LoRA 合并权重 Dense
-
-```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-RUN_ID=sla_cag_2k_dense_5pct \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
-```
-
-### 5.3 同一合并权重 SLA+CAG
-
-```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=sla_cag \
-RUN_ID=sla_cag_2k_sparse_5pct \
-bash scripts/evaluation/run_vbench.sh longlive2_standard_5pct
-```
-
-三组关系：原始 Dense 对比训练后 Dense 衡量 LoRA 后训练影响；训练后 Dense 对比训练后 SLA 衡量纯稀疏影响；原始 Dense 对比最终 SLA 衡量总体效果。三组必须使用相同 subset、帧数和 seeds。
-
-### 5.4 Augmented prompt
-
-```bash
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-RUN_ID=sla_cag_2k_dense_augmented_5pct \
-bash scripts/evaluation/run_vbench.sh longlive2_augmented_5pct
-```
-
-### 5.5 SLA+CAG 20% 串行评测
-
-标准 20% 和 Augmented 20% 可使用同一合并权重串行执行 SLA+CAG 评测。第一项失败时脚本立即停止；`RUN_ID_PREFIX` 可选，默认包含启动时间：
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-RUN_ID_PREFIX=sla_cag_step100_20pct \
-bash scripts/evaluation/run_vbench_sla_cag_20pct.sh \
-  runs/merged/longlive2_sla_cag_step100.pt
-```
-
-### 5.6 Wan2.2 原生模型
-
-```bash
-LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B \
-RUN_ID=wan22_dense_5pct \
-bash scripts/evaluation/run_vbench.sh wan22_standard_5pct
-```
-
-不要给 `wan22_*` 命令设置 `LONGLIVE_SPARSE_METHOD=sla_cag`。
-
-### 5.7 扩大评测规模
-
-先用 5% 验证链路，再切换：
-
-```bash
-bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
-bash scripts/evaluation/run_vbench.sh longlive2_standard_full
-```
-
-默认每个 prompt 运行 5 个 seed，因此 5%/20%/Full 分别生成 215/930/4720 个视频。
-
-## 6. VBench 终端输出、恢复和产物
-
-启动时输出：
-
-```text
-[run] task=vbench preset=... run_id=...
-[run] devices=... layout=SP2xDP8 prompts=43
-[generate] seed=0 (1/5) port=...
-[generate seed 0 ...] [####------] ... [...<..., ...s/video]
-[evaluate] videos=runs/vbench/.../videos/prepared
-[evaluate dimensions] [####------] .../16 [...]
-[done] run=runs/vbench/...
-```
-
-生成和 AISBench 子进程日志不会与动态进度条混排。失败时脚本会显示日志末尾 100 行；若 AISBench 日志出现 `[RUNNER-TASK-001]`，或最终不足 16 个 dimension，脚本返回失败。
-
-```text
-runs/vbench/<run-id>/
-├── manifest.json                    # preset、模型类别、数据、seed、SP/DP、稀疏方法
-├── resolved_seed_0.yaml             # 每个 seed 的实际推理配置
-├── videos/
-│   ├── raw/seed_0/*.mp4             # 模型原始输出
-│   └── prepared/*.mp4               # VBench 规范命名
-└── aisbench/<evaluation-session>/   # 16 维结果和 AISBench 工作目录
-
-logs/vbench/<run-id>/
-├── seed_0.log
-├── ...
-└── aisbench.log
-```
-
-`RUN_ID` 只能是目录名，不能包含 `/`。中断后使用相同 `RUN_ID` 会按 seed 目录中的 mp4 数量继续，完整 seed 会显示 `[resume] ... already complete`；评测阶段每次创建新的 session 目录。
-
-## 7. 性能测试与 msprof
-
-### 7.1 无 profiler 端到端基准
-
-先使用无 profiler 入口判断真实延迟。默认运行 1 次预热和 3 次有效测量，保存
-manifest、resolved YAML、视频、原始日志和统计摘要：
-
-```bash
-LONGLIVE_SPARSE_METHOD=dense \
-RUN_ID=dense-32s-3run \
-bash scripts/evaluation/run_benchmark.sh 32s
-
-LONGLIVE_SPARSE_METHOD=sla_cag \
-LONGLIVE_SLA_BACKEND=mindiesd \
-RUN_ID=sla-rainfusion-32s-3run \
-bash scripts/evaluation/run_benchmark.sh 32s
-```
-
-可用 `BENCHMARK_REPEATS` 和 `BENCHMARK_WARMUP` 调整次数。Dense/SLA 对照必须保持
-checkpoint、提示词、seed、SP/DP、VAE 模式和设备集合一致，并比较 summary 中的 p50；
-不能使用保存时间，也不能用单次运行决定默认后端。
-
-若完整生成被异步 VAE 临界路径掩盖，使用 latent-only 模式隔离 DiT。该模式不加载或
-执行 VAE，只需要 4 张 SP worker 卡；summary 中 FPS/RTF 为 0 是预期行为，只比较
-`generation_seconds`：
+默认执行 1 次预热和 3 次有效测量。先做相同 checkpoint 的 dense/sparse DiT-only：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
-BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=dense \
-RUN_ID=dense-dit-32s-3run \
+LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_SPARSE_METHOD=dense BENCHMARK_MODE=dit_only \
+RUN_ID=dense-dit-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
 
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
-BENCHMARK_LATENTS_ONLY=1 LONGLIVE_SPARSE_METHOD=sla_cag \
-LONGLIVE_SLA_BACKEND=mindiesd RUN_ID=sla-dit-32s-3run \
+LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_SPARSE_METHOD=sla_cag BENCHMARK_MODE=dit_only \
+RUN_ID=sla-dit-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
 ```
 
-当前 SP4 32 秒实测中，Dense/SLA latent-only p50 分别为 `48.656 s` 和 `36.240 s`，
-SLA 将 DiT 延迟降低 `25.52%`。但包含 dedicated VAE 的 p50 分别为 `121.983 s` 和
-`127.555 s`，未获得端到端收益。这两组指标必须分开报告：前者证明 attention/DiT
-优化，后者反映当前单视频交付能力；不能用其中一项替代另一项。
+`dit_only` 的 FPS/RTF 为 0 是预期现象，只比较 `generation_seconds` 的 p50。禁止比较不同 checkpoint、不同设备集合或单次结果。
 
-latent-only 运行保存的 `.pt` 可直接用于 VAE-only 基准，不必重新执行 DiT：
+再测试异步端到端：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,15 \
+LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_SPARSE_METHOD=sla_cag BENCHMARK_MODE=async_vae \
+RUN_ID=sla-async-32s \
+bash scripts/evaluation/run_benchmark.sh 32s
+```
+
+已有历史实验中，32 秒 SP4 的 SLA DiT-only p50 从 `48.656 s` 降至 `36.240 s`，降低约 25.5%；HSA 从 `48.614 s` 降至 `40.059 s`，降低约 17.6%。但当时包含异步 VAE 的 SLA p50 为 `127.555 s`，dense 为 `121.983 s`，端到端反而变慢。这些数据只说明“稀疏 DiT 有收益，但旧端到端关键路径未获益”，不能作为当前代码的发布结论，必须按统一矩阵重测。
+
+## 7. 完整性能矩阵
+
+默认矩阵包含 4 种方法、3 个时长和 3 种模式：
+
+```bash
+DRY_RUN=1 PERF_DEVICES=0,1,2,3,15 \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
+确认展开正确后运行：
+
+```bash
+PERF_DEVICES=0,1,2,3,15 TASK=benchmark \
+SUITE_ID=sparse-release-01 \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
+可缩小范围：
+
+```bash
+METHODS=dense,hsa_cag DURATIONS=32s MODES=dit_only,async_vae \
+PERF_DEVICES=0,1,2,3,15 TASK=benchmark SUITE_ID=hsa-retest-01 \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
+方法可分别指定 checkpoint：
+
+```text
+DENSE_GENERATOR_CKPT
+HSA_CAG_GENERATOR_CKPT
+SLA_CAG_GENERATOR_CKPT
+HSA_SLA_CAG_GENERATOR_CKPT
+```
+
+未指定时统一使用 `LONGLIVE_GENERATOR_CKPT`。`RESUME_SUITE=1` 会跳过已有 `summary.json` 的完整用例；不完整目录不会被覆盖。汇总写入 `runs/suites/<suite-id>/<task>/results.csv` 和 `results.json`。
+
+## 8. VAE-only 测试
+
+复用 DiT-only 产物，避免重复生成 latent：
 
 ```bash
 python tests/npu/benchmark_vae_decode.py \
-  --latent runs/benchmark/dense-dit-32s-3run/videos/rank0-1-0_regular_sp4.pt \
-  --device npu:0 --chunk-frames 8 --iterations 1
+  --latent runs/benchmark/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt \
+  --device npu:15 --chunk-frames 8 --iterations 1 \
+  | tee logs/benchmarks/vae-chunk8.txt
 ```
 
-该工具先用两个 chunk 预热，再复现当前 dedicated VAE worker 内的 cached decode、逐
-chunk pinned DtoH、CPU 拼接和归一化，分别报告 `decode_dtoh_seconds` 与
-`cpu_post_seconds`；NPU Event 进一步拆出 `vae_device_seconds` 与
-`dtoh_device_seconds`。工具同时给出 latent/pixel FPS 和峰值显存。它不包含 DiT 卡到
-VAE 卡的队列传输；后续 VAE 优化必须复用同一个 latent、chunk 大小和设备环境进行对照。
+该测试复现异步 VAE worker 的 cached decode、逐 chunk pinned DtoH、CPU 拼接和归一化，并拆分 `vae_device_seconds`、`dtoh_device_seconds` 与 `cpu_post_seconds`。
 
-使用同一个 latent 采集 VAE-only 算子 profile。默认只采集 16 个 latent 帧，覆盖首块和
-稳态块，避免对完整 32 秒视频重复插桩：
+已有同一 192-frame latent 测试中，chunk 8 和 16 的完整解码均约 `114.9 s`，其中 NPU VAE 约 `114.1 s`，DtoH device 时间约 `0.194 s`。因此当时瓶颈在 VAE 计算而非 DtoH 或 chunk 大小。msprof 中 Conv3DV2 累计时间最高，其后为 Conv2D、TransData、Transpose 和 Pad。
+
+后续 VAE 优化优先级：减少格式转换和冗余 pad/concat；验证更合适的 Conv3D layout 与算子实现；再评估时间切分或空间切分的多卡 VAE。卷积并行必须处理 temporal halo、padding、cache 边界和归一化统计，并用同一 latent 对比帧数、边界误差与画质，不能只比较速度。
+
+采集 VAE-only profile：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=15 RUN_ID=vae-16f-baseline \
 bash scripts/evaluation/run_vae_msprof.sh \
-  runs/benchmark/dense-dit-32s-3run/videos/rank0-1-0_regular_sp4.pt
+  runs/benchmark/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt
 ```
 
-重点检查 `profiling/analysis/compute_op_sum` 中 Conv3D、上采样、归一化和 TransData/格式
-转换的累计耗时。该结果用于决定是否需要算子替换或多卡 VAE，并不能替代无 profiler 延迟。
+## 9. msprof
 
-### 7.2 msprof 算子分析
+msprof 用于定位算子和通信，不用于发布延迟。profile 插桩本身有开销，必须先得到稳定的无 profiler p50。
 
-msprof 当前只测试 LongLive2。三个 preset：
-
-| preset | latent 帧 | 解码像素帧 | 24 FPS 时长 |
-| --- | ---: | ---: | ---: |
-| `16s` | 96 | 381 | 15.875 秒 |
-| `32s` | 192 | 765 | 31.875 秒 |
-| `64s` | 384 | 1533 | 63.875 秒 |
-
-关系为 `pixel_frames = (latent_frames - 1) x 4 + 1`；preset 名是便于识别的近似时长。
-
-默认 SP4 x DP1，并使用独立异步 VAE：4 张生成 worker 加 1 张 VAE 卡，共必须恰好暴露 5 张 NPU。固定提示词文件有 2 条，每 rank 第一条是 warmup，不计入 summary。
-
-Dense：
+采集 DiT-only：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4 \
-GENERATION_ENV=/path/to/longlive-env \
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-RUN_ID=sla_cag_2k_dense_msprof_32s \
-bash scripts/evaluation/run_msprof.sh 32s
+METHODS=dense,sla_cag DURATIONS=32s MODES=dit_only \
+PERF_DEVICES=0,1,2,3 TASK=msprof SUITE_ID=sla-dit-profile-01 \
+bash scripts/evaluation/run_performance_matrix.sh
 ```
 
-SLA+CAG：
+采集异步端到端：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4 \
-GENERATION_ENV=/path/to/longlive-env \
-LONGLIVE_GENERATOR_CKPT=runs/merged/longlive2_sla_cag_2k.pt \
-LONGLIVE_SPARSE_METHOD=sla_cag \
-RUN_ID=sla_cag_2k_sparse_msprof_32s \
-bash scripts/evaluation/run_msprof.sh 32s
+METHODS=dense,sla_cag DURATIONS=32s MODES=async_vae \
+PERF_DEVICES=0,1,2,3,15 TASK=msprof SUITE_ID=sla-async-profile-01 \
+bash scripts/evaluation/run_performance_matrix.sh
 ```
 
-脚本始终运行完整 msprof：生成 resolved YAML、用 msprof 包裹 torchrun、恢复/解析 profile、汇总 warmup 后延迟和 FPS，并执行算子、HCCL、通信矩阵、慢卡、free analysis 和 advisor。
+默认启用 AICore PMU。若环境在 PMU 初始化时报 `DrvFftsProfileStart failed` 或 `561103`，可用新的 `RUN_ID` 和 `MSPROF_AI_CORE=false` 重跑，以区分模型问题和 PMU 环境问题；关闭 PMU 的结果不能用于 AICore 流水线利用率结论。
 
-默认开启 AICore PMU 并采集 `PipeUtilization`，用于分析 AICore 流水线利用率。多进程入口会先绑定各自的 `local_rank`，再解析默认 NPU，避免所有 rank 在 profiler 启动期间共同初始化逻辑 `npu:0`。
+## 10. VBench 质量评测
+
+当前维护 VBench Standard 的 Full、5% 和 20%，以及与其逐行对齐的增强提示词版本。5% 与 20% 是独立抽样，5% 不是 20% 的子集。原生 Wan2.2 仅运行 dense。
+
+单项评测：
 
 ```bash
-MSPROF_AI_CORE=true bash scripts/evaluation/run_msprof.sh 32s
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_SPARSE_METHOD=hsa_sla_cag \
+RUN_ID=hybrid-20pct \
+bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
 ```
 
-部分芯片、驱动、固件与 CANN 组合仍可能在 PMU 初始化阶段报 `DrvFftsProfileStart failed` 或 `561103`。此时可使用新的 `RUN_ID` 并设置 `MSPROF_AI_CORE=false` 重跑一次，以区分模型执行问题和 PMU 环境问题。关闭 PMU 的结果只有 task timeline、AscendCL、Runtime、AICPU、HCCL 和系统内存数据，可用于定位耗时与通信，但不能用于 AICore 流水线利用率结论；正式性能报告仍必须在版本匹配的环境中启用 PMU。失败运行产生的 `PROF_*` 仅包含不完整初始化数据，也不能用于性能结论。
+统一矩阵：
 
-终端关键输出：
-
-```text
-[run] task=msprof preset=32s run_id=...
-[run] devices=... layout=SP4xDP1
-[run] config=.../resolved.yaml profile=.../profiling/raw
-[analyze] compute_op_sum
-[analyze] hccl_sum
-...
-[done] run=runs/msprof/...
-[note] latency and FPS in this run include msprof collection overhead
+```bash
+VBENCH_PRESETS=longlive2_standard_20pct \
+DENSE_GENERATOR_CKPT=/path/to/dense.pt \
+HSA_CAG_GENERATOR_CKPT=/path/to/hsa.pt \
+SLA_CAG_GENERATOR_CKPT=/path/to/sla.pt \
+HSA_SLA_CAG_GENERATOR_CKPT=/path/to/hybrid.pt \
+SUITE_ID=vbench-release-01 \
+bash scripts/evaluation/run_vbench_matrix.sh
 ```
 
-产物：
+正式对比必须固定提示词版本、checkpoint、seed、分辨率、帧数、FPS 和采样步数。最终只采用 AISBench 输出的 16 个官方维度及 `quality`、`semantic`、`total` 汇总，不自行更改维度权重。
 
-```text
-runs/msprof/<run-id>/
-├── manifest.json
-├── resolved.yaml
-├── summary.txt
-├── videos/
-└── profiling/
-    ├── raw/PROF_*/
-    └── analysis/{all,compute_op_sum,hccl_sum,...}/
+## 11. 结果判定
 
-logs/msprof/<run-id>/
-├── msprof.log
-└── recovery.log                 # 仅触发恢复解析时存在
-```
+一项稀疏方法进入默认推理路径前，应同时满足：
 
-`summary.txt` 是从生成日志按 `warmup_per_rank` 汇总的延迟/FPS；msprof 插桩有开销，只能在相同 profiler 参数、硬件、帧数和布局下横向比较，不能当作无侵入生产吞吐。
-
-## 8. 结果验收和常见问题
-
-- 查看 `manifest.json` 和 resolved YAML，确认 checkpoint、模型类别、seed、SP/DP 和 `sparsity_method`。
-- 稀疏运行的 resolved YAML 必须含 `model_kwargs.sparse_config.enabled: true`、
-  `backend: mindiesd` 与 `block_q/block_k: 128`。
-- Dense/SLA 使用不同 `RUN_ID`，否则已有视频可能被错误复用。
-- 比较质量时保持同一 checkpoint、subset 和 seeds；比较性能时还要保持 profiler 参数和布局。
-- VBench 生成失败先看 `logs/vbench/<run-id>/seed_<seed>.log`，评测失败看 `aisbench.log`。
-- msprof 无 `PROF_*` 目录时视为失败；`msprof-analyze` 单项失败会输出 warning，但主 profile 和 summary 仍保留。
-- `runs/` 保存配置、视频、checkpoint 和结构化结果；`logs/` 只保存文本日志和 JSONL。
+1. 推理算子数值 smoke test 通过，且真实 shape 的完整稀疏路径快于 dense。
+2. 相同 checkpoint 的 32 秒 DiT-only p50 稳定优于 dense，并至少有 3 次有效测量。
+3. VBench 质量下降在预先约定范围内，且 dense/sparse 使用完全一致的评测设置。
+4. 同步和异步 VAE 模式分别报告，不用 DiT 收益替代端到端收益。
+5. 64 秒结果不出现缓存增长、OOM、队列阻塞或稀疏率异常。
+6. msprof 结论与无 profiler 的墙钟结果一致，不使用 profile 延迟计算发布加速比。

@@ -1,14 +1,11 @@
-# VBench Standard 20% K-Means subset
+# VBench Standard 20% K-Means 子集
 
-This dataset is a fixed, representative subset of VBench 1.0 Standard for
-faster LongLive quality regression tests.
+该数据集是 VBench 1.0 Standard 的固定代表性子集，用于较快的 LongLive 质量回归测试。
 
-- `prompts.txt`: 186 unique prompts used for generation.
-- `full_info.json`: 187 official metadata records covering all 16
-  VBench metrics. One prompt occurs in two metadata records.
+- `prompts.txt`：186 条用于生成的唯一提示词。
+- `full_info.json`：187 条官方元数据记录，覆盖 16 个 VBench 维度；其中一条提示词对应两条元数据记录。
 
-The subset was generated from AISBench/datasets commit `26f93b6` using its
-official VBench metadata features and K-Means pipeline:
+该子集基于 AISBench/datasets 提交 `26f93b6`，使用官方 VBench 元数据特征和 K-Means 流程生成：
 
 ```bash
 python mini_datasets/select_metadata_by_kmeans.py \
@@ -18,9 +15,6 @@ python mini_datasets/select_metadata_by_kmeans.py \
   -a
 ```
 
-The ratio is applied independently to the 11 source prompt suites before they
-are merged. The resulting 186 unique prompts are 19.7% of the 944-prompt full
-suite. This subset is suitable for regression and comparison experiments, but
-its scores must not be reported as full VBench Standard results.
+抽样比例分别作用于 11 个源提示词集合，再合并为 186 条唯一提示词，占完整 944 条提示词的 19.7%。该子集适合回归和方案对比，但其分数不能作为完整 VBench Standard 结果报告。
 
-Source: https://github.com/AISBench/datasets/tree/main/mini_datasets/vbench_1.0_mini
+来源：https://github.com/AISBench/datasets/tree/main/mini_datasets/vbench_1.0_mini

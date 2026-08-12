@@ -1,22 +1,13 @@
-# VBench Standard augmented prompts
+# VBench Standard 完整增强提示词
 
-This directory contains 944 generated prompts in the same order as
-`../../vbench_standard/full/prompts.txt`.
+本目录包含 944 条增强提示词，顺序与 `../../vbench_standard/full/prompts.txt` 一致。
 
-- Generation uses `prompts.txt`.
-- Output naming uses `../../vbench_standard/full/prompts.txt`.
-- Evaluation uses `../../vbench_standard/full/full_info.json`.
+- 生成使用 `prompts.txt`。
+- 输出命名使用 `../../vbench_standard/full/prompts.txt`。
+- 评测使用 `../../vbench_standard/full/full_info.json`。
 
-The generated prompts come from the public VBench artifact
-`prompts/augmented_prompts/Wan2.1-T2V-1.3B/all_dimension_aug_wanx_seed42.txt`.
-The artifact was produced with Wan2.1's `QwenPromptExpander`,
-`Qwen/Qwen2.5-3B-Instruct`, and seed 42. The source contains 946 rows; two
-duplicate source prompts have identical generated text, so it maps without
-ambiguity to the 944 unique prompts used here.
+增强提示词来自 VBench 公开产物 `prompts/augmented_prompts/Wan2.1-T2V-1.3B/all_dimension_aug_wanx_seed42.txt`，由 Wan2.1 的 `QwenPromptExpander`、`Qwen/Qwen2.5-3B-Instruct` 和 seed 42 生成。源文件有 946 行，其中两组重复原始提示词的增强文本相同，因此可无歧义映射到本目录的 944 条唯一提示词。
 
-Source:
-https://github.com/Vchitect/VBench/tree/master/prompts/augmented_prompts/Wan2.1-T2V-1.3B
+来源：https://github.com/Vchitect/VBench/tree/master/prompts/augmented_prompts/Wan2.1-T2V-1.3B
 
-This is a reproducible public prompt-augmentation baseline. It is not proven to
-be byte-for-byte identical to the unpublished prompt augmentation used for the
-LongLive-2.0 paper results.
+该数据是可公开复现的提示词增强基线，不能证明与 LongLive-2.0 论文未公开的提示词增强逐字一致。
