@@ -207,6 +207,13 @@ successful run and writes `validation.json` beside the final checkpoint. It
 also saves the final step when it falls outside `SAVE_INTERVAL`. Set
 `VALIDATE_LINEAR_CHECKPOINT=0` only when debugging the validator itself.
 
+Hybrid multi-layer training requires the `ascend_triton` sparse Q/K/V backward.
+MindIE-SD is forward-only; a local linear-projection gradient check is not a
+training-kernel qualification. Before distributed training, run
+`tests/npu/benchmark_sparse_attention.py --method hsa_sla_cag --backend
+ascend_triton --latent-frames 32 --warmup 1 --iterations 1
+--check-training-backward` and require `training_backward=passed`.
+
 ```bash
 python scripts/checkpoints/validate_linear_checkpoint.py \
   /path/to/checkpoints/step_0001000/generator_linear.pt \

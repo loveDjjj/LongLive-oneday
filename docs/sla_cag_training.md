@@ -304,6 +304,19 @@ Hybrid 每次保存完整 `train_state.pt` 时，还会原子写入同目录下�
 `validation.json`；全零、非有限值、层数或元数据错误会令 launcher 返回失败。仅在
 排查验收器本身时设置 `VALIDATE_LINEAR_CHECKPOINT=0`。也可手工执行：
 
+开始多卡训练前，必须先验证 Ascend Triton 的 Q/K/V 反向。MindIE-SD
+RainFusion/BSA 是推理前向算子，`--check-linear-backward` 只证明补偿层本身可求导，
+不能代替下面的完整训练反向检查：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=15 python tests/npu/benchmark_sparse_attention.py \
+  --method hsa_sla_cag --backend ascend_triton --device npu:0 \
+  --latent-frames 32 --warmup 1 --iterations 1 \
+  --check-training-backward
+```
+
+输出必须包含 `training_backward=passed`，否则不要启动 12 卡训练。
+
 ```bash
 python scripts/checkpoints/validate_linear_checkpoint.py \
   runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/train_state.pt \

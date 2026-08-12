@@ -149,7 +149,18 @@ def main() -> None:
     parser.add_argument(
         "--check-linear-backward",
         action="store_true",
-        help="for hsa_sla_cag, verify gradients reach only the linear projection",
+        help=(
+            "for hsa_sla_cag, verify the local linear projection receives gradients; "
+            "this does not validate sparse-kernel Q/K/V backward"
+        ),
+    )
+    parser.add_argument(
+        "--check-training-backward",
+        action="store_true",
+        help=(
+            "for hsa_sla_cag with ascend_triton, verify real-shape Q/K/V and "
+            "linear-projection backward required by multi-layer training"
+        ),
     )
     args = parser.parse_args()
     if args.method in {"hsa_cag", "hsa_sla_cag"} and args.backend == "mindiesd_bsa":
@@ -158,6 +169,13 @@ def main() -> None:
         raise ValueError("warmup and iterations must be positive")
     if args.check_linear_backward and args.method != "hsa_sla_cag":
         raise ValueError("--check-linear-backward requires --method hsa_sla_cag")
+    if args.check_training_backward and args.method != "hsa_sla_cag":
+        raise ValueError("--check-training-backward requires --method hsa_sla_cag")
+    if args.check_training_backward and args.backend != "ascend_triton":
+        raise ValueError(
+            "--check-training-backward requires --backend ascend_triton; "
+            "MindIE-SD sparse operators are forward-only"
+        )
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
@@ -279,6 +297,46 @@ def main() -> None:
             f"bias_grad_norm={bias_grad.float().norm().item():.6f} "
             f"q_grad={q.grad is not None} k_grad={k.grad is not None} "
             f"v_grad={v.grad is not None}"
+        )
+    if args.check_training_backward:
+        projection.zero_grad(set_to_none=True)
+        q_train = q.detach().requires_grad_(True)
+        k_train = k.detach().requires_grad_(True)
+        v_train = v.detach().requires_grad_(True)
+        output = hsa_sla_cag_attention(
+            q_train,
+            k_train,
+            v_train,
+            frame_seq=880,
+            chunk_id=chunk_id,
+            sparse_config=config,
+            linear_projection=projection,
+            attention_cache=None,
+        )
+        output.float().square().mean().backward()
+        gradients = {
+            "q": q_train.grad,
+            "k": k_train.grad,
+            "v": v_train.grad,
+            "weight": projection.weight.grad,
+            "bias": projection.bias.grad,
+        }
+        for name, gradient in gradients.items():
+            if gradient is None:
+                raise RuntimeError(f"hybrid training backward produced no {name} gradient")
+            if not torch.isfinite(gradient).all().item():
+                raise RuntimeError(
+                    f"hybrid training backward produced non-finite {name} gradient"
+                )
+        norms = {
+            name: gradient.float().norm().item()
+            for name, gradient in gradients.items()
+        }
+        if any(value == 0.0 for value in norms.values()):
+            raise RuntimeError(f"hybrid training backward has zero gradients: {norms}")
+        print(
+            "training_backward=passed "
+            + " ".join(f"{name}_grad_norm={value:.6f}" for name, value in norms.items())
         )
 
 
