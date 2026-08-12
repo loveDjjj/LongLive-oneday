@@ -14,6 +14,7 @@ from wan_5b.modules.sla_attention_mindiesd import (
     _prepare_mindiesd_bsa_mask,
     _prepare_mindiesd_lut,
 )
+from wan_5b.modules.sparse_attention import parse_sparse_config, sparse_method
 
 
 def _projection(dim: int, *, identity: bool = False) -> torch.nn.Linear:
@@ -43,6 +44,12 @@ def _config(**overrides) -> SLAAttentionConfig:
     }
     values.update(overrides)
     return SLAAttentionConfig(**values)
+
+
+def test_dispatcher_accepts_parsed_sla_config():
+    config = _config()
+    assert sparse_method(config) == "sla_cag"
+    assert parse_sparse_config(config) is config
 
 
 def test_cag_starts_dense_and_preserves_average_budget():

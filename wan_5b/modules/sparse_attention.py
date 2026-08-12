@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeAlias
 
 from .hsa_attention import HSAAttentionConfig, hsa_cag_attention
 from .hsa_sla_attention import HSASLAAttentionConfig, hsa_sla_cag_attention
@@ -14,6 +14,10 @@ from .sla_attention import SLAAttentionConfig, sla_cag_attention
 
 SPARSE_METHODS = ("hsa_cag", "sla_cag", "hsa_sla_cag")
 SPARSE_CACHE_KEYS = ("sparse_attention_cache", "sla_attention_cache")
+ParsedSparseConfig: TypeAlias = (
+    HSAAttentionConfig | SLAAttentionConfig | HSASLAAttentionConfig
+)
+SparseConfig: TypeAlias = Mapping[str, Any] | ParsedSparseConfig
 
 
 def clear_sparse_attention_cache(kv_cache) -> None:
@@ -23,7 +27,13 @@ def clear_sparse_attention_cache(kv_cache) -> None:
             block_cache.pop(key, None)
 
 
-def sparse_method(value: Mapping[str, Any] | None) -> str:
+def sparse_method(value: SparseConfig | None) -> str:
+    if isinstance(value, HSAAttentionConfig):
+        return "hsa_cag" if value.enabled else "dense"
+    if isinstance(value, HSASLAAttentionConfig):
+        return "hsa_sla_cag" if value.enabled else "dense"
+    if isinstance(value, SLAAttentionConfig):
+        return "sla_cag" if value.enabled else "dense"
     config = dict(value or {})
     if not config.get("enabled", False):
         return "dense"
@@ -37,7 +47,9 @@ def sparse_method(value: Mapping[str, Any] | None) -> str:
     return method
 
 
-def parse_sparse_config(value: Mapping[str, Any] | None):
+def parse_sparse_config(value: SparseConfig | None) -> ParsedSparseConfig:
+    if isinstance(value, (HSAAttentionConfig, SLAAttentionConfig, HSASLAAttentionConfig)):
+        return value
     method = sparse_method(value)
     if method == "dense":
         return SLAAttentionConfig()
@@ -52,7 +64,7 @@ def calculate_chunk_sparsities(
     num_output_frames: int,
     num_frame_per_block: int,
     local_attn_size: int,
-    sparse_config: Mapping[str, Any] | None,
+    sparse_config: SparseConfig | None,
 ) -> list[float]:
     config = parse_sparse_config(sparse_config)
     if not config.enabled or num_output_frames <= 0:

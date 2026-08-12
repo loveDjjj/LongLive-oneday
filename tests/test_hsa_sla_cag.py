@@ -46,7 +46,10 @@ def _projection(dim, identity=False):
 def test_hybrid_dispatcher_uses_independent_method():
     config = {**_config().__dict__, "method": "hsa_sla_cag"}
     assert sparse_method(config) == "hsa_sla_cag"
-    assert isinstance(parse_sparse_config(config), HSASLAAttentionConfig)
+    parsed = parse_sparse_config(config)
+    assert isinstance(parsed, HSASLAAttentionConfig)
+    assert sparse_method(parsed) == "hsa_sla_cag"
+    assert parse_sparse_config(parsed) is parsed
 
 
 def test_hybrid_first_chunk_is_exact_dense_attention():

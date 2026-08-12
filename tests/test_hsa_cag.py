@@ -32,7 +32,26 @@ def test_dispatcher_parses_explicit_and_legacy_methods():
     assert sparse_method(_config()) == "hsa_cag"
     assert sparse_method({"enabled": True, "keep_frames": 4}) == "hsa_cag"
     assert sparse_method({"enabled": True, "feature_map": "softmax"}) == "sla_cag"
-    assert isinstance(parse_sparse_config(_config()), HSAAttentionConfig)
+    parsed = parse_sparse_config(_config())
+    assert isinstance(parsed, HSAAttentionConfig)
+    assert sparse_method(parsed) == "hsa_cag"
+    assert parse_sparse_config(parsed) is parsed
+
+
+def test_dispatcher_accepts_parsed_hsa_config_in_attention_path():
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 2, 4)
+    k = torch.randn(1, 12, 2, 4)
+    output = sparse_attention(
+        q,
+        k,
+        k,
+        frame_seq=4,
+        chunk_id=2,
+        sparse_config=parse_sparse_config(_config()),
+        linear_projection=torch.nn.Linear(4, 4),
+    )
+    assert output.shape == q.shape
 
 
 def test_hsa_cag_starts_dense_and_preserves_average_budget():
