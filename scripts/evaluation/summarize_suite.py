@@ -57,6 +57,8 @@ def _common(run_dir: Path, manifest: dict) -> dict:
         "generator_checkpoint": manifest.get("generator_checkpoint"),
         "latent_frames": manifest.get("latent_frames"),
         "pixel_frames": manifest.get("pixel_frames"),
+        "sp_size": manifest.get("sp_size"),
+        "dp_size": manifest.get("dp_size"),
     }
 
 
@@ -77,12 +79,14 @@ def _performance_rows(run_dirs: list[Path]) -> list[dict]:
     for row in rows:
         if row["method"] != "dense":
             continue
-        key = (row["preset"], row["vae_mode"])
+        key = (row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
         if key in dense:
             raise RuntimeError(f"duplicate dense reference for {key}")
         dense[key] = row
     for row in rows:
-        reference = dense.get((row["preset"], row["vae_mode"]))
+        reference = dense.get(
+            (row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
+        )
         row["dense_speedup"] = (
             reference["generation_seconds_mean"] / row["generation_seconds_mean"]
             if reference is not None

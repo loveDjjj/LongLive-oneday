@@ -83,6 +83,29 @@ def test_manifest_records_generator_checkpoint_override(tmp_path, monkeypatch):
     assert vbench["generator_checkpoint"] == str(checkpoint)
 
 
+@pytest.mark.parametrize(
+    ("sp_size", "mode", "required_devices"),
+    [(1, "sync_vae", 1), (1, "async_vae", 2), (4, "sync_vae", 4), (4, "async_vae", 5)],
+)
+def test_benchmark_sp_override_controls_worker_and_vae_devices(
+    tmp_path, monkeypatch, sp_size, mode, required_devices
+):
+    monkeypatch.setenv("LONGLIVE_SP_SIZE", str(sp_size))
+    args = _args(MSPROF_CONFIG, "5s", tmp_path / f"sp{sp_size}-{mode}.yaml")
+    args.vae_mode = mode
+
+    metadata = resolve_benchmark(args)
+    resolved = OmegaConf.load(args.output)
+
+    assert metadata["sp_size"] == sp_size
+    assert metadata["nproc_per_node"] == sp_size
+    assert metadata["required_devices"] == required_devices
+    assert resolved.sp_size == sp_size
+    assert resolved.inference.vae_device == (
+        f"npu:{sp_size}" if mode == "async_vae" else None
+    )
+
+
 def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     monkeypatch.delenv("LONGLIVE_SLA_BACKEND", raising=False)

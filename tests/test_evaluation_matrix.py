@@ -27,18 +27,18 @@ def _dry_run(**overrides):
     ).stdout
 
 
-def test_complete_performance_matrix_expands_all_36_cases():
+def test_complete_performance_matrix_expands_all_72_cases():
     output = _dry_run(PERF_DEVICES="0,1,2,3,4")
     suite_lines = [line for line in output.splitlines() if line.startswith("[suite]")]
     dry_run_lines = [
         line for line in output.splitlines() if line.startswith("[dry-run]")
     ]
 
-    assert len(suite_lines) == 4 * 3 * 3
+    assert len(suite_lines) == 4 * 3 * 3 * 2
     assert len(dry_run_lines) == len(suite_lines)
     assert "method=dense duration=5s mode=dit_only" in suite_lines[0]
     assert any(
-        "method=hsa_sla_cag duration=64s mode=async_vae" in line
+        "method=hsa_sla_cag duration=64s mode=async_vae sp=4" in line
         for line in suite_lines
     )
     assert any("devices=0,1,2,3,4" in line for line in dry_run_lines)
@@ -49,6 +49,7 @@ def test_dit_only_matrix_requires_only_four_devices():
     output = _dry_run(
         PERF_DEVICES="8,9,10,11",
         MODES="dit_only",
+        SP_SIZES="4",
         DURATIONS="32s",
     )
     suite_lines = [line for line in output.splitlines() if line.startswith("[suite]")]
@@ -64,8 +65,9 @@ def test_msprof_matrix_uses_profiled_dit_directory():
         METHODS="dense",
         MODES="dit_only",
         DURATIONS="5s",
+        SP_SIZES="4",
     )
-    assert "run_dir=runs/msprof/dit/contract-dense-5s-dit_only" in output
+    assert "run_dir=runs/msprof/dit/contract-dense-5s-dit_only-sp4" in output
 
 
 def test_matrix_rejects_invalid_resume_flag():
@@ -101,11 +103,25 @@ def test_performance_matrix_selects_method_specific_checkpoints(tmp_path):
         PERF_DEVICES="0,1,2,3",
         MODES="dit_only",
         DURATIONS="5s",
+        SP_SIZES="4",
         **checkpoints,
     )
 
     for method in ("dense", "hsa_cag", "sla_cag", "hsa_sla_cag"):
-        assert f"method={method} duration=5s mode=dit_only checkpoint={tmp_path / f'{method}.pt'}" in output
+        assert f"method={method} duration=5s mode=dit_only sp=4 checkpoint={tmp_path / f'{method}.pt'}" in output
+
+
+def test_matrix_maps_sp1_and_sp4_async_to_two_and_five_devices():
+    output = _dry_run(
+        PERF_DEVICES="4,5,6,7,9",
+        METHODS="dense",
+        DURATIONS="5s",
+        MODES="async_vae",
+        SP_SIZES="1,4",
+    )
+
+    assert "devices=4,5 run_id=contract-dense-5s-async_vae-sp1" in output
+    assert "devices=4,5,6,7,9 run_id=contract-dense-5s-async_vae-sp4" in output
 
 
 def test_vbench_matrix_supports_shared_and_method_specific_checkpoints(tmp_path):

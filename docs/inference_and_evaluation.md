@@ -87,13 +87,13 @@ done
 
 ## 5. 性能模式
 
-统一支持三种模式：
+统一支持三种模式，并支持通过 `LONGLIVE_SP_SIZE` 或性能矩阵的 `SP_SIZES` 在 SP1 与 SP4 间切换：
 
 | 模式 | NPU 数 | 行为 | 用途 |
 | --- | ---: | --- | --- |
-| `dit_only` | 4 | 不加载 VAE，只保存 latent | 判断稀疏是否加速 DiT |
-| `sync_vae` | 4 | SP leader 同步解码完整视频 | 观察串行 VAE 代价 |
-| `async_vae` | 5 | 4 张 SP worker + 1 张专用 VAE 卡 | 测量真实异步关键路径 |
+| `dit_only` | SP 数 | 不加载 VAE，只保存 latent | 判断稀疏是否加速 DiT |
+| `sync_vae` | SP 数 | SP leader 同步解码完整视频 | 观察串行 VAE 代价 |
+| `async_vae` | SP 数 + 1 | SP worker + 1 张专用 VAE 卡 | 测量真实异步关键路径 |
 
 当前 `async_vae` 确实使用后台队列/线程，在独立 NPU 上执行分块 `cached_decode`。它不是把 DiT 时间和 VAE 时间简单相加；最终墙钟时间由重叠后的关键路径和 drain 决定。应同时查看 `ar_loop_seconds`、`vae_decode_seconds`、`vae_enqueue_seconds`、`vae_drain_seconds`、`vae_overlap_seconds`、chunk 数和队列峰值。
 
@@ -131,17 +131,17 @@ bash scripts/evaluation/run_benchmark.sh 32s
 
 ## 7. 完整性能矩阵
 
-默认矩阵包含 4 种方法、3 个时长和 3 种模式：
+默认矩阵包含 4 种方法、3 个时长、SP1/SP4 和 3 种模式，共 72 个 case：
 
 ```bash
-DRY_RUN=1 PERF_DEVICES=0,1,2,3,15 \
+DRY_RUN=1 SP_SIZES=1,4 PERF_DEVICES=0,1,2,3,15 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
 
 确认展开正确后运行：
 
 ```bash
-PERF_DEVICES=0,1,2,3,15 TASK=benchmark \
+SP_SIZES=1,4 PERF_DEVICES=0,1,2,3,15 TASK=benchmark \
 SUITE_ID=sparse-release-01 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
@@ -149,7 +149,7 @@ bash scripts/evaluation/run_performance_matrix.sh
 可缩小范围：
 
 ```bash
-METHODS=dense,hsa_cag DURATIONS=32s MODES=dit_only,async_vae \
+METHODS=dense,hsa_cag DURATIONS=32s MODES=dit_only,async_vae SP_SIZES=4 \
 PERF_DEVICES=0,1,2,3,15 TASK=benchmark SUITE_ID=hsa-retest-01 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```

@@ -50,6 +50,14 @@ def _generator_checkpoint(value: str) -> str:
     return os.environ.get("LONGLIVE_GENERATOR_CKPT", value)
 
 
+def _runtime_sp_size(value: int) -> int:
+    override = os.environ.get("LONGLIVE_SP_SIZE", "").strip()
+    sp_size = int(override) if override else int(value)
+    if sp_size <= 0:
+        raise ValueError(f"LONGLIVE_SP_SIZE/runtime.sp_size must be positive, got {sp_size}")
+    return sp_size
+
+
 def _save(config: dict, output: Path | None) -> None:
     if output is None:
         return
@@ -147,8 +155,18 @@ def resolve_msprof(args) -> dict:
     generation = config.generation
     measurement = config.measurement
     frames = int(preset.latent_frames)
-    sp_size = int(runtime.sp_size)
+    sp_size = _runtime_sp_size(runtime.sp_size)
     dp_size = int(runtime.dp_size)
+    model_num_heads = int(runtime.model_num_heads)
+    frames_per_block = int(config.model.num_frame_per_block)
+    if model_num_heads % sp_size != 0:
+        raise ValueError(
+            f"sp_size={sp_size} must divide model_num_heads={model_num_heads}"
+        )
+    if frames_per_block % sp_size != 0:
+        raise ValueError(
+            f"sp_size={sp_size} must divide num_frame_per_block={frames_per_block}"
+        )
     nproc = sp_size * dp_size
     vae_mode_override = getattr(args, "vae_mode", None)
     requested_mode = str(vae_mode_override or runtime.vae_mode)
@@ -211,7 +229,7 @@ def resolve_msprof(args) -> dict:
         "sp_size": sp_size,
         "dp_size": dp_size,
         "auto_sp_remainder": False,
-        "model_num_heads": int(runtime.model_num_heads),
+        "model_num_heads": model_num_heads,
         "use_ema": False,
         "output_folder": output_folder,
         "num_samples": 1,

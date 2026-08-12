@@ -123,6 +123,8 @@ def test_performance_suite_computes_dense_speedup_and_checkpoint_flag(tmp_path):
             "generator_checkpoint": checkpoint,
             "latent_frames": 192,
             "pixel_frames": 765,
+            "sp_size": 4,
+            "dp_size": 1,
         }
         summary = {
             "records": 3,
@@ -152,3 +154,41 @@ def test_performance_suite_computes_dense_speedup_and_checkpoint_flag(tmp_path):
     assert rows["hsa_sla_cag"]["dense_speedup"] == 1.5
     assert rows["hsa_sla_cag"]["checkpoint_matched_to_dense"] is False
     assert (output_dir / "results.csv").is_file()
+
+
+def test_performance_suite_uses_matching_sp_dense_reference(tmp_path):
+    runs_root = tmp_path / "runs"
+    for method, sp_size, latency in (
+        ("dense", 1, 80.0),
+        ("sla_cag", 1, 60.0),
+        ("dense", 4, 48.0),
+        ("sla_cag", 4, 36.0),
+    ):
+        run_dir = runs_root / f"suite-{method}-32s-dit_only-sp{sp_size}"
+        run_dir.mkdir(parents=True)
+        manifest = {
+            "task": "benchmark",
+            "preset": "32s",
+            "vae_mode": "dit_only",
+            "sparsity_method": method,
+            "sparsity_backend": "dense" if method == "dense" else "mindiesd",
+            "generator_checkpoint": "shared.pt",
+            "latent_frames": 192,
+            "pixel_frames": 765,
+            "sp_size": sp_size,
+            "dp_size": 1,
+        }
+        summary = {"records": 3, "generation_seconds_mean": latency}
+        (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    output_dir = tmp_path / "suite_output"
+    _run(
+        "summarize_suite.py", "benchmark", "--suite-id", "suite",
+        "--runs-root", str(runs_root), "--output-dir", str(output_dir),
+    )
+
+    rows = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))["rows"]
+    sparse = {row["sp_size"]: row for row in rows if row["method"] == "sla_cag"}
+    assert sparse[1]["dense_speedup"] == 80 / 60
+    assert sparse[4]["dense_speedup"] == 48 / 36
