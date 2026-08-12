@@ -35,6 +35,8 @@ measurement:
 
 # latent 帧数分别对应约 16、32 和 64 秒的像素视频。
 presets:
+  5s:
+    latent_frames: 32
   16s:
     latent_frames: 96
   32s:
@@ -54,22 +56,34 @@ msprof:
   aic_metrics: PipeUtilization
   recover_parse: auto
 
-# 默认运行稠密对照；设置 LONGLIVE_SPARSE_METHOD=sla_cag 可启用 SLA+CAG。
+# 默认运行稠密对照；LONGLIVE_SPARSE_METHOD 可选择 hsa_cag 或 sla_cag。
 sparsity:
   enabled: false
   method: dense
-  options:
-    # 稀疏 softmax 分支使用 MindIE-SD 融合算子，线性分支在模型层计算。
-    backend: mindiesd
-    sparsity: 0.95
-    sparsity_base: 0.97
-    block_q: 128
-    block_k: 128
-    feature_map: softmax
-    keep_sink_frames: 1
-    keep_recent_frames: 1
-    dense_current: false
-    min_sparse_history_frames: 1
-    query_block_batch: 1
-    linear_cache: true
-    linear_eps: 1.0e-5
+  profiles:
+    hsa_cag:
+      backend: mindiesd
+      sparsity: 0.85
+      sparsity_base: 0.95
+      block_q: 128
+      block_k: 128
+      keep_frames: 6
+      keep_sink: 1
+      keep_near: 2
+      dense_current: true
+      min_sparse_history_frames: 2
+      query_block_batch: 1
+    sla_cag:
+      backend: mindiesd
+      sparsity: 0.95
+      sparsity_base: 0.97
+      block_q: 128
+      block_k: 128
+      feature_map: softmax
+      keep_sink_frames: 1
+      keep_recent_frames: 1
+      dense_current: false
+      min_sparse_history_frames: 1
+      query_block_batch: 1
+      linear_cache: true
+      linear_eps: 1.0e-5

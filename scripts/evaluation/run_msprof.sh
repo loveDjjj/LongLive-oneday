@@ -15,6 +15,12 @@ export MASTER_PORT="${MASTER_PORT:-29820}"
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
 PRESET="${1:-32s}"
+MSPROF_MODE="${MSPROF_MODE:-async_vae}"
+
+if [[ ! "${MSPROF_MODE}" =~ ^(dit_only|sync_vae|async_vae)$ ]]; then
+  echo "[error] MSPROF_MODE must be dit_only, sync_vae, or async_vae" >&2
+  exit 1
+fi
 
 if [[ ! -f "${CONFIG_PATH}" || ! -f "${CANN_ENV_SCRIPT}" ]]; then
   echo "[error] missing config or CANN environment: ${CONFIG_PATH}, ${CANN_ENV_SCRIPT}" >&2
@@ -43,7 +49,8 @@ done
 metadata_tmp="$(mktemp "${TMPDIR:-/tmp}/longlive_msprof.XXXXXX.json")"
 trap 'rm -f "${metadata_tmp}"' EXIT
 "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py msprof \
-  --config "${CONFIG_PATH}" --preset "${PRESET}" >"${metadata_tmp}"
+  --config "${CONFIG_PATH}" --preset "${PRESET}" \
+  --vae-mode "${MSPROF_MODE}" >"${metadata_tmp}"
 
 json_field() {
   "${GENERATION_ENV}/bin/python" -c \
@@ -104,11 +111,13 @@ cp "${metadata_tmp}" "${run_dir}/manifest.json"
 
 "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py msprof \
   --config "${CONFIG_PATH}" --preset "${PRESET}" \
+  --vae-mode "${MSPROF_MODE}" \
   --output "${resolved_config}" --output-folder "${video_dir}" >/dev/null
 
 echo "[run] task=msprof preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
 echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
+echo "[run] mode=${MSPROF_MODE}"
 echo "[run] config=${resolved_config} profile=${profile_dir}"
 echo "[run] msprof_ai_core=${ai_core} task_time=${task_time}"
 

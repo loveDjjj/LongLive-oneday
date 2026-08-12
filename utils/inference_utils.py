@@ -161,16 +161,23 @@ def apply_and_merge_lora(
 
     if verbose:
         print(f"[LoRA] Wrapping generator with adapter config: {adapter_cfg}")
+    sparse_config = getattr(getattr(config, "model_kwargs", None), "sparse_config", {})
+    sparse_method = sparse_config.get(
+        "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
+    )
     pipeline.generator.model = configure_lora_for_model(
         pipeline.generator.model,
         model_name="generator",
         lora_config=adapter_cfg,
         is_main_process=verbose,
+        include_sla_linear=sparse_method == "sla_cag",
     )
 
     if verbose:
         print(f"[LoRA] Loading LoRA weights from: {lora_ckpt}")
-    lora_state = load_lora_state_dict(lora_ckpt)
+    lora_state = load_lora_state_dict(
+        lora_ckpt, expected_sparse_method=sparse_method
+    )
     peft.set_peft_model_state_dict(pipeline.generator.model, lora_state)  # type: ignore[arg-type]
 
     if verbose:

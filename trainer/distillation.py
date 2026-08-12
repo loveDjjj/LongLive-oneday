@@ -280,7 +280,13 @@ class Trainer:
                 if self.is_main_process:
                     print(f"Loading LoRA checkpoint from {lora_checkpoint_path} (before FSDP wrapping)")
 
-                validate_sparse_checkpoint_method(lora_checkpoint, "sla_cag")
+                sparse_method = self.config.model_kwargs.sparse_config.get(
+                    "method",
+                    "hsa_cag"
+                    if "keep_frames" in self.config.model_kwargs.sparse_config
+                    else "sla_cag",
+                )
+                validate_sparse_checkpoint_method(lora_checkpoint, sparse_method)
 
                 if "generator_lora" not in lora_checkpoint:
                     raise ValueError(f"LoRA checkpoint {lora_checkpoint_path} is not a valid LoRA checkpoint. "
@@ -681,7 +687,14 @@ class Trainer:
                 "critic_optimizer": critic_optim_state,
                 "step": self.step,
                 "checkpoint_format_version": 3,
-                "sparse_method": "sla_cag",
+                "sparse_method": str(
+                    self.config.model_kwargs.sparse_config.get(
+                        "method",
+                        "hsa_cag"
+                        if "keep_frames" in self.config.model_kwargs.sparse_config
+                        else "sla_cag",
+                    )
+                ),
                 "world_size": self.world_size,
                 "sequence_parallel_size": self.sequence_parallel_size,
                 "data_parallel_size": self.data_parallel_size,
@@ -985,11 +998,16 @@ class Trainer:
         for name, module in transformer.named_modules():
             if module.__class__.__name__ in adapter_target_modules:
                 for full_submodule_name, submodule in module.named_modules(prefix=name):
+                    sparse_config = self.config.model_kwargs.sparse_config
+                    sparse_method = sparse_config.get(
+                        "method",
+                        "hsa_cag" if "keep_frames" in sparse_config else "sla_cag",
+                    )
                     if (
                         isinstance(submodule, torch.nn.Linear)
                         and not (
-                            model_name == "fake_score"
-                            and full_submodule_name.endswith(".sla_linear")
+                            full_submodule_name.endswith(".sla_linear")
+                            and (model_name == "fake_score" or sparse_method != "sla_cag")
                         )
                     ):
                         target_linear_modules.add(full_submodule_name)

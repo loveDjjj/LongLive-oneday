@@ -171,6 +171,11 @@ class SparseCheckpointContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected sla_cag"):
                 validate_sparse_checkpoint_method(checkpoint, "sla_cag")
 
+    def test_accepts_matching_hsa_checkpoint(self):
+        validate_sparse_checkpoint_method(
+            {"sparse_method": "hsa_cag"}, "hsa_cag"
+        )
+
 
 class FullTrainingStateTest(unittest.TestCase):
     def test_converts_and_restores_fsdp_optimizer_state(self):

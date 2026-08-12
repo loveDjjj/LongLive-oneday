@@ -84,6 +84,9 @@ def main() -> None:
                 "ASCEND_RT_VISIBLE_DEVICES",
                 "MASTER_ADDR",
                 "MASTER_PORT",
+                "SPARSE_METHOD",
+                "SPARSE_BACKEND",
+                "SPARSE_QUERY_BLOCK_BATCH",
                 "SLA_BACKEND",
                 "PYTORCH_NPU_ALLOC_CONF",
             )

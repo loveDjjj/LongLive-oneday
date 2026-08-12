@@ -101,9 +101,9 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
         self.global_sink_size = 0
-        from wan_5b.modules.sla_attention import SLAAttentionConfig
+        from wan_5b.modules.sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
-        self._sparse_config = SLAAttentionConfig.from_mapping(self.sparse_config)
+        self._sparse_config = parse_sparse_config(self.sparse_config)
         self.qk_norm = qk_norm
         self.eps = eps
 
@@ -124,9 +124,9 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
     def set_sparse_config(self, sparse_config):
-        from wan_5b.modules.sla_attention import SLAAttentionConfig
+        from wan_5b.modules.sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
-        self._sparse_config = SLAAttentionConfig.from_mapping(self.sparse_config)
+        self._sparse_config = parse_sparse_config(self.sparse_config)
 
     def forward(self, x, seq_lens, grid_sizes, freqs, kv_cache=None,
                 current_start=0, cache_start=None, t_scale=1.0,
@@ -221,10 +221,10 @@ class UlyssesCausalWanSelfAttention(nn.Module):
 
         with NVTXRange("ulysses_cached_attention"):
             if self._sparse_config.enabled:
-                from wan_5b.modules.sla_attention import sla_cag_attention
+                from wan_5b.modules.sparse_attention import sparse_attention
                 num_new_frames = max(1, s_total // frame_seqlen)
                 chunk_id = current_start_frame // num_new_frames
-                out_heads = sla_cag_attention(
+                out_heads = sparse_attention(
                     roped_q, k_full, v_full,
                     frame_seq=frame_seqlen,
                     chunk_id=chunk_id,
@@ -232,7 +232,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                     linear_projection=self.sla_linear,
                     attention_cache=(
                         None if torch.is_grad_enabled()
-                        else kv_cache.setdefault("sla_attention_cache", {})
+                        else kv_cache.setdefault("sparse_attention_cache", {})
                     ),
                 )
             else:
@@ -523,7 +523,7 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.sink_size = sink_size
         self.sparse_config = dict(sparse_config or {})
         if self.sparse_config.get("enabled") and self.sparse_config.get("num_output_frames"):
-            from wan_5b.modules.sla_attention import with_cag_schedule
+            from wan_5b.modules.sparse_attention import with_cag_schedule
             self.sparse_config = with_cag_schedule(
                 self.sparse_config,
                 num_output_frames=int(self.sparse_config["num_output_frames"]),
@@ -570,7 +570,7 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
         self.kv_quant_config = None
 
     def configure_sparse_attention(self, num_output_frames):
-        from wan_5b.modules.sla_attention import with_cag_schedule
+        from wan_5b.modules.sparse_attention import with_cag_schedule
         self.sparse_config = with_cag_schedule(
             self.sparse_config,
             num_output_frames=int(num_output_frames),

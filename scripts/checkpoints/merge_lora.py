@@ -45,6 +45,10 @@ def main() -> None:
     from utils.wan_5b_wrapper import WanDiffusionWrapper
 
     config = normalize_config(OmegaConf.load(args.config_path))
+    sparse_config = getattr(config.model_kwargs, "sparse_config", {})
+    sparse_method = sparse_config.get(
+        "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
+    )
     generator_ckpt = args.generator_ckpt or getattr(config, "generator_ckpt", None)
     lora_ckpt = args.lora_ckpt or getattr(config, "lora_ckpt", None)
     if not generator_ckpt:
@@ -80,6 +84,7 @@ def main() -> None:
         model_name="generator",
         lora_config=config.adapter,
         is_main_process=True,
+        include_sla_linear=sparse_method == "sla_cag",
     )
 
     import peft
@@ -88,7 +93,7 @@ def main() -> None:
     peft.set_peft_model_state_dict(
         generator.model,
         load_lora_state_dict(
-            lora_ckpt, expected_sparse_method="sla_cag"
+            lora_ckpt, expected_sparse_method=sparse_method
         ),
     )  # type: ignore[arg-type]
 
@@ -107,7 +112,7 @@ def main() -> None:
         "model_name": getattr(config.model_kwargs, "model_name", None),
         "dtype": str(dtype).replace("torch.", ""),
         "merged_lora": True,
-        "sparse_method": "sla_cag",
+        "sparse_method": sparse_method,
     }
     torch.save(checkpoint, output_path)
     size_gib = os.path.getsize(output_path) / (1024 ** 3)

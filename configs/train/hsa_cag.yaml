@@ -1,8 +1,5 @@
-# LongLive2.0-5B 在昇腾上的 SLA+CAG 稀疏后训练配置。
-# 当前训练只读取提示词，不读取真实视频；生成器使用稀疏注意力，教师和判别器保持稠密注意力。
-
+# LongLive2.0-5B HSA+CAG sparse post-training on Ascend NPU.
 infra:
-  # SP 组内多卡共同计算一个视频样本；有效数据并行数为 world_size / sequence_parallel_size。
   sequence_parallel_size: 4
   sharding_strategy: hybrid_full
   mixed_precision: true
@@ -16,33 +13,26 @@ model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
   timestep_shift: 5.0
-  # 每个时间块包含 8 个 latent frame，32 帧训练轨迹共分为 4 个块。
   num_frame_per_block: 8
   local_attn_size: 32
   sparse_config:
     enabled: true
-    method: sla_cag
+    method: hsa_cag
     backend: ascend_triton
-    # SLA 以 5% Top-K 为起点；CAG 为早期 chunk 分配更多历史预算。
-    sparsity: 0.95
-    sparsity_base: 0.97
-    # Ulysses 交换后每个 8 帧 chunk 有 7040 token，可被 128-token block 整除。
-    block_q: 128
-    block_k: 128
-    feature_map: softmax
-    keep_sink_frames: 1
-    keep_recent_frames: 1
-    dense_current: false
-    min_sparse_history_frames: 1
-    linear_cache: true
-    linear_eps: 1.0e-5
-    # portable 后端按该值合并 Query Block；Triton 后端直接消费完整 LUT。
+    sparsity: 0.85
+    sparsity_base: 0.95
+    block_q: 40
+    block_k: 40
+    keep_frames: 6
+    keep_sink: 1
+    keep_near: 2
+    dense_current: true
+    min_sparse_history_frames: 2
     query_block_batch: 1
     num_output_frames: 32
     num_frame_per_block: 8
     local_attn_size: 32
 
-# DMD 的真实分数教师保持稠密注意力且不更新参数。
 real_model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -50,7 +40,6 @@ real_model_kwargs:
   num_frame_per_block: 8
   local_attn_size: 32
 
-# Fake Score 判别器保持稠密注意力，通过 LoRA 学习当前生成分布。
 fake_model_kwargs:
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
@@ -59,7 +48,6 @@ fake_model_kwargs:
   local_attn_size: 32
 
 checkpoints:
-  # 基础生成器权重；恢复训练时优先读取运行目录中最新的 train_state.pt。
   generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   lora_ckpt: null
 
@@ -68,7 +56,6 @@ algorithm:
   distribution_loss: dmd
   all_causal: true
   generator_is_causal: true
-  # 当前维护的是纯提示词 on-policy backward simulation，不支持视频监督和 I2V。
   i2v: false
   backward_simulation: true
   teacher_forcing: false
@@ -86,33 +73,25 @@ training:
   beta2: 0.999
   beta1_critic: 0.0
   beta2_critic: 0.999
-  # 每个 DP 副本一次处理一个提示词；SP rank 不计入 batch。
   batch_size: 1
-  # 有效 batch = DP 数量 x batch_size x gradient_accumulation_steps。
   gradient_accumulation_steps: 16
   max_grad_norm_generator: 10.0
   max_grad_norm_critic: 10.0
-  # LoRA 模式不维护 EMA。
   ema_weight: 0.0
-  # 每 10 步保存恢复状态，最多保留最近 20 份。
   log_iters: 10
   max_checkpoints: 20
   max_iters: 2000
   gc_interval: 50
-  # 判别器每步更新，生成器每 5 步更新一次。
   dfake_gen_update_ratio: 5
   num_training_frames: 32
   slice_last_frames: 32
 
 data:
-  # UTF-8 文本，每个非空行是一个训练提示词。
   data_path: data/train/vidprom_filtered_extended/prompts_train.txt
   eval_data_path: data/benchmarks/vbench_standard/5pct/prompts.txt
-  # 顺序为 [batch, latent帧, channel, height, width]。
   image_or_video_shape: [1, 32, 48, 44, 80]
 
 inference:
-  # backward simulation 和训练内验证使用相同的 4 步采样设置。
   sampling_steps: 4
   local_attn_size: 32
   sink_size: 0
@@ -120,7 +99,6 @@ inference:
   multi_shot_rope_offset: 8
 
 evaluation:
-  # 所有 rank 必须共同进入 FSDP 验证；默认只保存 latent，避免训练中频繁 VAE 解码。
   interval: 100
   num_frames: 32
   use_ema: false
@@ -135,11 +113,10 @@ adapter:
   apply_to_critic: true
   verbose: true
 
-# 昇腾 BF16 正式路径不启用量化。
 model_quant: false
 
 logging:
   seed: 42
   wandb_key: null
   wandb_entity: null
-  wandb_project: LongLive2-SLA-CAG-NPU
+  wandb_project: LongLive2-HSA-CAG-NPU

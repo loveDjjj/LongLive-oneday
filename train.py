@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import wandb
 
 from trainer import ScoreDistillationTrainer
-from utils.config import normalize_config, validate_sla_cag_training_config
+from utils.config import normalize_config, validate_sparse_training_config
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     args = parser.parse_args()
 
     config = normalize_config(OmegaConf.load(args.config_path))
-    validate_sla_cag_training_config(config)
+    validate_sparse_training_config(config)
     config.no_save = args.no_save
     config.no_visualize = args.no_visualize
 

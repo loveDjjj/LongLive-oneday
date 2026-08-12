@@ -185,8 +185,8 @@ def normalize_config(config):
     return config
 
 
-def validate_sla_cag_training_config(config):
-    """Validate the only maintained training workflow before model allocation."""
+def validate_sparse_training_config(config):
+    """Validate the maintained HSA/SLA sparse-training workflow."""
     errors = []
 
     def require(condition, message):
@@ -215,6 +215,14 @@ def validate_sla_cag_training_config(config):
     require(model_kwargs.get("model_name") == "Wan2.2-TI2V-5B", "only Wan2.2-TI2V-5B is supported")
     sparse = model_kwargs.get("sparse_config", {})
     require(bool(sparse.get("enabled", False)), "model_kwargs.sparse_config.enabled must be true")
+    sparse_method = sparse.get("method")
+    if sparse_method is None:
+        sparse_method = "hsa_cag" if "keep_frames" in sparse else "sla_cag"
+        sparse["method"] = sparse_method
+    require(
+        sparse_method in {"hsa_cag", "sla_cag"},
+        "sparse method must be hsa_cag or sla_cag",
+    )
     require(
         sparse.get("backend") in {"ascend_triton", "portable"},
         "sparse backend must be ascend_triton or portable",
@@ -234,11 +242,11 @@ def validate_sla_cag_training_config(config):
     )
     require(
         block_q > 0 and chunk_tokens % block_q == 0,
-        f"SLA block_q must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
+        f"sparse block_q must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
     )
     require(
         block_k > 0 and chunk_tokens % block_k == 0,
-        f"SLA block_k must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
+        f"sparse block_k must divide {chunk_tokens} tokens per chunk at SP{sp_size}",
     )
     require(int(sparse.get("query_block_batch", 0)) > 0, "sparse query_block_batch must be positive")
     require(0.0 <= float(sparse.get("sparsity", -1.0)) < 1.0, "sparse sparsity must be in [0, 1)")
@@ -291,5 +299,10 @@ def validate_sla_cag_training_config(config):
 
     if errors:
         formatted = "\n".join(f"  - {message}" for message in errors)
-        raise ValueError(f"Invalid SLA+CAG training configuration:\n{formatted}")
+        raise ValueError(f"Invalid sparse training configuration:\n{formatted}")
     return config
+
+
+def validate_sla_cag_training_config(config):
+    """Backward-compatible alias for older launchers and tests."""
+    return validate_sparse_training_config(config)

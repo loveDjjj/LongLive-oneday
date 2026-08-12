@@ -133,11 +133,11 @@ if getattr(config, "i2v", False):
 if getattr(config, "kv_quant", False):
     raise NotImplementedError("The supported inference path requires kv_quant=false.")
 
-sparse_config = getattr(config, "sparse_config", None)
+sparse_config = getattr(config.model_kwargs, "sparse_config", None)
 if sparse_config:
-    from wan_5b.modules.sla_attention import SLAAttentionConfig
+    from wan_5b.modules.sparse_attention import parse_sparse_config, sparse_method
 
-    parsed_sparse_config = SLAAttentionConfig.from_mapping(sparse_config)
+    parsed_sparse_config = parse_sparse_config(sparse_config)
     if parsed_sparse_config.enabled and parsed_sparse_config.backend == "mindiesd":
         from wan_5b.modules.sla_attention_mindiesd import (
             mindiesd_available,
@@ -146,7 +146,8 @@ if sparse_config:
 
         if not mindiesd_available():
             raise RuntimeError(
-                "SLA sparse inference requires MindIE-SD RainFusionAttention, but it could "
+                f"{sparse_method(sparse_config)} sparse inference requires MindIE-SD "
+                "RainFusionAttention, but it could "
                 "not be imported. Install a MindIE-SD build matching torch_npu/CANN "
                 f"before loading the model. Detail: {mindiesd_unavailable_reason()}"
             )
@@ -257,18 +258,26 @@ pipeline.is_lora_merged = False
 if has_lora_adapter:
     if is_main_process:
         print(f"[SP] Applying LoRA config: {config.adapter}")
+    runtime_sparse_config = sparse_config or {}
+    runtime_sparse_method = runtime_sparse_config.get(
+        "method",
+        "hsa_cag" if "keep_frames" in runtime_sparse_config else "sla_cag",
+    )
     pipeline.generator.model = configure_lora_for_model(
         pipeline.generator.model,
         model_name="generator",
         lora_config=config.adapter,
         is_main_process=is_main_process,
+        include_sla_linear=runtime_sparse_method == "sla_cag",
     )
     lora_ckpt_path = getattr(config, "lora_ckpt", None)
     if not lora_ckpt_path:
         raise ValueError("An adapter config requires checkpoints.lora_ckpt")
     peft.set_peft_model_state_dict(
         pipeline.generator.model,
-        load_lora_state_dict(lora_ckpt_path),
+        load_lora_state_dict(
+            lora_ckpt_path, expected_sparse_method=runtime_sparse_method
+        ),
     )
     if merge_lora:
         pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)

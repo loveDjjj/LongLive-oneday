@@ -126,6 +126,7 @@ bash scripts/evaluation/run_msprof.sh 32s
 - [环境安装、依赖检查与烟测](docs/getting_started.md)
 - [训练、数据集、日志、checkpoint 与恢复](docs/sla_cag_training.md)
 - [推理、VBench、msprof 与评测产物](docs/inference_and_evaluation.md)
+- [Dense/HSA+CAG/SLA+CAG 统一基线与性能矩阵](docs/unified_sparse_attention.md)
 - [昇腾稀疏注意力上游调研与技术选型](docs/ascend_sparse_attention_design.md)
 
 ## 上游项目

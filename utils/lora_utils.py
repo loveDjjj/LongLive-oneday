@@ -16,7 +16,14 @@ from torch.distributed.fsdp import (
 )
 
 
-def configure_lora_for_model(transformer, model_name, lora_config, is_main_process=True, all_causal=False):
+def configure_lora_for_model(
+    transformer,
+    model_name,
+    lora_config,
+    is_main_process=True,
+    all_causal=False,
+    include_sla_linear=True,
+):
     """Configure LoRA for a WanDiffusionWrapper model
     
     Args:
@@ -44,8 +51,8 @@ def configure_lora_for_model(transformer, model_name, lora_config, is_main_proce
                 if (
                     isinstance(submodule, torch.nn.Linear)
                     and not (
-                        model_name == "fake_score"
-                        and full_submodule_name.endswith(".sla_linear")
+                        full_submodule_name.endswith(".sla_linear")
+                        and (model_name == "fake_score" or not include_sla_linear)
                     )
                 ):
                     target_linear_modules.add(full_submodule_name)

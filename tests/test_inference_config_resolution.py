@@ -26,6 +26,7 @@ def _args(config, preset, output, *, seed=None):
         num_prompts=None,
         warmup_per_rank=None,
         save_latents_only=False,
+        vae_mode=None,
     )
 
 
@@ -86,6 +87,64 @@ def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     assert metadata["sparsity_backend"] == "mindiesd"
 
 
+def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+    monkeypatch.delenv("LONGLIVE_SPARSE_BACKEND", raising=False)
+    output = tmp_path / "hsa.yaml"
+
+    metadata = resolve_vbench(
+        _args(VBENCH_CONFIG, "longlive2_standard_5pct", output, seed=0)
+    )
+    sparse = OmegaConf.load(output).model_kwargs.sparse_config
+
+    assert sparse.enabled is True
+    assert sparse.method == "hsa_cag"
+    assert sparse.backend == "mindiesd"
+    assert sparse.keep_frames == 6
+    assert sparse.keep_sink == 1
+    assert sparse.keep_near == 2
+    assert "feature_map" not in sparse
+    assert metadata["sparsity_method"] == "hsa_cag"
+
+
+def test_vbench_rejects_bsa_for_hsa(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+    monkeypatch.setenv("LONGLIVE_SPARSE_BACKEND", "mindiesd_bsa")
+
+    with pytest.raises(ValueError, match="unsupported sparse inference backend"):
+        resolve_vbench(
+            _args(VBENCH_CONFIG, "longlive2_standard_5pct", tmp_path / "bad_hsa.yaml", seed=0)
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_mode", "required_devices", "save_latents", "async_vae"),
+    [
+        ("dit_only", "dit_only", 4, True, False),
+        ("sync_vae", "sync_vae", 4, False, False),
+        ("async_vae", "async_vae", 5, False, True),
+    ],
+)
+def test_benchmark_vae_modes(
+    tmp_path, monkeypatch, mode, expected_mode, required_devices, save_latents, async_vae
+):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+    args = _args(MSPROF_CONFIG, "5s", tmp_path / f"{mode}.yaml")
+    args.num_prompts = 4
+    args.warmup_per_rank = 1
+    args.vae_mode = mode
+
+    metadata = resolve_benchmark(args)
+    resolved = OmegaConf.load(args.output)
+
+    assert metadata["latent_frames"] == 32
+    assert metadata["pixel_frames"] == 125
+    assert metadata["vae_mode"] == expected_mode
+    assert metadata["required_devices"] == required_devices
+    assert resolved.save_latents_only is save_latents
+    assert resolved.inference.async_vae is async_vae
+
+
 def test_vbench_can_select_mindiesd_bsa(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     monkeypatch.setenv("LONGLIVE_SLA_BACKEND", "mindiesd_bsa")
@@ -107,7 +166,7 @@ def test_vbench_rejects_unknown_sla_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     monkeypatch.setenv("LONGLIVE_SLA_BACKEND", "unknown")
 
-    with pytest.raises(ValueError, match="unsupported SLA inference backend"):
+    with pytest.raises(ValueError, match="unsupported sparse inference backend"):
         resolve_vbench(
             _args(VBENCH_CONFIG, "longlive2_standard_5pct", tmp_path / "bad.yaml", seed=0)
         )
@@ -172,6 +231,6 @@ def test_latent_only_benchmark_disables_dedicated_vae(tmp_path, monkeypatch):
     assert resolved.inference.streaming_vae is False
     assert resolved.inference.async_vae is False
     assert resolved.inference.vae_device is None
-    assert metadata["vae_mode"] == "disabled"
+    assert metadata["vae_mode"] == "dit_only"
     assert metadata["required_devices"] == 4
-    assert "-disabled-" in metadata["run_tag"]
+    assert "-dit_only-" in metadata["run_tag"]

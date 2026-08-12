@@ -65,19 +65,34 @@ def _sparse_model_config(sparsity) -> dict | None:
     if not enabled:
         return None
     method = method_override or str(sparsity.method)
-    if method != "sla_cag":
+    if method not in {"sla_cag", "hsa_cag"}:
         raise ValueError(f"unsupported sparse attention method={method!r}")
-    options = OmegaConf.to_container(sparsity.options, resolve=True)
-    backend_override = os.environ.get("LONGLIVE_SLA_BACKEND", "").strip()
+    profiles = getattr(sparsity, "profiles", None)
+    if profiles is not None:
+        if method not in profiles:
+            raise KeyError(f"sparsity.profiles has no options for method={method!r}")
+        options = OmegaConf.to_container(profiles[method], resolve=True)
+    else:
+        options = OmegaConf.to_container(sparsity.options, resolve=True)
+    backend_override = os.environ.get("LONGLIVE_SPARSE_BACKEND", "").strip()
+    if not backend_override:
+        legacy_name = (
+            "LONGLIVE_HSA_BACKEND" if method == "hsa_cag" else "LONGLIVE_SLA_BACKEND"
+        )
+        backend_override = os.environ.get(legacy_name, "").strip()
     if backend_override:
-        allowed = {"mindiesd", "mindiesd_bsa", "ascend_triton"}
+        allowed = (
+            {"mindiesd", "ascend_triton"}
+            if method == "hsa_cag"
+            else {"mindiesd", "mindiesd_bsa", "ascend_triton"}
+        )
         if backend_override not in allowed:
             raise ValueError(
-                f"unsupported SLA inference backend={backend_override!r}; "
+                f"unsupported sparse inference backend={backend_override!r}; "
                 f"choose one of {sorted(allowed)}"
             )
         options["backend"] = backend_override
-    return {"enabled": True, **options}
+    return {"enabled": True, "method": method, **options}
 
 
 def _sparse_method(sparsity) -> str:
@@ -88,11 +103,20 @@ def _sparse_method(sparsity) -> str:
 
 
 def _sparse_backend(sparsity) -> str:
-    if _sparse_method(sparsity) == "dense":
+    method = _sparse_method(sparsity)
+    if method == "dense":
         return "dense"
-    return os.environ.get(
-        "LONGLIVE_SLA_BACKEND", str(sparsity.options.backend)
-    ).strip()
+    override = os.environ.get("LONGLIVE_SPARSE_BACKEND", "").strip()
+    if not override:
+        legacy_name = (
+            "LONGLIVE_HSA_BACKEND" if method == "hsa_cag" else "LONGLIVE_SLA_BACKEND"
+        )
+        override = os.environ.get(legacy_name, "").strip()
+    if override:
+        return override
+    profiles = getattr(sparsity, "profiles", None)
+    options = profiles[method] if profiles is not None else sparsity.options
+    return str(options.backend)
 
 
 def _resolved_sparsity(sparsity, sparse_model_config: dict | None) -> dict:
@@ -102,9 +126,12 @@ def _resolved_sparsity(sparsity, sparse_model_config: dict | None) -> dict:
         output["method"] = "dense"
         return output
     output["enabled"] = True
-    output["method"] = "sla_cag"
+    output["method"] = str(sparse_model_config["method"])
+    output.pop("profiles", None)
     output["options"] = {
-        key: value for key, value in sparse_model_config.items() if key != "enabled"
+        key: value
+        for key, value in sparse_model_config.items()
+        if key not in {"enabled", "method"}
     }
     return output
 
@@ -119,8 +146,15 @@ def resolve_msprof(args) -> dict:
     sp_size = int(runtime.sp_size)
     dp_size = int(runtime.dp_size)
     nproc = sp_size * dp_size
-    vae_mode = str(runtime.vae_mode)
-    if vae_mode not in {"sync", "async_dedicated"}:
+    vae_mode_override = getattr(args, "vae_mode", None)
+    requested_mode = str(vae_mode_override or runtime.vae_mode)
+    mode_aliases = {
+        "dit_only": "disabled",
+        "sync_vae": "sync",
+        "async_vae": "async_dedicated",
+    }
+    vae_mode = mode_aliases.get(requested_mode, requested_mode)
+    if vae_mode not in {"disabled", "sync", "async_dedicated"}:
         raise ValueError(f"unsupported vae_mode={vae_mode!r}")
     if vae_mode == "async_dedicated" and dp_size != 1:
         raise ValueError("async_dedicated VAE requires dp_size=1")
@@ -148,9 +182,13 @@ def resolve_msprof(args) -> dict:
     if warmup >= num_prompts:
         raise ValueError("warmup_per_rank must be smaller than num_prompts")
 
-    save_latents_only = bool(getattr(args, "save_latents_only", False))
+    save_latents_only = bool(getattr(args, "save_latents_only", False)) or vae_mode == "disabled"
     async_vae = vae_mode == "async_dedicated" and not save_latents_only
-    effective_vae_mode = "disabled" if save_latents_only else vae_mode
+    effective_vae_mode = (
+        "dit_only"
+        if save_latents_only
+        else ("async_vae" if vae_mode == "async_dedicated" else "sync_vae")
+    )
     vae_device = f"npu:{nproc}" if async_vae else None
     output_folder = args.output_folder or "videos/msprof"
     model = config.model
@@ -228,7 +266,7 @@ def resolve_msprof(args) -> dict:
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
         "sparsity_backend": sparse_backend,
-        "run_tag": f"msprof-longlive2-{args.preset}-{effective_vae_mode.replace('_dedicated', '')}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
+        "run_tag": f"msprof-longlive2-{args.preset}-{effective_vae_mode}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
     return metadata
@@ -328,7 +366,7 @@ def resolve_vbench(args) -> dict:
         }
     elif engine_name == "wan22":
         if sparse_config is not None:
-            raise ValueError("SLA+CAG is implemented for LongLive2 causal inference only")
+            raise ValueError("sparse attention is implemented for LongLive2 causal inference only")
         latent_frames = None
         resolved = {
             "model_kwargs": {
@@ -403,6 +441,10 @@ def parse_args():
     parser.add_argument("--num-prompts", type=int)
     parser.add_argument("--warmup-per-rank", type=int)
     parser.add_argument("--save-latents-only", action="store_true")
+    parser.add_argument(
+        "--vae-mode",
+        choices=("dit_only", "sync_vae", "async_vae", "sync", "async_dedicated"),
+    )
     return parser.parse_args()
 
 
