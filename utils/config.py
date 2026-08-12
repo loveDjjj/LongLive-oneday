@@ -257,14 +257,19 @@ def validate_sparse_training_config(config):
     require(bool(adapter.get("apply_to_critic", False)), "adapter.apply_to_critic must be true")
     generator_train_scope = str(config.get("generator_train_scope", "lora"))
     require(
-        generator_train_scope in {"lora", "linear_only"},
-        "training.generator_train_scope must be lora or linear_only",
+        generator_train_scope in {"lora", "linear_only", "lora_plus_linear"},
+        "training.generator_train_scope must be lora, linear_only, or lora_plus_linear",
     )
     if sparse_method == "hsa_sla_cag":
         require(
-            generator_train_scope == "linear_only",
-            "hsa_sla_cag requires training.generator_train_scope=linear_only",
+            generator_train_scope in {"linear_only", "lora_plus_linear"},
+            "hsa_sla_cag requires linear_only or lora_plus_linear generator training",
         )
+        if generator_train_scope == "lora_plus_linear":
+            require(
+                float(config.get("lr_linear", 0.0)) > 0.0,
+                "lora_plus_linear requires training.lr_linear > 0",
+            )
     else:
         require(
             generator_train_scope == "lora",

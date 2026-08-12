@@ -9,6 +9,7 @@
 - 训练稀疏后端为 `ascend_triton`；推理稀疏后端默认为 MindIE-SD RainFusion。未经真实 NPU 验证，不得把实验后端改为默认值。
 - LongLive2.0 的滚动 KV 窗口为 32 个 latent 帧。改变窗口长度属于模型行为变更，必须重新训练和评测，不能作为普通推理参数优化。
 - SLA 与混合方法默认使用相同的 CAG 目标/基准稀疏率 `0.90/0.93`，用于公平比较路由差异。
+- HSA+SLA+CAG 默认训练范围为 `lora_plus_linear`；`linear_only` 只作为隔离补偿层能力的对照，不能替代主方案。
 
 ## 2. 开始任务前
 

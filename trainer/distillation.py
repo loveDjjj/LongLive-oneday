@@ -19,7 +19,9 @@ from utils.misc import (
 )
 from utils.training_state import (
     capture_rng_state,
+    build_generator_adapter_sidecar,
     build_generator_linear_sidecar,
+    build_generator_optimizer_parameters,
     find_latest_training_checkpoint,
     linear_gradient_statistics,
     list_training_checkpoints,
@@ -32,7 +34,10 @@ from utils.training_state import (
 from utils.device import current_device, empty_cache
 from utils.inference_utils import (
     clean_fsdp_state_dict_keys,
+    canonical_generator_parameter_name,
     configure_generator_linear_only,
+    enable_generator_linear_parameters,
+    include_sla_linear_in_lora,
     is_sla_linear_parameter,
     load_generator_linear_state_dict,
     load_generator_state_dict,
@@ -170,9 +175,9 @@ class Trainer:
         self.generator_train_scope = str(
             getattr(config, "generator_train_scope", "lora")
         )
-        if self.generator_train_scope not in {"lora", "linear_only"}:
+        if self.generator_train_scope not in {"lora", "linear_only", "lora_plus_linear"}:
             raise ValueError(
-                "training.generator_train_scope must be lora or linear_only"
+                "training.generator_train_scope must be lora, linear_only, or lora_plus_linear"
             )
 
         if hasattr(config, 'adapter') and config.adapter is not None:
@@ -250,10 +255,19 @@ class Trainer:
             # 2. Apply LoRA wrapping now (after loading base model, before FSDP wrapping)
             if self.is_main_process:
                 print("Applying LoRA to models...")
-            if self.generator_train_scope == "lora":
+            if self.generator_train_scope in {"lora", "lora_plus_linear"}:
                 self.model.generator.model = self._configure_lora_for_model(
                     self.model.generator.model, "generator"
                 )
+                if self.generator_train_scope == "lora_plus_linear":
+                    trainable = enable_generator_linear_parameters(
+                        self.model.generator.model
+                    )
+                    if self.is_main_process:
+                        print(
+                            "Generator LoRA+linear training: enabled "
+                            f"{len(trainable)} raw sla_linear tensors"
+                        )
             else:
                 self._configure_generator_linear_only(self.model.generator.model)
 
@@ -317,7 +331,7 @@ class Trainer:
                         f"expected {self.generator_train_scope}"
                     )
 
-                if self.generator_train_scope == "lora":
+                if self.generator_train_scope in {"lora", "lora_plus_linear"}:
                     if "generator_lora" not in lora_checkpoint:
                         raise ValueError(
                             f"LoRA checkpoint {lora_checkpoint_path} is missing generator_lora. "
@@ -332,10 +346,10 @@ class Trainer:
                         self.model.generator.model, lora_checkpoint["generator_lora"]
                     )
                     del lora_checkpoint["generator_lora"]
-                else:
+                if self.generator_train_scope in {"linear_only", "lora_plus_linear"}:
                     if "generator_linear" not in lora_checkpoint:
                         raise ValueError(
-                            f"linear-only checkpoint {lora_checkpoint_path} is missing "
+                            f"linear checkpoint {lora_checkpoint_path} is missing "
                             f"generator_linear. Found keys: {list(lora_checkpoint.keys())}"
                         )
                     self._load_generator_linear_state(
@@ -393,9 +407,14 @@ class Trainer:
             device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
 
         # Step 3: Initialize the optimizers
+        generator_parameters = build_generator_optimizer_parameters(
+            self.model.generator.named_parameters(),
+            scope=self.generator_train_scope,
+            lora_lr=config.lr,
+            linear_lr=getattr(config, "lr_linear", None),
+        )
         self.generator_optimizer = torch.optim.AdamW(
-            [param for param in self.model.generator.parameters()
-             if param.requires_grad],
+            generator_parameters,
             lr=config.lr,
             betas=(config.beta1, config.beta2),
             weight_decay=config.weight_decay
@@ -715,17 +734,13 @@ class Trainer:
 
         if self.is_lora_enabled:
             rng_states = self._gather_rng_states()
-            generator_state_key = (
-                "generator_lora"
-                if self.generator_train_scope == "lora"
-                else "generator_linear"
-            )
-            if self.generator_train_scope == "lora":
-                generator_train_state = self._gather_lora_state_dict(
+            generator_train_state = {}
+            if self.generator_train_scope in {"lora", "lora_plus_linear"}:
+                generator_train_state["generator_lora"] = self._gather_lora_state_dict(
                     self.model.generator.model
                 )
-            else:
-                generator_train_state = self._gather_generator_linear_state()
+            if self.generator_train_scope in {"linear_only", "lora_plus_linear"}:
+                generator_train_state["generator_linear"] = self._gather_generator_linear_state()
             crit_lora_sd = self._gather_lora_state_dict(
                 self.model.fake_score.model)
 
@@ -753,7 +768,7 @@ class Trainer:
                 )
 
             state_dict = {
-                generator_state_key: generator_train_state,
+                **generator_train_state,
                 "critic_lora": crit_lora_sd,
                 "generator_optimizer": generator_optim_state,
                 "critic_optimizer": critic_optim_state,
@@ -806,6 +821,15 @@ class Trainer:
                 torch.save(linear_state, linear_temporary_file)
                 os.replace(linear_temporary_file, linear_checkpoint_file)
                 print("Generator linear state saved to", linear_checkpoint_file)
+            elif self.generator_train_scope == "lora_plus_linear":
+                adapter_checkpoint_file = os.path.join(
+                    checkpoint_dir, "generator_adapter.pt"
+                )
+                adapter_temporary_file = adapter_checkpoint_file + ".tmp"
+                adapter_state = build_generator_adapter_sidecar(state_dict)
+                torch.save(adapter_state, adapter_temporary_file)
+                os.replace(adapter_temporary_file, adapter_checkpoint_file)
+                print("Generator adapter state saved to", adapter_checkpoint_file)
             
             # Cleanup old checkpoints if max_checkpoints is set
             max_checkpoints = getattr(self.config, "max_checkpoints", 0)
@@ -1002,7 +1026,7 @@ class Trainer:
                 self._set_train_progress(f"step {self.step}: optimizer")
                 if TRAIN_GENERATOR:
                     linear_gradient_stats = None
-                    if self.generator_train_scope == "linear_only":
+                    if self.generator_train_scope in {"linear_only", "lora_plus_linear"}:
                         linear_gradient_stats = self._linear_gradient_statistics()
                     generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
                     generator_log_dict = merge_dict_list(accumulated_generator_logs)
@@ -1140,7 +1164,12 @@ class Trainer:
                         isinstance(submodule, torch.nn.Linear)
                         and not (
                             full_submodule_name.endswith(".sla_linear")
-                            and (model_name == "fake_score" or sparse_method != "sla_cag")
+                            and (
+                                model_name == "fake_score"
+                                or not include_sla_linear_in_lora(
+                                    sparse_method, self.generator_train_scope
+                                )
+                            )
                         )
                     ):
                         target_linear_modules.add(full_submodule_name)
@@ -1194,7 +1223,7 @@ class Trainer:
             full = self.model.generator.state_dict()
         full = clean_fsdp_state_dict_keys(full)
         return {
-            name.removeprefix("model."): value
+            canonical_generator_parameter_name(name): value
             for name, value in full.items()
             if is_sla_linear_parameter(name)
         }

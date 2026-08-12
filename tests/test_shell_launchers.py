@@ -30,6 +30,23 @@ def test_training_launcher_allocates_multinode_port_dynamically():
     assert 'export MASTER_PORT="${MASTER_PORT:-' not in script
 
 
+def test_hybrid_launchers_expose_main_and_linear_only_scopes():
+    main = _read("scripts/training/run_hsa_sla_cag.sh")
+    linear_only = _read("scripts/training/run_hsa_sla_cag_linear_only.sh")
+    assert "SPARSE_METHOD=hsa_sla_cag" in main
+    assert "GENERATOR_TRAIN_SCOPE" not in main
+    assert 'MAX_ITERS="${MAX_ITERS:-1000}"' in main
+    assert "SPARSE_METHOD=hsa_sla_cag" in linear_only
+    assert "GENERATOR_TRAIN_SCOPE=linear_only" in linear_only
+    assert 'MAX_ITERS="${MAX_ITERS:-1000}"' in linear_only
+
+
+def test_merge_script_exposes_scope_override_for_linear_only_export():
+    script = (ROOT / "scripts/checkpoints/merge_lora.py").read_text(encoding="utf-8")
+    assert '"--generator_train_scope"' in script
+    assert '("lora", "linear_only", "lora_plus_linear")' in script
+
+
 def test_shell_scripts_do_not_contain_fixed_master_ports():
     for path in ALL_SHELL_SCRIPTS:
         script = path.read_text(encoding="utf-8")

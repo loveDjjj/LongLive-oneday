@@ -1,5 +1,5 @@
-# LongLive2.0-5B 在昇腾上的 HSA+SLA+CAG 线性补偿微调配置。
-# Generator 主干冻结，只训练 30 层 sla_linear；Fake Critic 仍通过 LoRA 更新。
+# LongLive2.0-5B 在昇腾上的 HSA+SLA+CAG 主训练配置。
+# Generator 主干使用 LoRA，同时直接训练 30 层 sla_linear；Fake Critic 使用 LoRA。
 infra:
   # SP 组共同计算一个视频；DP 数为 world_size / sequence_parallel_size。
   sequence_parallel_size: 4
@@ -80,9 +80,11 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
-  # 只训练 30 层 sla_linear 的 weight/bias，共 60 个 Generator 张量。
-  generator_train_scope: linear_only
-  lr: 2.0e-05
+  # 主方案：attention 主干 LoRA 与 30 层 sla_linear 原始 weight/bias 联合训练。
+  generator_train_scope: lora_plus_linear
+  # 主干 LoRA 使用较小学习率；补偿层从零初始化，使用独立的较大学习率。
+  lr: 2.0e-06
+  lr_linear: 2.0e-05
   lr_critic: 4.0e-07
   weight_decay: 0.0
   beta1: 0.0
@@ -127,7 +129,7 @@ evaluation:
   save_latents_only: true
 
 adapter:
-  # Generator 不应用 LoRA；该适配器只服务 Fake Critic。
+  # Generator attention 主干与 Fake Critic 都使用 LoRA；sla_linear 不包装 LoRA。
   type: lora
   rank: 128
   alpha: 128

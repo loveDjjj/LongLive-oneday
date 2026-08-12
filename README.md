@@ -7,7 +7,7 @@
 - `sla_cag`：对滚动 KV 全局执行 Smooth-K 块路由，并加入线性补偿与 CAG。
 - `hsa_sla_cag`：先用 HSA 筛选候选帧，再用 SLA 选择 token block，以 CAG 控制预算，并使用全 KV 线性补偿。
 
-三种稀疏方法使用独立训练配置。`hsa_cag` 和 `sla_cag` 训练 Generator LoRA；`hsa_sla_cag` 冻结 Generator 主干，只训练 30 层 `sla_linear` 投影，DMD Fake Critic 仍训练 LoRA。
+三种稀疏方法使用独立训练契约。`hsa_cag` 和 `sla_cag` 训练 Generator LoRA；`hsa_sla_cag` 主方案联合训练 Generator attention 主干 LoRA 与 30 层原始 `sla_linear`，并保留 linear-only 对照入口。DMD Fake Critic 在三种方法中均训练 LoRA。
 
 ## 支持范围
 
@@ -50,12 +50,13 @@ python tests/npu/benchmark_sparse_attention.py \
 
 输出必须包含 `training_backward=passed`。
 
-三种训练入口：
+三种方法、四个训练入口：
 
 ```bash
 bash scripts/training/run_hsa_cag.sh
 bash scripts/training/run_sla_cag.sh
 bash scripts/training/run_hsa_sla_cag.sh
+bash scripts/training/run_hsa_sla_cag_linear_only.sh
 ```
 
 运行单个 32 秒 DiT-only 性能用例：

@@ -47,8 +47,19 @@ class TrainingConfigContractTest(unittest.TestCase):
                 self.assertEqual(validated.sampling_steps, 4)
                 self.assertEqual(validated.image_or_video_shape, [1, 32, 48, 44, 80])
                 self.assertEqual(validated.model_kwargs.sparse_config.method, method)
-                expected_scope = "linear_only" if method == "hsa_sla_cag" else "lora"
+                expected_scope = "lora_plus_linear" if method == "hsa_sla_cag" else "lora"
                 self.assertEqual(validated.generator_train_scope, expected_scope)
+
+    def test_hybrid_linear_only_override_remains_supported(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            config = self._load_config_with_temporary_paths(
+                Path(temporary_dir), "hsa_sla_cag"
+            )
+            config.generator_train_scope = "linear_only"
+
+            validated = validate_sla_cag_training_config(config)
+
+            self.assertEqual(validated.generator_train_scope, "linear_only")
 
     def test_sp_must_divide_heads_and_block_frames(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

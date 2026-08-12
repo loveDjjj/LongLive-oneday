@@ -18,6 +18,9 @@ export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-20}"
 export SPARSE_METHOD="${SPARSE_METHOD:-sla_cag}"
 export SPARSE_BACKEND="${SPARSE_BACKEND:-${SLA_BACKEND:-ascend_triton}}"
 export SPARSE_QUERY_BLOCK_BATCH="${SPARSE_QUERY_BLOCK_BATCH:-${SLA_QUERY_BLOCK_BATCH:-1}}"
+export GENERATOR_TRAIN_SCOPE="${GENERATOR_TRAIN_SCOPE:-}"
+export GENERATOR_LR="${GENERATOR_LR:-}"
+export LINEAR_LR="${LINEAR_LR:-}"
 export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
 export LLV2_DEVICE="npu"
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
@@ -145,6 +148,12 @@ config.training.gradient_accumulation_steps = int(os.environ["GRADIENT_ACCUMULAT
 config.training.max_iters = int(os.environ["MAX_ITERS"])
 config.training.log_iters = int(os.environ["SAVE_INTERVAL"])
 config.training.max_checkpoints = int(os.environ["MAX_CHECKPOINTS"])
+if os.environ["GENERATOR_TRAIN_SCOPE"]:
+    config.training.generator_train_scope = os.environ["GENERATOR_TRAIN_SCOPE"]
+if os.environ["GENERATOR_LR"]:
+    config.training.lr = float(os.environ["GENERATOR_LR"])
+if os.environ["LINEAR_LR"]:
+    config.training.lr_linear = float(os.environ["LINEAR_LR"])
 config.evaluation.interval = int(os.environ["VIS_INTERVAL"])
 config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
 if os.environ["SHARDING_STRATEGY"]:
@@ -213,6 +222,7 @@ PY
 fi
 echo "[run] save_interval=${SAVE_INTERVAL} vis_interval=${VIS_INTERVAL} max_checkpoints=${MAX_CHECKPOINTS}"
 echo "[run] sparse_method=${SPARSE_METHOD} sparse_backend=${SPARSE_BACKEND} sparse_query_block_batch=${SPARSE_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
+echo "[run] generator_train_scope=${GENERATOR_TRAIN_SCOPE:-config default} generator_lr=${GENERATOR_LR:-config default} linear_lr=${LINEAR_LR:-config default}"
 echo "[run] sharding_strategy=${SHARDING_STRATEGY:-config default}"
 echo "[run] ascend_launch_blocking=${ASCEND_LAUNCH_BLOCKING:-0} task_queue_enable=${TASK_QUEUE_ENABLE:-default}"
 
@@ -253,7 +263,10 @@ if [[ "${SPARSE_METHOD}" == "hsa_sla_cag" && "${VALIDATE_LINEAR_CHECKPOINT}" == 
         --expected-step "${MAX_ITERS}" \
         --require-resume-state \
         --json-output "${FINAL_CHECKPOINT_DIR}/validation.json"
+    GENERATOR_SIDECAR="${FINAL_CHECKPOINT_DIR}/generator_linear.pt"
+    if [[ -f "${FINAL_CHECKPOINT_DIR}/generator_adapter.pt" ]]; then
+        GENERATOR_SIDECAR="${FINAL_CHECKPOINT_DIR}/generator_adapter.pt"
+    fi
     "${PYTHON}" scripts/checkpoints/validate_linear_checkpoint.py \
-        "${FINAL_CHECKPOINT_DIR}/generator_linear.pt" \
-        --expected-step "${MAX_ITERS}"
+        "${GENERATOR_SIDECAR}" --expected-step "${MAX_ITERS}"
 fi

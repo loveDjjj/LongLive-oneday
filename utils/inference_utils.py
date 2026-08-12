@@ -24,6 +24,25 @@ def is_sla_linear_parameter(name: str) -> bool:
     return name.startswith("sla_linear.") or ".sla_linear." in name
 
 
+def include_sla_linear_in_lora(
+    sparse_method: str, generator_train_scope: str
+) -> bool:
+    """Return whether SLA compensation should itself be represented by LoRA."""
+    return sparse_method == "sla_cag" and generator_train_scope == "lora"
+
+
+def canonical_generator_parameter_name(name: str) -> str:
+    """Remove FSDP, wrapper, and PEFT prefixes from a generator parameter name."""
+    return (
+        str(name)
+        .replace("_fsdp_wrapped_module.", "")
+        .replace("_checkpoint_wrapped_module.", "")
+        .replace("_orig_mod.", "")
+        .removeprefix("model.")
+        .replace("base_model.model.", "")
+    )
+
+
 def configure_generator_linear_only(generator_model) -> list[str]:
     """Freeze a generator and enable gradients only for SLA compensation."""
     generator_model.requires_grad_(False)
@@ -34,6 +53,18 @@ def configure_generator_linear_only(generator_model) -> list[str]:
             trainable.append(name)
     if not trainable:
         raise ValueError("linear_only training found no sla_linear parameters")
+    return trainable
+
+
+def enable_generator_linear_parameters(generator_model) -> list[str]:
+    """Enable raw SLA compensation parameters alongside an existing LoRA adapter."""
+    trainable = []
+    for name, parameter in generator_model.named_parameters():
+        if is_sla_linear_parameter(name):
+            parameter.requires_grad_(True)
+            trainable.append(name)
+    if not trainable:
+        raise ValueError("lora_plus_linear training found no sla_linear parameters")
     return trainable
 
 
@@ -158,13 +189,13 @@ def load_generator_linear_state_dict(
 ) -> None:
     """Strictly load the sparse linear-compensation tensors into a generator."""
     expected = {
-        name: parameter
+        canonical_generator_parameter_name(name): parameter
         for name, parameter in generator_model.named_parameters()
         if is_sla_linear_parameter(name)
     }
-    prepared = clean_fsdp_state_dict_keys(state_dict)
     prepared = {
-        name.removeprefix("model."): value for name, value in prepared.items()
+        canonical_generator_parameter_name(name): value
+        for name, value in state_dict.items()
     }
     missing = sorted(set(expected) - set(prepared))
     unexpected = sorted(set(prepared) - set(expected))
@@ -186,15 +217,18 @@ def load_generator_linear_checkpoint(
 ) -> None:
     checkpoint = _torch_load(checkpoint_path)
     if not isinstance(checkpoint, Mapping):
-        raise TypeError("linear-only checkpoint must be a mapping")
+        raise TypeError("linear checkpoint must be a mapping")
     from utils.training_state import validate_sparse_checkpoint_method
 
     validate_sparse_checkpoint_method(checkpoint, expected_sparse_method)
-    if checkpoint.get("generator_train_scope") != "linear_only":
-        raise ValueError("checkpoint generator_train_scope must be linear_only")
+    scope = checkpoint.get("generator_train_scope")
+    if scope not in {"linear_only", "lora_plus_linear"}:
+        raise ValueError(
+            "checkpoint generator_train_scope must be linear_only or lora_plus_linear"
+        )
     state_dict = checkpoint.get("generator_linear")
     if not isinstance(state_dict, Mapping) or not state_dict:
-        raise ValueError("linear-only checkpoint is missing generator_linear")
+        raise ValueError("checkpoint is missing generator_linear")
     load_generator_linear_state_dict(generator_model, state_dict)
 
 
@@ -248,7 +282,9 @@ def apply_and_merge_lora(
         model_name="generator",
         lora_config=adapter_cfg,
         is_main_process=verbose,
-        include_sla_linear=sparse_method == "sla_cag",
+        include_sla_linear=include_sla_linear_in_lora(
+            sparse_method, generator_train_scope
+        ),
     )
 
     if verbose:
@@ -261,6 +297,12 @@ def apply_and_merge_lora(
     if verbose:
         print("[LoRA] Merging LoRA delta into base weights (merge_and_unload)...")
     pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)
+    if generator_train_scope == "lora_plus_linear":
+        load_generator_linear_checkpoint(
+            pipeline.generator.model,
+            lora_ckpt,
+            expected_sparse_method=sparse_method,
+        )
     pipeline.generator.model.eval().requires_grad_(False)
     pipeline.is_lora_enabled = False
     pipeline.is_lora_merged = True

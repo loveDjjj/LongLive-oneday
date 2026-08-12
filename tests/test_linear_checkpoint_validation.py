@@ -78,6 +78,29 @@ def test_validates_full_resume_checkpoint():
     assert result["resume_state_validated"] is True
 
 
+def test_validates_lora_plus_linear_adapter_sidecar():
+    checkpoint = _checkpoint(
+        checkpoint_format="longlive_generator_adapter_v1",
+        generator_train_scope="lora_plus_linear",
+        generator_lora={"lora_A.weight": torch.ones(2, 2)},
+        generator_trainable_parameters=[
+            "model.blocks.0.self_attn.sla_linear.weight",
+            "model.blocks.0.self_attn.q.lora_A.default.weight",
+        ],
+    )
+
+    result = validate_checkpoint(
+        checkpoint,
+        expected_method="hsa_sla_cag",
+        expected_layers=3,
+        expected_step=1000,
+        allow_zero=False,
+        require_resume_state=False,
+    )
+
+    assert result["generator_train_scope"] == "lora_plus_linear"
+
+
 def test_cli_validates_saved_sidecar_and_writes_json(tmp_path):
     checkpoint_path = tmp_path / "generator_linear.pt"
     output_path = tmp_path / "validation.json"

@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from utils.inference_utils import is_sla_linear_parameter
+
 
 def build_generator_linear_sidecar(checkpoint):
     """Extract the portable hybrid generator state from a full train checkpoint."""
@@ -28,6 +30,40 @@ def build_generator_linear_sidecar(checkpoint):
         "generator_linear": checkpoint["generator_linear"],
         "step": checkpoint["step"],
         "checkpoint_format": "longlive_generator_linear_v1",
+        "generator_train_scope": checkpoint["generator_train_scope"],
+        "generator_trainable_parameters": checkpoint[
+            "generator_trainable_parameters"
+        ],
+        "sparse_method": checkpoint["sparse_method"],
+        "world_size": checkpoint["world_size"],
+        "sequence_parallel_size": checkpoint["sequence_parallel_size"],
+        "data_parallel_size": checkpoint["data_parallel_size"],
+    }
+
+
+def build_generator_adapter_sidecar(checkpoint):
+    """Extract LoRA and raw SLA compensation tensors for hybrid inference."""
+    required = {
+        "generator_lora",
+        "generator_linear",
+        "step",
+        "generator_train_scope",
+        "generator_trainable_parameters",
+        "sparse_method",
+        "world_size",
+        "sequence_parallel_size",
+        "data_parallel_size",
+    }
+    missing = sorted(required - checkpoint.keys())
+    if missing:
+        raise ValueError(f"cannot build generator adapter sidecar; missing {missing}")
+    if checkpoint["generator_train_scope"] != "lora_plus_linear":
+        raise ValueError("generator adapter sidecar requires lora_plus_linear scope")
+    return {
+        "generator_lora": checkpoint["generator_lora"],
+        "generator_linear": checkpoint["generator_linear"],
+        "step": checkpoint["step"],
+        "checkpoint_format": "longlive_generator_adapter_v1",
         "generator_train_scope": checkpoint["generator_train_scope"],
         "generator_trainable_parameters": checkpoint[
             "generator_trainable_parameters"
@@ -96,6 +132,33 @@ def should_save_final_checkpoint(*, start_step, final_step, save_interval, no_sa
         and final_step > start_step
         and final_step % save_interval != 0
     )
+
+
+def build_generator_optimizer_parameters(
+    named_parameters, *, scope, lora_lr, linear_lr=None
+):
+    """Build AdamW parameters, separating raw SLA compensation from LoRA."""
+    trainable = [
+        (str(name), parameter)
+        for name, parameter in named_parameters
+        if parameter.requires_grad
+    ]
+    if scope != "lora_plus_linear":
+        return [parameter for _, parameter in trainable]
+    if linear_lr is None or float(linear_lr) <= 0.0:
+        raise ValueError("lora_plus_linear requires a positive linear_lr")
+    linear = [
+        parameter for name, parameter in trainable
+        if is_sla_linear_parameter(name)
+    ]
+    linear_ids = {id(parameter) for parameter in linear}
+    lora = [parameter for _, parameter in trainable if id(parameter) not in linear_ids]
+    if not linear or not lora:
+        raise ValueError("lora_plus_linear requires both LoRA and sla_linear parameters")
+    return [
+        {"params": lora, "lr": float(lora_lr)},
+        {"params": linear, "lr": float(linear_lr)},
+    ]
 
 
 def linear_gradient_statistics(named_parameters, *, reduce_tensors=None):

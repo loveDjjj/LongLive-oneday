@@ -62,11 +62,20 @@ def validate_checkpoint(
             f"sparse_method={checkpoint.get('sparse_method')!r}, "
             f"expected {expected_method!r}"
         )
-    if checkpoint.get("generator_train_scope") != "linear_only":
-        raise ValueError("generator_train_scope must be linear_only")
+    scope = checkpoint.get("generator_train_scope")
+    if scope not in {"linear_only", "lora_plus_linear"}:
+        raise ValueError("generator_train_scope must be linear_only or lora_plus_linear")
     sidecar_format = checkpoint.get("checkpoint_format")
-    if sidecar_format is not None and sidecar_format != "longlive_generator_linear_v1":
+    expected_sidecar_formats = {
+        "linear_only": "longlive_generator_linear_v1",
+        "lora_plus_linear": "longlive_generator_adapter_v1",
+    }
+    if sidecar_format is not None and sidecar_format != expected_sidecar_formats[scope]:
         raise ValueError(f"unsupported generator linear checkpoint format: {sidecar_format!r}")
+    if scope == "lora_plus_linear":
+        generator_lora = checkpoint.get("generator_lora")
+        if not isinstance(generator_lora, Mapping) or not generator_lora:
+            raise ValueError("lora_plus_linear checkpoint is missing generator_lora")
     step = checkpoint.get("step")
     if not isinstance(step, int) or step < 0:
         raise ValueError(f"invalid checkpoint step: {step!r}")
@@ -129,7 +138,10 @@ def validate_checkpoint(
     if trainable is not None:
         if not isinstance(trainable, (list, tuple)) or not trainable:
             raise ValueError("generator_trainable_parameters must be a non-empty list")
-        invalid = [name for name in trainable if ".sla_linear." not in str(name)]
+        invalid = [
+            name for name in trainable
+            if ".sla_linear." not in str(name) and "lora_" not in str(name)
+        ]
         if invalid:
             raise ValueError(f"non-linear trainable generator parameters: {invalid[:4]}")
 
@@ -158,7 +170,7 @@ def validate_checkpoint(
         "schema_version": 1,
         "step": step,
         "sparse_method": expected_method,
-        "generator_train_scope": "linear_only",
+        "generator_train_scope": scope,
         "layers": len(layers),
         "tensors": tensor_count,
         "parameters": parameter_count,

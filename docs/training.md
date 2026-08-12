@@ -12,15 +12,16 @@
 4. Generator 使用指定稀疏方法，Teacher 与 Critic 保持 dense，避免监督目标同时引入稀疏偏差。
 5. 当前不读取真实视频，不维护 I2V、teacher forcing、NVFP4 或非 causal 训练路径。
 
-三种配置的核心差异：
+三种方法的核心差异：
 
 | 方法 | Generator 训练范围 | 默认目标/基准稀疏率 | 主要路由 |
 | --- | --- | --- | --- |
 | `hsa_cag` | LoRA | 0.85 / 0.95 | 帧级 HSA，保留 6 帧，当前 chunk 稠密 |
 | `sla_cag` | LoRA | 0.90 / 0.93 | 对滚动 KV 全局执行 Smooth-K block Top-K |
-| `hsa_sla_cag` | 仅 `sla_linear` | 0.90 / 0.93 | HSA 选 8 个候选帧，SLA 再选 block |
+| `hsa_sla_cag` 主方案 | 主干 LoRA + 原始 `sla_linear` | 0.90 / 0.93 | HSA 选 8 个候选帧，SLA 再选 block |
+| `hsa_sla_cag` 对照 | 仅原始 `sla_linear` | 0.90 / 0.93 | 路由与主方案相同，隔离补偿层自身能力 |
 
-Fake Critic 在三种方法中均使用 LoRA。混合方法的 Generator 主干冻结，只训练 30 层 `sla_linear` 的 weight/bias，共 60 个张量。
+Fake Critic 在三种方法中均使用 LoRA。混合主方案的 `sla_linear` 不再包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；其余 attention 线性层使用 rank 128 LoRA。主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率。linear-only 对照冻结 Generator 主干，仅训练相同的 60 个补偿层张量。
 
 当前 SLA+CAG 与混合方法统一使用 `0.90/0.93` CAG 预算。旧 SLA checkpoint 若使用 `0.95/0.97` 训练，其训练分布没有因配置更新而改变：可以先用新预算做算子和 DiT 性能探索，但正式质量结论必须重新训练或继续微调，并在 manifest 中记录实际训练预算。
 
@@ -120,7 +121,7 @@ configs/train/sla_cag.yaml
 configs/train/hsa_sla_cag.yaml
 ```
 
-三个入口都委托给 `scripts/training/run_sparse_cag.sh`。启动器将环境变量覆盖写入 `runs/training/<run-name>/config.resolved.yaml`，训练进程只读取 resolved 配置。
+四个入口都委托给 `scripts/training/run_sparse_cag.sh`。`run_hsa_sla_cag.sh` 是 LoRA+linear 主方案，`run_hsa_sla_cag_linear_only.sh` 是 linear-only 对照。启动器将环境变量覆盖写入 `runs/training/<run-name>/config.resolved.yaml`，训练进程只读取 resolved 配置。
 
 常用变量：
 
@@ -137,6 +138,8 @@ configs/train/hsa_sla_cag.yaml
 | `VIS_INTERVAL` | 训练内验证间隔，0 关闭 | 100 |
 | `MAX_CHECKPOINTS` | 最多保留 checkpoint 数 | 20 |
 | `SPARSE_BACKEND` | 训练稀疏后端 | `ascend_triton` |
+| `GENERATOR_TRAIN_SCOPE` | Generator 范围；通常由具体入口设置 | 配置文件 |
+| `GENERATOR_LR` / `LINEAR_LR` | 主干 LoRA / 原始补偿层学习率 | 配置文件 |
 | `TRAIN_RUN_NAME` | 运行目录与自动恢复标识 | 时间戳名称 |
 | `DISABLE_WANDB` | 1 表示禁用 W&B | 1 |
 
@@ -144,7 +147,7 @@ configs/train/hsa_sla_cag.yaml
 
 ## 7. 训练命令
 
-12 卡单步混合烟测：
+12 卡单步混合主方案烟测：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
@@ -152,6 +155,16 @@ NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
 TRAIN_RUN_NAME=hsa_sla_cag_12card_smoke \
 bash scripts/training/run_hsa_sla_cag.sh
+```
+
+相同数据、稀疏率和并行布局的 linear-only 对照：
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
+NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
+TRAIN_RUN_NAME=hsa_sla_cag_linear_only_12card_smoke \
+bash scripts/training/run_hsa_sla_cag_linear_only.sh
 ```
 
 12 卡、1000 step 混合训练：
@@ -218,7 +231,7 @@ linear_grad_l2_max
 
 `MAX_ITERS` 是最终目标 step。例如已恢复到 100，设置 `MAX_ITERS=1000` 表示继续到 1000，而不是再训练 1000 步。不同稀疏方法的 checkpoint 不能混用。
 
-混合方法还会写出 `generator_linear.pt`。正常结束时，即使最终 step 不能整除 `SAVE_INTERVAL`，也会补存最终 checkpoint。默认由 node rank 0 验证完整包与 sidecar，并生成 `validation.json`。
+混合主方案还会写出轻量 `generator_adapter.pt`，同时包含 Generator LoRA 与原始 `sla_linear`；linear-only 对照写出 `generator_linear.pt`。完整恢复始终使用 `train_state.pt`。两种 scope 的参数集合和优化器状态不同，不能交叉恢复。正常结束时，即使最终 step 不能整除 `SAVE_INTERVAL`，也会补存最终 checkpoint 并验证 sidecar。
 
 手工验证：
 
@@ -229,7 +242,7 @@ python scripts/checkpoints/validate_linear_checkpoint.py \
   --json-output runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/validation.json
 
 python scripts/checkpoints/validate_linear_checkpoint.py \
-  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_linear.pt \
+  runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_adapter.pt \
   --expected-step 1000
 ```
 
@@ -246,6 +259,29 @@ python scripts/checkpoints/merge_lora.py \
   --device npu:0
 ```
 
-混合方法使用同一脚本和对应配置；脚本会识别 `linear_only` 训练范围并应用 `generator_linear` sidecar。不要将训练增量合并到原始 Wan2.2 权重，必须使用训练时的 `longlive2_merged_generator.pt`。
+混合主方案使用同一脚本和 `generator_adapter.pt`，先合并主干 LoRA，再加载原始 `sla_linear`；linear-only 对照使用 `generator_linear.pt`。不要将训练增量合并到原始 Wan2.2 权重，必须使用训练时的 `longlive2_merged_generator.pt`。
+
+主方案导出：
+
+```bash
+python scripts/checkpoints/merge_lora.py \
+  --config_path configs/train/hsa_sla_cag.yaml \
+  --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
+  --lora_ckpt runs/training/hsa_sla_cag_12card_1k/checkpoints/step_0001000/generator_adapter.pt \
+  --output_path runs/merged/longlive2_hsa_sla_cag_lora_plus_linear_1k.pt \
+  --device npu:0
+```
+
+linear-only 对照使用同一源配置，但必须显式覆盖训练范围：
+
+```bash
+python scripts/checkpoints/merge_lora.py \
+  --config_path configs/train/hsa_sla_cag.yaml \
+  --generator_train_scope linear_only \
+  --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
+  --lora_ckpt runs/training/hsa_sla_cag_linear_only_12card_1k/checkpoints/step_0001000/generator_linear.pt \
+  --output_path runs/merged/longlive2_hsa_sla_cag_linear_only_1k.pt \
+  --device npu:0
+```
 
 导出后先运行同 checkpoint 的 dense 与对应 sparse DiT-only 对照，再运行 VBench。完整流程见[推理与评测指南](inference_and_evaluation.md)。

@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_path", required=True, help="Path to save the merged generator checkpoint.")
     parser.add_argument("--generator_ckpt", default=None, help="Override checkpoints.generator_ckpt from the yaml.")
     parser.add_argument("--lora_ckpt", default=None, help="Override checkpoints.lora_ckpt from the yaml.")
+    parser.add_argument(
+        "--generator_train_scope",
+        choices=("lora", "linear_only", "lora_plus_linear"),
+        help="Override training.generator_train_scope for adapter export.",
+    )
     parser.add_argument("--device", default="cuda:0", help="Device used for merging, e.g. cuda:0 or cpu.")
     parser.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16", help="Save merged weights in this dtype.")
     return parser.parse_args()
@@ -42,6 +47,7 @@ def main() -> None:
     from utils.config import normalize_config
     from utils.inference_utils import (
         cpu_state_dict,
+        include_sla_linear_in_lora,
         load_generator_checkpoint,
         load_generator_linear_checkpoint,
         load_lora_state_dict,
@@ -54,7 +60,10 @@ def main() -> None:
     sparse_method = sparse_config.get(
         "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
     )
-    generator_train_scope = str(getattr(config, "generator_train_scope", "lora"))
+    generator_train_scope = str(
+        args.generator_train_scope
+        or getattr(config, "generator_train_scope", "lora")
+    )
     generator_ckpt = args.generator_ckpt or getattr(config, "generator_ckpt", None)
     lora_ckpt = args.lora_ckpt or getattr(config, "lora_ckpt", None)
     if not generator_ckpt:
@@ -99,7 +108,9 @@ def main() -> None:
             model_name="generator",
             lora_config=config.adapter,
             is_main_process=True,
-            include_sla_linear=sparse_method == "sla_cag",
+            include_sla_linear=include_sla_linear_in_lora(
+                sparse_method, generator_train_scope
+            ),
         )
 
         import peft
@@ -115,6 +126,13 @@ def main() -> None:
         print(f"Merging LoRA on {device} in {dtype}...")
         generator.to(device=device, dtype=dtype)
         generator.model = generator.model.merge_and_unload(safe_merge=True)
+        if generator_train_scope == "lora_plus_linear":
+            print(f"Loading raw SLA linear checkpoint: {lora_ckpt}")
+            load_generator_linear_checkpoint(
+                generator.model,
+                lora_ckpt,
+                expected_sparse_method=sparse_method,
+            )
     generator.eval().requires_grad_(False)
 
     output_path = Path(args.output_path)
@@ -126,7 +144,7 @@ def main() -> None:
         "source_lora_ckpt": str(lora_ckpt),
         "model_name": getattr(config.model_kwargs, "model_name", None),
         "dtype": str(dtype).replace("torch.", ""),
-        "merged_lora": generator_train_scope == "lora",
+        "merged_lora": generator_train_scope in {"lora", "lora_plus_linear"},
         "generator_train_scope": generator_train_scope,
         "sparse_method": sparse_method,
     }

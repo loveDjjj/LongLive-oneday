@@ -4,11 +4,13 @@ import torch
 from utils.inference_utils import (
     clean_fsdp_state_dict_keys,
     configure_generator_linear_only,
+    enable_generator_linear_parameters,
     extract_generator_state_dict,
     load_generator_state_dict,
     load_generator_linear_checkpoint,
     load_generator_linear_state_dict,
     load_lora_state_dict,
+    include_sla_linear_in_lora,
 )
 
 
@@ -117,6 +119,43 @@ def test_generator_linear_state_accepts_fsdp_and_model_prefixes():
     assert torch.count_nonzero(generator.sla_linear.bias) == 2
 
 
+def test_generator_linear_state_accepts_peft_base_model_prefix():
+    generator = torch.nn.Module()
+    generator.sla_linear = torch.nn.Linear(2, 2)
+    state = {
+        "base_model.model.sla_linear.weight": torch.ones(2, 2),
+        "base_model.model.sla_linear.bias": torch.ones(2),
+    }
+
+    load_generator_linear_state_dict(generator, state)
+
+    assert torch.count_nonzero(generator.sla_linear.weight) == 4
+
+
+def test_generator_linear_state_loads_into_peft_prefixed_target():
+    class PeftLike(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.base_model = torch.nn.Module()
+            self.base_model.model = torch.nn.Module()
+            self.base_model.model.sla_linear = torch.nn.Linear(2, 2)
+
+    generator = PeftLike()
+    state = {
+        "sla_linear.weight": torch.ones(2, 2),
+        "sla_linear.bias": torch.ones(2),
+    }
+
+    load_generator_linear_state_dict(generator, state)
+
+    assert torch.count_nonzero(generator.base_model.model.sla_linear.weight) == 4
+
+
+def test_hybrid_lora_excludes_raw_compensation_projection():
+    assert include_sla_linear_in_lora("sla_cag", "lora")
+    assert not include_sla_linear_in_lora("hsa_sla_cag", "lora_plus_linear")
+
+
 def test_generator_linear_checkpoint_validates_method_and_scope(tmp_path):
     class Generator(torch.nn.Module):
         def __init__(self):
@@ -182,3 +221,16 @@ def test_linear_only_scope_freezes_every_non_compensation_parameter():
 def test_linear_only_scope_rejects_model_without_compensation():
     with pytest.raises(ValueError, match="no sla_linear parameters"):
         configure_generator_linear_only(torch.nn.Linear(2, 2))
+
+
+def test_lora_plus_linear_enables_raw_compensation_parameters():
+    model = torch.nn.Module()
+    model.dense = torch.nn.Linear(2, 2)
+    model.sla_linear = torch.nn.Linear(2, 2)
+    model.requires_grad_(False)
+
+    selected = enable_generator_linear_parameters(model)
+
+    assert set(selected) == {"sla_linear.weight", "sla_linear.bias"}
+    assert model.sla_linear.weight.requires_grad
+    assert not model.dense.weight.requires_grad

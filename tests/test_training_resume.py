@@ -9,7 +9,9 @@ import torch
 
 from utils.dataset import ResumableDistributedSampler
 from utils.training_state import (
+    build_generator_adapter_sidecar,
     build_generator_linear_sidecar,
+    build_generator_optimizer_parameters,
     capture_rng_state,
     find_latest_training_checkpoint,
     linear_gradient_statistics,
@@ -43,6 +45,47 @@ def test_builds_portable_generator_linear_sidecar():
     assert sidecar["checkpoint_format"] == "longlive_generator_linear_v1"
     assert "critic_lora" not in sidecar
     assert "generator_optimizer" not in sidecar
+
+
+def test_builds_portable_lora_plus_linear_sidecar():
+    full = {
+        "generator_lora": {"lora_A.weight": torch.ones(2, 2)},
+        "generator_linear": {"blocks.0.self_attn.sla_linear.weight": torch.ones(2, 2)},
+        "step": 10,
+        "generator_train_scope": "lora_plus_linear",
+        "generator_trainable_parameters": ["lora_A.weight", "model.blocks.0.self_attn.sla_linear.weight"],
+        "sparse_method": "hsa_sla_cag",
+        "world_size": 12,
+        "sequence_parallel_size": 4,
+        "data_parallel_size": 3,
+        "generator_optimizer": {"large": torch.ones(1)},
+    }
+
+    sidecar = build_generator_adapter_sidecar(full)
+
+    assert sidecar["generator_lora"] is full["generator_lora"]
+    assert sidecar["generator_linear"] is full["generator_linear"]
+    assert sidecar["checkpoint_format"] == "longlive_generator_adapter_v1"
+    assert "generator_optimizer" not in sidecar
+
+
+def test_lora_plus_linear_optimizer_uses_independent_learning_rates():
+    model = torch.nn.Module()
+    model.lora_A = torch.nn.Parameter(torch.ones(2, 2))
+    model.sla_linear = torch.nn.Linear(2, 2)
+
+    groups = build_generator_optimizer_parameters(
+        model.named_parameters(),
+        scope="lora_plus_linear",
+        lora_lr=2.0e-6,
+        linear_lr=2.0e-5,
+    )
+
+    assert [group["lr"] for group in groups] == [2.0e-6, 2.0e-5]
+    assert groups[0]["params"] == [model.lora_A]
+    assert set(map(id, groups[1]["params"])) == {
+        id(model.sla_linear.weight), id(model.sla_linear.bias)
+    }
 
 
 class ResumableDistributedSamplerTest(unittest.TestCase):

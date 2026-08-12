@@ -201,7 +201,7 @@ bash scripts/training/run_hsa_sla_cag.sh
 
 - Generator loss、Critic loss 和梯度范数均为有限值。
 - `linear_grad_tensors/with_gradient/nonzero/finite` 均为 60。
-- 生成 `step_0000001/train_state.pt` 和 `generator_linear.pt`。
+- 主方案生成 `step_0000001/train_state.pt` 和 `generator_adapter.pt`；linear-only 对照生成 `generator_linear.pt`。
 - 日志出现两次 `linear_checkpoint=passed`。
 - 生成 `step_0000001/validation.json`。
 
