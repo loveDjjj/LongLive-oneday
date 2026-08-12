@@ -73,12 +73,26 @@ dense row with the same duration preset and VAE mode. Always check
 `checkpoint_matched_to_dense`: a false value means the timing also changed the
 model checkpoint and is not a controlled kernel comparison.
 
+For VAE modes, the summary also reports `ar_loop_seconds_mean`,
+`vae_decode_seconds_mean`, `vae_enqueue_seconds_mean`,
+`vae_drain_seconds_mean`, and `vae_overlap_seconds_mean`. The dedicated-NPU
+pipeline defines overlap as `max(vae_decode - final_drain, 0)`. This is pipeline
+wall-clock telemetry rather than summed device-kernel time; use msprof to
+attribute operator execution. A large enqueue value indicates cross-device
+latent transfer is stalling the producer, while a large drain value means VAE
+decode remains behind the DiT producer at the final chunk.
+
 Use a dry run to audit all 36 combinations without reserving devices:
 
 ```bash
 DRY_RUN=1 PERF_DEVICES=0,1,2,3,4 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
+
+Matrix launchers default to `RESUME_SUITE=1`: cases with a completed
+`summary.json` (or `vbench_results.json`) are skipped. An existing incomplete
+performance case is never overwritten; inspect it and use a new `SUITE_ID` or
+remove it explicitly after preserving its logs.
 
 Set `LONGLIVE_GENERATOR_CKPT` to use one checkpoint for a controlled routing
 comparison. For best-per-method comparisons, set any of

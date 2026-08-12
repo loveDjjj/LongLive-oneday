@@ -12,6 +12,7 @@ MODES="${MODES:-dit_only,sync_vae,async_vae}"
 PERF_DEVICES="${PERF_DEVICES:-0,1,2,3,4}"
 SUITE_ID="${SUITE_ID:-sparse_matrix_$(date +%Y%m%d_%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
+RESUME_SUITE="${RESUME_SUITE:-1}"
 
 if [[ "${TASK}" != "benchmark" && "${TASK}" != "msprof" ]]; then
   echo "[error] TASK must be benchmark or msprof" >&2
@@ -19,6 +20,10 @@ if [[ "${TASK}" != "benchmark" && "${TASK}" != "msprof" ]]; then
 fi
 if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
   echo "[error] DRY_RUN must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${RESUME_SUITE}" != "0" && "${RESUME_SUITE}" != "1" ]]; then
+  echo "[error] RESUME_SUITE must be 0 or 1" >&2
   exit 2
 fi
 IFS=',' read -r -a methods <<<"${METHODS}"
@@ -69,9 +74,20 @@ for method in "${methods[@]}"; do
       visible="${workers}"
       [[ "${mode}" == "async_vae" ]] && visible="${workers_and_vae}"
       echo "[suite] task=${TASK} method=${method} duration=${duration} mode=${mode} checkpoint=${checkpoint:-config-default}"
+      run_id="${SUITE_ID}-${method}-${duration}-${mode}"
       if [[ "${DRY_RUN}" == "1" ]]; then
-        echo "[dry-run] devices=${visible} run_id=${SUITE_ID}-${method}-${duration}-${mode}"
+        echo "[dry-run] devices=${visible} run_id=${run_id}"
         continue
+      fi
+      run_dir="runs/${TASK}/${run_id}"
+      if [[ -f "${run_dir}/summary.json" && "${RESUME_SUITE}" == "1" ]]; then
+        echo "[resume] completed case skipped: ${run_id}"
+        continue
+      fi
+      if [[ -e "${run_dir}" ]]; then
+        echo "[error] incomplete or existing case cannot be overwritten: ${run_dir}" >&2
+        echo "[hint] inspect it, choose a new SUITE_ID, or remove it explicitly after preserving evidence" >&2
+        exit 2
       fi
       case_env=(
         env
@@ -84,12 +100,12 @@ for method in "${methods[@]}"; do
       if [[ "${TASK}" == "benchmark" ]]; then
         "${case_env[@]}" \
           BENCHMARK_MODE="${mode}" \
-          RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
+          RUN_ID="${run_id}" \
           bash scripts/evaluation/run_benchmark.sh "${duration}"
       else
         "${case_env[@]}" \
           MSPROF_MODE="${mode}" \
-          RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
+          RUN_ID="${run_id}" \
           bash scripts/evaluation/run_msprof.sh "${duration}"
       fi
     done

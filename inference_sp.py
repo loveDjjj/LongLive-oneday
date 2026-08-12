@@ -426,6 +426,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
     )
     synchronize_accelerator(device)
     generation_seconds = time.perf_counter() - generation_started
+    inference_metrics = dict(getattr(pipeline, "last_inference_metrics", {}))
     generation_peak_memory_gb = peak_memory_gb(device)
     vae_peak_memory_gb = (
         peak_memory_gb(dedicated_vae_device)
@@ -492,13 +493,25 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
         vae_peak_memory_text = (
             f"{vae_peak_memory_gb:.2f}" if vae_peak_memory_gb is not None else "n/a"
         )
+        metric_text = " ".join(
+            f"{name}={inference_metrics.get(name, 'n/a')}"
+            for name in (
+                "ar_loop_seconds",
+                "vae_decode_seconds",
+                "vae_enqueue_seconds",
+                "vae_drain_seconds",
+                "vae_overlap_seconds",
+                "vae_chunks",
+                "vae_queue_peak",
+            )
+        )
         print(
             f"[benchmark] rank={rank} prompt_index={idx} "
             f"generation_seconds={generation_seconds:.3f} "
             f"save_seconds={save_seconds:.3f} pixel_frames={frame_count} "
             f"video_seconds={video_seconds:.3f} generation_fps={generation_fps:.3f} "
             f"rtf={real_time_factor:.3f} peak_memory_gb={peak_memory_text} "
-            f"vae_peak_memory_gb={vae_peak_memory_text}"
+            f"vae_peak_memory_gb={vae_peak_memory_text} {metric_text}"
         )
 
     if config.inference_iter != -1 and i >= config.inference_iter:

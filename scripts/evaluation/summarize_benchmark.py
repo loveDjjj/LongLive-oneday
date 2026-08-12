@@ -22,6 +22,13 @@ NUMERIC_FIELDS = {
     "rtf": float,
     "peak_memory_gb": float,
     "vae_peak_memory_gb": float,
+    "ar_loop_seconds": float,
+    "vae_decode_seconds": float,
+    "vae_enqueue_seconds": float,
+    "vae_drain_seconds": float,
+    "vae_overlap_seconds": float,
+    "vae_chunks": int,
+    "vae_queue_peak": int,
 }
 
 
@@ -97,6 +104,20 @@ def summarize_records(records: list[dict], warmup_per_rank: int) -> dict:
         for record in measured
         if "vae_peak_memory_gb" in record
     ]
+    optional_means = {}
+    for field in (
+        "ar_loop_seconds",
+        "vae_decode_seconds",
+        "vae_enqueue_seconds",
+        "vae_drain_seconds",
+        "vae_overlap_seconds",
+        "vae_chunks",
+        "vae_queue_peak",
+    ):
+        values = [record[field] for record in measured if field in record]
+        optional_means[f"{field}_mean"] = (
+            statistics.fmean(values) if values else None
+        )
     per_rank_seconds = defaultdict(float)
     for record in measured:
         per_rank_seconds[record["rank"]] += record["generation_seconds"]
@@ -116,6 +137,7 @@ def summarize_records(records: list[dict], warmup_per_rank: int) -> dict:
             len(measured) / concurrent_wall_seconds * 3600
         ),
         "estimated_concurrent_wall_seconds": concurrent_wall_seconds,
+        **optional_means,
     }
 
 
@@ -137,6 +159,16 @@ def format_summary(summary: dict) -> str:
         lines.append(f"peak_memory_gb_max={summary['peak_memory_gb_max']:.2f}")
     if summary["vae_peak_memory_gb_max"] is not None:
         lines.append(f"vae_peak_memory_gb_max={summary['vae_peak_memory_gb_max']:.2f}")
+    if summary["ar_loop_seconds_mean"] is not None:
+        lines.append(
+            f"ar_loop_seconds_mean={summary['ar_loop_seconds_mean']:.3f} "
+            f"vae_decode_seconds_mean={summary['vae_decode_seconds_mean']:.3f} "
+            f"vae_enqueue_seconds_mean={summary['vae_enqueue_seconds_mean']:.3f} "
+            f"vae_drain_seconds_mean={summary['vae_drain_seconds_mean']:.3f} "
+            f"vae_overlap_seconds_mean={summary['vae_overlap_seconds_mean']:.3f} "
+            f"vae_chunks_mean={summary['vae_chunks_mean']:.1f} "
+            f"vae_queue_peak_mean={summary['vae_queue_peak_mean']:.1f}"
+        )
     lines.append(
         f"generation_videos_per_hour={summary['generation_videos_per_hour']:.2f} "
         "estimated_concurrent_wall_seconds="

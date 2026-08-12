@@ -7,6 +7,7 @@ import os
 import queue
 import statistics
 import threading
+import time
 import torch
 import math
 
@@ -141,6 +142,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         self.async_vae = section_get(args, "inference", "async_vae", getattr(args, "async_vae", False))
         vae_device = section_get(args, "inference", "vae_device", getattr(args, "vae_device", None))
         self.vae_device = torch.device(vae_device) if vae_device else None
+        self.last_inference_metrics = {}
 
         self.kv_quant_config = None
         self._dit_model.kv_quant_config = self.kv_quant_config
@@ -491,6 +493,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             ]
             self.vae.model.clear_cache()
             video_chunks = []
+            vae_decode_samples = []
+            vae_enqueue_samples = []
+            vae_queue_peak = 0
             if async_vae:
                 vae_stream = create_stream(noise.device)
                 prev_vae_done = None
@@ -517,6 +522,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                                         if worker_stream is not None
                                         else device_context(None)
                                     )
+                                    decode_started = time.perf_counter()
                                     with context:
                                         decoded = _decode_vae_chunk(
                                             self.vae.model,
@@ -536,6 +542,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                                     else:
                                         synchronize(decoded.device)
                                     vae_thread_chunks.append(pinned)
+                                    vae_decode_samples.append(
+                                        time.perf_counter() - decode_started
+                                    )
                                     del decoded, item
                                 finally:
                                     vae_work_queue.task_done()
@@ -579,6 +588,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     f"-> {_prof_trace_path}",
                     flush=True,
                 )
+        ar_loop_started = time.perf_counter()
         for chunk_index, current_num_frames in enumerate(all_num_frames):
             if _LLV2_TIME and cuda_runtime:
                 _ev_s = torch.cuda.Event(enable_timing=True)
@@ -731,16 +741,23 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     prev_vae_done = create_event(noise.device)
                     prev_vae_done.record(vae_stream)
                 elif pipeline_vae:
+                    enqueue_started = time.perf_counter()
                     latent_on_vae = latents.permute(0, 2, 1, 3, 4).contiguous().to(vae_dev)
                     vae_work_queue.put(latent_on_vae)
+                    vae_enqueue_samples.append(
+                        time.perf_counter() - enqueue_started
+                    )
+                    vae_queue_peak = max(vae_queue_peak, vae_work_queue.qsize())
                 else:
                     chunk_bcthw = latents.permute(0, 2, 1, 3, 4).contiguous()
+                    decode_started = time.perf_counter()
                     decoded_chunk = _decode_vae_chunk(
                         self.vae.model,
                         chunk_bcthw,
                         vae_scale,
                     ).float().clamp_(-1, 1)
                     video_chunks.append(decoded_chunk.cpu())
+                    vae_decode_samples.append(time.perf_counter() - decode_started)
                     del decoded_chunk, chunk_bcthw
                     empty_cache()
 
@@ -753,6 +770,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 _block_events.append((_ev_s, _ev_e))
             if _prof is not None:
                 _prof.step()
+        ar_loop_seconds = time.perf_counter() - ar_loop_started
 
         if _prof is not None:
             _prof.stop()
@@ -789,8 +807,18 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
 
 
         if return_latents:
+            self.last_inference_metrics = {
+                "ar_loop_seconds": ar_loop_seconds,
+                "vae_decode_seconds": 0.0,
+                "vae_enqueue_seconds": 0.0,
+                "vae_drain_seconds": 0.0,
+                "vae_overlap_seconds": 0.0,
+                "vae_chunks": 0,
+                "vae_queue_peak": 0,
+            }
             return output
         elif streaming_decode:
+            drain_started = time.perf_counter()
             if async_vae:
                 vae_stream.synchronize()
             elif pipeline_vae:
@@ -802,13 +830,37 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                         f"[pipeline_vae] VAE decode failed: {vae_thread_error[0]}"
                     ) from vae_thread_error[0]
                 video_chunks = vae_thread_chunks
+            vae_drain_seconds = time.perf_counter() - drain_started
+            vae_decode_seconds = sum(vae_decode_samples)
+            self.last_inference_metrics = {
+                "ar_loop_seconds": ar_loop_seconds,
+                "vae_decode_seconds": vae_decode_seconds,
+                "vae_enqueue_seconds": sum(vae_enqueue_samples),
+                "vae_drain_seconds": vae_drain_seconds,
+                "vae_overlap_seconds": max(
+                    0.0, vae_decode_seconds - vae_drain_seconds
+                ),
+                "vae_chunks": len(video_chunks),
+                "vae_queue_peak": vae_queue_peak,
+            }
             video_bcthw = torch.cat(video_chunks, dim=2)
             video = video_bcthw.permute(0, 2, 1, 3, 4)
             video = (video * 0.5 + 0.5).clamp(0, 1)
             self.vae.model.clear_cache()
             return video
         else:
+            decode_started = time.perf_counter()
             video = self.vae.decode_to_pixel(output)
+            vae_decode_seconds = time.perf_counter() - decode_started
+            self.last_inference_metrics = {
+                "ar_loop_seconds": ar_loop_seconds,
+                "vae_decode_seconds": vae_decode_seconds,
+                "vae_enqueue_seconds": 0.0,
+                "vae_drain_seconds": vae_decode_seconds,
+                "vae_overlap_seconds": 0.0,
+                "vae_chunks": 1,
+                "vae_queue_peak": 0,
+            }
             video = (video * 0.5 + 0.5).clamp(0, 1)
             return video
 

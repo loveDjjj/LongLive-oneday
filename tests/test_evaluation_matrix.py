@@ -56,6 +56,28 @@ def test_dit_only_matrix_requires_only_four_devices():
     assert output.count("devices=8,9,10,11") == 4
 
 
+def test_matrix_rejects_invalid_resume_flag():
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DRY_RUN": "1",
+            "RESUME_SUITE": "sometimes",
+            "PERF_DEVICES": "0,1,2,3,4",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "RESUME_SUITE must be 0 or 1" in result.stderr
+
+
 def test_performance_matrix_selects_method_specific_checkpoints(tmp_path):
     checkpoints = {}
     for method in ("dense", "hsa_cag", "sla_cag", "hsa_sla_cag"):

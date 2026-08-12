@@ -23,6 +23,13 @@ PERFORMANCE_FIELDS = (
     "vae_peak_memory_gb_max",
     "generation_videos_per_hour",
     "estimated_concurrent_wall_seconds",
+    "ar_loop_seconds_mean",
+    "vae_decode_seconds_mean",
+    "vae_enqueue_seconds_mean",
+    "vae_drain_seconds_mean",
+    "vae_overlap_seconds_mean",
+    "vae_chunks_mean",
+    "vae_queue_peak_mean",
 )
 
 

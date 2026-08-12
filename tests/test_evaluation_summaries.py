@@ -26,9 +26,15 @@ def test_benchmark_summary_writes_machine_readable_result(tmp_path):
             [
                 "[benchmark] rank=0 generation_seconds=99 generation_fps=0 rtf=0",
                 "[benchmark] rank=0 generation_seconds=10 generation_fps=2 rtf=1 "
-                "save_seconds=3 peak_memory_gb=20 vae_peak_memory_gb=7",
+                "save_seconds=3 peak_memory_gb=20 vae_peak_memory_gb=7 "
+                "ar_loop_seconds=6 vae_decode_seconds=8 vae_enqueue_seconds=1 "
+                "vae_drain_seconds=2 vae_overlap_seconds=6 vae_chunks=4 "
+                "vae_queue_peak=2",
                 "[benchmark] rank=0 generation_seconds=14 generation_fps=4 rtf=2 "
-                "save_seconds=5 peak_memory_gb=22 vae_peak_memory_gb=8",
+                "save_seconds=5 peak_memory_gb=22 vae_peak_memory_gb=8 "
+                "ar_loop_seconds=8 vae_decode_seconds=10 vae_enqueue_seconds=1.4 "
+                "vae_drain_seconds=4 vae_overlap_seconds=6 vae_chunks=4 "
+                "vae_queue_peak=3",
             ]
         ),
         encoding="utf-8",
@@ -48,7 +54,15 @@ def test_benchmark_summary_writes_machine_readable_result(tmp_path):
     assert result["records"] == 2
     assert result["generation_seconds_mean"] == 12
     assert result["peak_memory_gb_max"] == 22
+    assert result["ar_loop_seconds_mean"] == 7
+    assert result["vae_decode_seconds_mean"] == 9
+    assert result["vae_enqueue_seconds_mean"] == 1.2
+    assert result["vae_drain_seconds_mean"] == 3
+    assert result["vae_overlap_seconds_mean"] == 6
+    assert result["vae_chunks_mean"] == 4
+    assert result["vae_queue_peak_mean"] == 2.5
     assert "generation_seconds mean=12.000" in stdout
+    assert "vae_overlap_seconds_mean=6.000" in stdout
 
 
 def test_vbench_summary_preserves_official_aggregates(tmp_path):

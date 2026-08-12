@@ -103,6 +103,42 @@ class SequenceParallelVisualizationTest(unittest.TestCase):
         self.assertIn("latent_on_vae", queued_names)
         self.assertTrue(waits_for_worker)
 
+    def test_pipeline_exports_overlap_telemetry(self):
+        method = find_method(
+            ROOT / "pipeline" / "causal_diffusion_inference.py",
+            "_inference_inner",
+        )
+        assignments = [
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Attribute)
+                and target.attr == "last_inference_metrics"
+                for target in node.targets
+            )
+        ]
+        exported_keys = {
+            key.value
+            for assignment in assignments
+            if isinstance(assignment.value, ast.Dict)
+            for key in assignment.value.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        self.assertTrue(
+            {
+                "ar_loop_seconds",
+                "vae_decode_seconds",
+                "vae_enqueue_seconds",
+                "vae_drain_seconds",
+                "vae_overlap_seconds",
+                "vae_chunks",
+                "vae_queue_peak",
+            }
+            <= exported_keys
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

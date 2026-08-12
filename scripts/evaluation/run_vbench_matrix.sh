@@ -15,8 +15,13 @@ METHODS="${METHODS:-dense,hsa_cag,sla_cag,hsa_sla_cag}"
 VBENCH_PRESETS="${VBENCH_PRESETS:-longlive2_standard_20pct}"
 SUITE_ID="${SUITE_ID:-vbench_sparse_matrix_$(date +%Y%m%d_%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
+RESUME_SUITE="${RESUME_SUITE:-1}"
 if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
   echo "[error] DRY_RUN must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${RESUME_SUITE}" != "0" && "${RESUME_SUITE}" != "1" ]]; then
+  echo "[error] RESUME_SUITE must be 0 or 1" >&2
   exit 2
 fi
 IFS=',' read -r -a methods <<<"${METHODS}"
@@ -41,12 +46,18 @@ for preset in "${presets[@]}"; do
     fi
     checkpoint="$(checkpoint_for_method "${method}")"
     echo "[suite] checkpoint=${checkpoint} preset=${preset} method=${method}"
+    run_id="${SUITE_ID}-${preset}-${method}"
     if [[ "${DRY_RUN}" == "1" ]]; then
+      continue
+    fi
+    run_dir="runs/vbench/${run_id}"
+    if [[ -f "${run_dir}/vbench_results.json" && "${RESUME_SUITE}" == "1" ]]; then
+      echo "[resume] completed case skipped: ${run_id}"
       continue
     fi
     LONGLIVE_GENERATOR_CKPT="${checkpoint}" \
     LONGLIVE_SPARSE_METHOD="${method}" \
-    RUN_ID="${SUITE_ID}-${preset}-${method}" \
+    RUN_ID="${run_id}" \
       bash scripts/evaluation/run_vbench.sh "${preset}"
   done
 done
