@@ -3,6 +3,7 @@ import torch
 
 from utils.inference_utils import (
     clean_fsdp_state_dict_keys,
+    configure_generator_linear_only,
     extract_generator_state_dict,
     load_generator_state_dict,
     load_generator_linear_checkpoint,
@@ -151,3 +152,30 @@ def test_generator_linear_state_rejects_missing_keys():
         load_generator_linear_state_dict(
             generator, {"sla_linear.weight": torch.ones(2, 2)}
         )
+
+
+def test_linear_only_scope_freezes_every_non_compensation_parameter():
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = torch.nn.Linear(2, 2)
+            self.sla_linear = torch.nn.Linear(2, 2)
+
+    generator = torch.nn.Sequential(Attention(), Attention())
+
+    selected = configure_generator_linear_only(generator)
+    actual = {
+        name for name, parameter in generator.named_parameters()
+        if parameter.requires_grad
+    }
+
+    assert actual == set(selected)
+    assert actual == {
+        "0.sla_linear.weight", "0.sla_linear.bias",
+        "1.sla_linear.weight", "1.sla_linear.bias",
+    }
+
+
+def test_linear_only_scope_rejects_model_without_compensation():
+    with pytest.raises(ValueError, match="no sla_linear parameters"):
+        configure_generator_linear_only(torch.nn.Linear(2, 2))

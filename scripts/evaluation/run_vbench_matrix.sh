@@ -9,17 +9,29 @@ if [[ "$#" -gt 1 ]]; then
   echo "Usage: $0 [merged_generator_checkpoint]" >&2
   exit 2
 fi
-checkpoint="${1:-${LONGLIVE_GENERATOR_CKPT:-}}"
-if [[ -z "${checkpoint}" || ! -f "${checkpoint}" ]]; then
-  echo "[error] provide an existing merged generator checkpoint" >&2
-  exit 2
-fi
+shared_checkpoint="${1:-${LONGLIVE_GENERATOR_CKPT:-}}"
 
 METHODS="${METHODS:-dense,hsa_cag,sla_cag,hsa_sla_cag}"
 VBENCH_PRESETS="${VBENCH_PRESETS:-longlive2_standard_20pct}"
 SUITE_ID="${SUITE_ID:-vbench_sparse_matrix_$(date +%Y%m%d_%H%M%S)}"
+DRY_RUN="${DRY_RUN:-0}"
+if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
+  echo "[error] DRY_RUN must be 0 or 1" >&2
+  exit 2
+fi
 IFS=',' read -r -a methods <<<"${METHODS}"
 IFS=',' read -r -a presets <<<"${VBENCH_PRESETS}"
+
+checkpoint_for_method() {
+  local method="$1" variable_name checkpoint
+  variable_name="$(tr '[:lower:]' '[:upper:]' <<<"${method}")_GENERATOR_CKPT"
+  checkpoint="${!variable_name:-${shared_checkpoint}}"
+  if [[ -z "${checkpoint}" || ! -f "${checkpoint}" ]]; then
+    echo "[error] provide an existing checkpoint for ${method} via ${variable_name} or the shared argument" >&2
+    exit 2
+  fi
+  printf '%s' "${checkpoint}"
+}
 
 for preset in "${presets[@]}"; do
   for method in "${methods[@]}"; do
@@ -27,7 +39,11 @@ for preset in "${presets[@]}"; do
       echo "[error] unsupported method: ${method}" >&2
       exit 2
     fi
+    checkpoint="$(checkpoint_for_method "${method}")"
     echo "[suite] checkpoint=${checkpoint} preset=${preset} method=${method}"
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      continue
+    fi
     LONGLIVE_GENERATOR_CKPT="${checkpoint}" \
     LONGLIVE_SPARSE_METHOD="${method}" \
     RUN_ID="${SUITE_ID}-${preset}-${method}" \

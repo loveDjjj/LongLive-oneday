@@ -29,6 +29,8 @@ from utils.training_state import (
 from utils.device import current_device, empty_cache
 from utils.inference_utils import (
     clean_fsdp_state_dict_keys,
+    configure_generator_linear_only,
+    is_sla_linear_parameter,
     load_generator_linear_state_dict,
     load_generator_state_dict,
 )
@@ -573,14 +575,7 @@ class Trainer:
             print("Restored generator and critic AdamW state from LoRA checkpoint")
 
     def _configure_generator_linear_only(self, transformer):
-        transformer.requires_grad_(False)
-        trainable = []
-        for name, parameter in transformer.named_parameters():
-            if ".sla_linear." in name or name.startswith("sla_linear."):
-                parameter.requires_grad_(True)
-                trainable.append(name)
-        if not trainable:
-            raise ValueError("linear_only training found no sla_linear parameters")
+        trainable = configure_generator_linear_only(transformer)
         if self.is_main_process:
             count = sum(
                 parameter.numel()
@@ -1143,7 +1138,7 @@ class Trainer:
         return {
             name.removeprefix("model."): value
             for name, value in full.items()
-            if ".sla_linear." in name or name.startswith("sla_linear.")
+            if is_sla_linear_parameter(name)
         }
     
     # --------------------------------------------------------------------------------------------------------------

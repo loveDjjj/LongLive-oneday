@@ -254,6 +254,7 @@ def resolve_msprof(args) -> dict:
     pixel_frames = (frames - 1) * 4 + 1
     sparse_method = _sparse_method(config.sparsity)
     sparse_backend = _sparse_backend(config.sparsity)
+    generator_checkpoint = _generator_checkpoint(str(model.generator_checkpoint))
     metadata = {
         "task": "msprof",
         "engine": "longlive2",
@@ -270,6 +271,7 @@ def resolve_msprof(args) -> dict:
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
         "sparsity_backend": sparse_backend,
+        "generator_checkpoint": generator_checkpoint,
         "run_tag": f"msprof-longlive2-{args.preset}-{effective_vae_mode}-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
         "msprof": OmegaConf.to_container(config.msprof, resolve=True),
     }
@@ -408,6 +410,11 @@ def resolve_vbench(args) -> dict:
     _save(resolved, args.output)
     sparse_method = _sparse_method(config.sparsity)
     sparse_backend = _sparse_backend(config.sparsity)
+    generator_checkpoint = (
+        _generator_checkpoint(str(engine.generator_checkpoint))
+        if engine_name == "longlive2"
+        else None
+    )
     metadata = {
         "task": "vbench",
         "preset": args.preset,
@@ -429,6 +436,7 @@ def resolve_vbench(args) -> dict:
         "full_info": full_info,
         "sparsity_method": sparse_method,
         "sparsity_backend": sparse_backend,
+        "generator_checkpoint": generator_checkpoint,
         "run_tag": f"vbench-{engine_name}-{category}-{subset}-{pixel_frames}f-{len(seeds)}seed-sp{sp_size}-dp{dp_size}-{sparse_method}-{sparse_backend}",
     }
     return metadata

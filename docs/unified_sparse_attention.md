@@ -65,6 +65,36 @@ TASK=benchmark \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
 
+Use a dry run to audit all 36 combinations without reserving devices:
+
+```bash
+DRY_RUN=1 PERF_DEVICES=0,1,2,3,4 \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
+Set `LONGLIVE_GENERATOR_CKPT` to use one checkpoint for a controlled routing
+comparison. For best-per-method comparisons, set any of
+`DENSE_GENERATOR_CKPT`, `HSA_CAG_GENERATOR_CKPT`, `SLA_CAG_GENERATOR_CKPT`, and
+`HSA_SLA_CAG_GENERATOR_CKPT`; method-specific values take precedence over the
+shared checkpoint in both performance and VBench matrices.
+
+```bash
+DENSE_GENERATOR_CKPT=/weights/longlive2.pt \
+HSA_CAG_GENERATOR_CKPT=/weights/hsa.pt \
+SLA_CAG_GENERATOR_CKPT=/weights/sla.pt \
+HSA_SLA_CAG_GENERATOR_CKPT=/weights/hybrid.pt \
+PERF_DEVICES=0,1,2,3,4 \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
+When only four NPUs are available, select modes that do not require a dedicated
+VAE device:
+
+```bash
+PERF_DEVICES=0,1,2,3 MODES=dit_only \
+bash scripts/evaluation/run_performance_matrix.sh
+```
+
 Use `TASK=msprof` for profiling. A profile includes collection overhead and is
 diagnostic evidence, not the release latency number. Use `dit_only` profiles
 for attention/operator comparison, then sync/async profiles for VAE and overlap
@@ -103,6 +133,10 @@ Run the same checkpoint through all four methods:
 VBENCH_PRESETS=longlive2_standard_20pct \
 bash scripts/evaluation/run_vbench_matrix.sh /path/to/merged_generator.pt
 ```
+
+The same method-specific checkpoint variables can be used with
+`run_vbench_matrix.sh` when the goal is to compare each method's best trained
+checkpoint instead of isolating routing behavior.
 
 ## Training
 

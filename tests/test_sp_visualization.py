@@ -59,6 +59,50 @@ class SequenceParallelVisualizationTest(unittest.TestCase):
 
         self.assertEqual(len(matching_calls), 1)
 
+    def test_dedicated_vae_path_is_a_chunked_background_pipeline(self):
+        method = find_method(
+            ROOT / "pipeline" / "causal_diffusion_inference.py",
+            "_inference_inner",
+        )
+        calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+
+        has_queue = any(
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "queue"
+            and call.func.attr == "Queue"
+            for call in calls
+        )
+        has_thread = any(
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "threading"
+            and call.func.attr == "Thread"
+            for call in calls
+        )
+        queued_names = {
+            argument.id
+            for call in calls
+            if isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "vae_work_queue"
+            and call.func.attr == "put"
+            and call.args
+            and isinstance((argument := call.args[0]), ast.Name)
+        }
+        waits_for_worker = any(
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in {"vae_all_done", "vae_bg_thread"}
+            and call.func.attr in {"wait", "join"}
+            for call in calls
+        )
+
+        self.assertTrue(has_queue)
+        self.assertTrue(has_thread)
+        self.assertIn("latent_on_vae", queued_names)
+        self.assertTrue(waits_for_worker)
+
 
 if __name__ == "__main__":
     unittest.main()

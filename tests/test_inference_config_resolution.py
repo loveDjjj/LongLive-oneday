@@ -67,6 +67,22 @@ def test_explicit_dense_override_disables_configured_sparsity(tmp_path, monkeypa
     assert metadata["sparsity_backend"] == "dense"
 
 
+def test_manifest_records_generator_checkpoint_override(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "generator.pt"
+    checkpoint.touch()
+    monkeypatch.setenv("LONGLIVE_GENERATOR_CKPT", str(checkpoint))
+
+    benchmark = resolve_benchmark(
+        _args(MSPROF_CONFIG, "5s", tmp_path / "benchmark.yaml")
+    )
+    vbench = resolve_vbench(
+        _args(VBENCH_CONFIG, "longlive2_standard_5pct", tmp_path / "vbench.yaml", seed=0)
+    )
+
+    assert benchmark["generator_checkpoint"] == str(checkpoint)
+    assert vbench["generator_checkpoint"] == str(checkpoint)
+
+
 def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     monkeypatch.delenv("LONGLIVE_SLA_BACKEND", raising=False)
@@ -254,3 +270,46 @@ def test_latent_only_benchmark_disables_dedicated_vae(tmp_path, monkeypatch):
     assert metadata["vae_mode"] == "dit_only"
     assert metadata["required_devices"] == 4
     assert "-dit_only-" in metadata["run_tag"]
+
+
+@pytest.mark.parametrize("resolver", [resolve_benchmark, resolve_msprof])
+@pytest.mark.parametrize(
+    ("duration", "latent_frames"),
+    [("5s", 32), ("32s", 192), ("64s", 384)],
+)
+@pytest.mark.parametrize(
+    ("mode", "required_devices"),
+    [("dit_only", 4), ("sync_vae", 4), ("async_vae", 5)],
+)
+@pytest.mark.parametrize(
+    "method", ["dense", "hsa_cag", "sla_cag", "hsa_sla_cag"]
+)
+def test_all_performance_matrix_cases_resolve(
+    tmp_path,
+    monkeypatch,
+    resolver,
+    duration,
+    latent_frames,
+    mode,
+    required_devices,
+    method,
+):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", method)
+    output = tmp_path / (
+        f"{resolver.__name__}-{method}-{duration}-{mode}.yaml"
+    )
+    args = _args(MSPROF_CONFIG, duration, output)
+    args.vae_mode = mode
+
+    metadata = resolver(args)
+    resolved = OmegaConf.load(output)
+
+    assert metadata["latent_frames"] == latent_frames
+    assert metadata["required_devices"] == required_devices
+    assert metadata["vae_mode"] == mode
+    assert metadata["sparsity_method"] == method
+    assert resolved.num_output_frames == latent_frames
+    if method == "dense":
+        assert "sparse_config" not in resolved.model_kwargs
+    else:
+        assert resolved.model_kwargs.sparse_config.method == method

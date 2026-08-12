@@ -19,6 +19,24 @@ from typing import Sequence
 import torch
 
 
+def is_sla_linear_parameter(name: str) -> bool:
+    """Return whether a parameter belongs to an SLA compensation projection."""
+    return name.startswith("sla_linear.") or ".sla_linear." in name
+
+
+def configure_generator_linear_only(generator_model) -> list[str]:
+    """Freeze a generator and enable gradients only for SLA compensation."""
+    generator_model.requires_grad_(False)
+    trainable = []
+    for name, parameter in generator_model.named_parameters():
+        if is_sla_linear_parameter(name):
+            parameter.requires_grad_(True)
+            trainable.append(name)
+    if not trainable:
+        raise ValueError("linear_only training found no sla_linear parameters")
+    return trainable
+
+
 def _torch_load(path: str):
     try:
         return torch.load(path, map_location="cpu", weights_only=False)
@@ -139,7 +157,7 @@ def load_generator_linear_state_dict(
     expected = {
         name: parameter
         for name, parameter in generator_model.named_parameters()
-        if ".sla_linear." in name or name.startswith("sla_linear.")
+        if is_sla_linear_parameter(name)
     }
     prepared = clean_fsdp_state_dict_keys(state_dict)
     prepared = {

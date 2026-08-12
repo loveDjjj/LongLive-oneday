@@ -33,7 +33,7 @@ measurement:
   warmup_per_rank: 1
   seed: 0
 
-# latent 帧数分别对应约 16、32 和 64 秒的像素视频。
+# latent 帧数分别对应约 5、16、32 和 64 秒的像素视频。
 presets:
   5s:
     latent_frames: 32

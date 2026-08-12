@@ -11,27 +11,51 @@ DURATIONS="${DURATIONS:-5s,32s,64s}"
 MODES="${MODES:-dit_only,sync_vae,async_vae}"
 PERF_DEVICES="${PERF_DEVICES:-0,1,2,3,4}"
 SUITE_ID="${SUITE_ID:-sparse_matrix_$(date +%Y%m%d_%H%M%S)}"
+DRY_RUN="${DRY_RUN:-0}"
 
 if [[ "${TASK}" != "benchmark" && "${TASK}" != "msprof" ]]; then
   echo "[error] TASK must be benchmark or msprof" >&2
   exit 2
 fi
-IFS=',' read -r -a devices <<<"${PERF_DEVICES}"
-if (( ${#devices[@]} < 5 )); then
-  echo "[error] PERF_DEVICES must contain at least five NPU ids" >&2
+if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
+  echo "[error] DRY_RUN must be 0 or 1" >&2
   exit 2
 fi
-workers="${devices[0]},${devices[1]},${devices[2]},${devices[3]}"
-workers_and_vae="${workers},${devices[4]}"
-
 IFS=',' read -r -a methods <<<"${METHODS}"
 IFS=',' read -r -a durations <<<"${DURATIONS}"
 IFS=',' read -r -a modes <<<"${MODES}"
+IFS=',' read -r -a devices <<<"${PERF_DEVICES}"
+required_device_count=4
+for mode in "${modes[@]}"; do
+  [[ "${mode}" == "async_vae" ]] && required_device_count=5
+done
+if (( ${#devices[@]} < required_device_count )); then
+  echo "[error] selected modes require at least ${required_device_count} NPU ids in PERF_DEVICES" >&2
+  exit 2
+fi
+workers="${devices[0]},${devices[1]},${devices[2]},${devices[3]}"
+workers_and_vae="${workers}"
+if (( required_device_count == 5 )); then
+  workers_and_vae="${workers},${devices[4]}"
+fi
+
+checkpoint_for_method() {
+  local method="$1" variable_name checkpoint
+  variable_name="$(tr '[:lower:]' '[:upper:]' <<<"${method}")_GENERATOR_CKPT"
+  checkpoint="${!variable_name:-${LONGLIVE_GENERATOR_CKPT:-}}"
+  if [[ -n "${checkpoint}" && ! -f "${checkpoint}" ]]; then
+    echo "[error] checkpoint for ${method} does not exist: ${checkpoint}" >&2
+    exit 2
+  fi
+  printf '%s' "${checkpoint}"
+}
+
 for method in "${methods[@]}"; do
   if [[ ! "${method}" =~ ^(dense|hsa_cag|sla_cag|hsa_sla_cag)$ ]]; then
     echo "[error] unsupported method: ${method}" >&2
     exit 2
   fi
+  checkpoint="$(checkpoint_for_method "${method}")"
   for duration in "${durations[@]}"; do
     if [[ ! "${duration}" =~ ^(5s|32s|64s)$ ]]; then
       echo "[error] unsupported duration: ${duration}" >&2
@@ -44,18 +68,28 @@ for method in "${methods[@]}"; do
       fi
       visible="${workers}"
       [[ "${mode}" == "async_vae" ]] && visible="${workers_and_vae}"
-      echo "[suite] task=${TASK} method=${method} duration=${duration} mode=${mode}"
+      echo "[suite] task=${TASK} method=${method} duration=${duration} mode=${mode} checkpoint=${checkpoint:-config-default}"
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        echo "[dry-run] devices=${visible} run_id=${SUITE_ID}-${method}-${duration}-${mode}"
+        continue
+      fi
+      case_env=(
+        env
+        "ASCEND_RT_VISIBLE_DEVICES=${visible}"
+        "LONGLIVE_SPARSE_METHOD=${method}"
+      )
+      if [[ -n "${checkpoint}" ]]; then
+        case_env+=("LONGLIVE_GENERATOR_CKPT=${checkpoint}")
+      fi
       if [[ "${TASK}" == "benchmark" ]]; then
-        ASCEND_RT_VISIBLE_DEVICES="${visible}" \
-        LONGLIVE_SPARSE_METHOD="${method}" \
-        BENCHMARK_MODE="${mode}" \
-        RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
+        "${case_env[@]}" \
+          BENCHMARK_MODE="${mode}" \
+          RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
           bash scripts/evaluation/run_benchmark.sh "${duration}"
       else
-        ASCEND_RT_VISIBLE_DEVICES="${visible}" \
-        LONGLIVE_SPARSE_METHOD="${method}" \
-        MSPROF_MODE="${mode}" \
-        RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
+        "${case_env[@]}" \
+          MSPROF_MODE="${mode}" \
+          RUN_ID="${SUITE_ID}-${method}-${duration}-${mode}" \
           bash scripts/evaluation/run_msprof.sh "${duration}"
       fi
     done

@@ -7,6 +7,7 @@ from wan_5b.modules.hsa_sla_attention import (
 )
 from wan_5b.modules.sla_attention import _portable_sparse_attention
 from wan_5b.modules.sparse_attention import parse_sparse_config, sparse_method
+from wan_5b.modules.sparse_attention import calculate_chunk_sparsities
 
 
 def _config(**overrides):
@@ -156,3 +157,34 @@ def test_hybrid_router_has_no_device_to_host_item_sync():
 
     source = inspect.getsource(build_hsa_sla_block_lut)
     assert ".item()" not in source
+
+
+def test_hybrid_cag_budget_is_valid_for_all_release_durations():
+    import math
+
+    config = {
+        **_config(
+            sparsity=0.90,
+            sparsity_base=0.93,
+            block_q=128,
+            block_k=128,
+            candidate_frames=8,
+        ).__dict__,
+        "method": "hsa_sla_cag",
+    }
+    candidate_capacity = math.ceil(8 * 880 / 128)
+
+    for latent_frames in (32, 192, 384):
+        schedule = calculate_chunk_sparsities(
+            latent_frames, 8, 32, config
+        )
+        assert len(schedule) == latent_frames // 8
+        assert schedule[0] == 0.0
+        for chunk_id, sparsity in enumerate(schedule[1:], start=1):
+            resident_frames = min((chunk_id + 1) * 8, 32)
+            key_blocks = resident_frames * 880 // 128
+            selected = math.ceil((1.0 - sparsity) * key_blocks)
+            assert selected <= candidate_capacity
+        tail_blocks = 32 * 880 // 128
+        tail_selected = math.ceil((1.0 - schedule[-1]) * tail_blocks)
+        assert 20 <= tail_selected <= 22
