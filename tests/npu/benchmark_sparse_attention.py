@@ -146,11 +146,18 @@ def main() -> None:
     parser.add_argument("--latent-frames", type=int, choices=(32, 192, 384), default=192)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--check-linear-backward",
+        action="store_true",
+        help="for hsa_sla_cag, verify gradients reach only the linear projection",
+    )
     args = parser.parse_args()
     if args.method in {"hsa_cag", "hsa_sla_cag"} and args.backend == "mindiesd_bsa":
         raise ValueError("HSA-based methods support mindiesd RainFusion or ascend_triton")
     if args.warmup < 1 or args.iterations < 1:
         raise ValueError("warmup and iterations must be positive")
+    if args.check_linear_backward and args.method != "hsa_sla_cag":
+        raise ValueError("--check-linear-backward requires --method hsa_sla_cag")
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
@@ -245,6 +252,34 @@ def main() -> None:
         f"selected={selected}/{total} effective_sparsity={1.0-selected/total:.3f} "
         f"speedup={dense_median/full_median:.3f}x"
     )
+    if args.check_linear_backward:
+        projection.zero_grad(set_to_none=True)
+        output = hsa_sla_cag_attention(
+            q,
+            k,
+            v,
+            frame_seq=880,
+            chunk_id=chunk_id,
+            sparse_config=config,
+            linear_projection=projection,
+            attention_cache=None,
+        )
+        output.float().square().mean().backward()
+        weight_grad = projection.weight.grad
+        bias_grad = projection.bias.grad
+        if weight_grad is None or bias_grad is None:
+            raise RuntimeError("hybrid linear projection did not receive gradients")
+        if not torch.isfinite(weight_grad).all().item() or not torch.isfinite(bias_grad).all().item():
+            raise RuntimeError("hybrid linear projection gradients are non-finite")
+        grad_norm = weight_grad.float().norm().item()
+        if grad_norm == 0.0:
+            raise RuntimeError("hybrid linear projection weight gradient is zero")
+        print(
+            f"linear_backward=passed weight_grad_norm={grad_norm:.6f} "
+            f"bias_grad_norm={bias_grad.float().norm().item():.6f} "
+            f"q_grad={q.grad is not None} k_grad={k.grad is not None} "
+            f"v_grad={v.grad is not None}"
+        )
 
 
 if __name__ == "__main__":

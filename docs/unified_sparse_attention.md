@@ -140,8 +140,13 @@ python tests/npu/benchmark_sparse_attention.py \
 python tests/npu/benchmark_sparse_attention.py \
   --method sla_cag --device npu:0 --warmup 5 --iterations 20
 python tests/npu/benchmark_sparse_attention.py \
-  --method hsa_sla_cag --device npu:0 --warmup 5 --iterations 20
+  --method hsa_sla_cag --device npu:0 --warmup 5 --iterations 20 \
+  --check-linear-backward
 ```
+
+The hybrid backward check keeps Q/K/V frozen and verifies finite, nonzero
+gradients on `sla_linear`, matching the generator's `linear_only` training
+scope before committing a multi-card DMD smoke run.
 
 ## VBench
 
