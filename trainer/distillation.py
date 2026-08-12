@@ -21,6 +21,7 @@ from utils.training_state import (
     capture_rng_state,
     build_generator_linear_sidecar,
     find_latest_training_checkpoint,
+    linear_gradient_statistics,
     list_training_checkpoints,
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
@@ -914,6 +915,28 @@ class Trainer:
         with open(self.metrics_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
+    def _linear_gradient_statistics(self):
+        def reduce_tensors(present, nonfinite, squared_norm):
+            dist.all_reduce(present, op=dist.ReduceOp.MAX)
+            dist.all_reduce(nonfinite, op=dist.ReduceOp.MAX)
+            dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
+
+        statistics = linear_gradient_statistics(
+            self.model.generator.named_parameters(),
+            reduce_tensors=reduce_tensors,
+        )
+        failures = []
+        if statistics["tensor_count"] != 60:
+            failures.append(f"tensor_count={statistics['tensor_count']} expected=60")
+        for key in ("missing", "nonfinite_names", "zero"):
+            if statistics[key]:
+                failures.append(f"{key}={statistics[key][:4]}")
+        if failures:
+            raise RuntimeError(
+                "hybrid linear gradient coverage failed: " + "; ".join(failures)
+            )
+        return statistics
+
     def generate_video(self, pipeline, num_frames, prompts, latents_only=False):
         batch_size = len(prompts)
         sampled_noise = torch.randn(
@@ -978,6 +1001,9 @@ class Trainer:
                 # Compute grad norm and update parameters
                 self._set_train_progress(f"step {self.step}: optimizer")
                 if TRAIN_GENERATOR:
+                    linear_gradient_stats = None
+                    if self.generator_train_scope == "linear_only":
+                        linear_gradient_stats = self._linear_gradient_statistics()
                     generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
                     generator_log_dict = merge_dict_list(accumulated_generator_logs)
                     generator_log_dict["generator_grad_norm"] = generator_grad_norm
@@ -1014,6 +1040,17 @@ class Trainer:
                                 "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"].mean().item()
                             }
                         )
+                        if linear_gradient_stats is not None:
+                            wandb_loss_dict.update(
+                                {
+                                    "linear_grad_tensors": linear_gradient_stats["tensor_count"],
+                                    "linear_grad_with_gradient": linear_gradient_stats["with_gradient"],
+                                    "linear_grad_nonzero": linear_gradient_stats["nonzero"],
+                                    "linear_grad_finite": linear_gradient_stats["finite"],
+                                    "linear_grad_min_aggregated_l2": linear_gradient_stats["min_aggregated_l2"],
+                                    "linear_grad_max_aggregated_l2": linear_gradient_stats["max_aggregated_l2"],
+                                }
+                            )
 
 
                     wandb_loss_dict.update(

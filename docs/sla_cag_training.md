@@ -243,7 +243,12 @@ dmdtrain_gradient_norm ..., critic_loss ..., critic_grad_norm ...
 {"critic_grad_norm": 0.0, "critic_loss": 0.0, "iteration_seconds": 0.0, "step": 1}
 ```
 
-Generator 更新步额外包含 `generator_loss`、`generator_grad_norm`、`dmdtrain_gradient_norm`。第一步 `iteration_seconds` 固定为 0；不要把 JSONL 改成多行 JSON 数组。W&B 默认禁用，设置 `DISABLE_WANDB=0` 才会上报。
+Generator 更新步额外包含 `generator_loss`、`generator_grad_norm`、`dmdtrain_gradient_norm`。
+Hybrid 还会记录 `linear_grad_tensors/with_gradient/nonzero/finite`（正常均为 60）以及
+`linear_grad_min/max_aggregated_l2`。任一线性张量全局缺梯度、全零或含非有限值时，
+训练会在 optimizer step 前失败。这里的 aggregated L2 对 FSDP 分片做跨 rank 求和，
+存在副本重复，只用于诊断趋势，不作为精确全局范数。第一步 `iteration_seconds` 固定为
+0；不要把 JSONL 改成多行 JSON 数组。W&B 默认禁用，设置 `DISABLE_WANDB=0` 才会上报。
 
 ## 8. 保存数据和目录
 

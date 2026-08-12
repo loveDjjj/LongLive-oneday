@@ -12,6 +12,7 @@ from utils.training_state import (
     build_generator_linear_sidecar,
     capture_rng_state,
     find_latest_training_checkpoint,
+    linear_gradient_statistics,
     list_training_checkpoints,
     resume_samples_per_rank,
     restore_fsdp_optimizer_state,
@@ -200,6 +201,53 @@ class FinalCheckpointTest(unittest.TestCase):
             dict(start_step=0, final_step=1001, save_interval=10, no_save=True),
         ):
             self.assertFalse(should_save_final_checkpoint(**values))
+
+
+class LinearGradientStatisticsTest(unittest.TestCase):
+    def test_reports_complete_nonzero_linear_gradients(self):
+        model = torch.nn.Module()
+        model.sla_linear = torch.nn.Linear(2, 2)
+        for parameter in model.parameters():
+            parameter.grad = torch.ones_like(parameter)
+
+        statistics = linear_gradient_statistics(model.named_parameters())
+
+        self.assertEqual(statistics["tensor_count"], 2)
+        self.assertEqual(statistics["with_gradient"], 2)
+        self.assertEqual(statistics["nonzero"], 2)
+        self.assertEqual(statistics["finite"], 2)
+        self.assertEqual(statistics["missing"], [])
+
+    def test_reports_missing_zero_and_nonfinite_gradients(self):
+        model = torch.nn.Module()
+        model.sla_linear = torch.nn.Linear(2, 2)
+        model.sla_linear.weight.grad = torch.zeros_like(model.sla_linear.weight)
+        model.sla_linear.bias.grad = torch.full_like(
+            model.sla_linear.bias, float("nan")
+        )
+
+        statistics = linear_gradient_statistics(model.named_parameters())
+
+        self.assertEqual(statistics["with_gradient"], 2)
+        self.assertEqual(statistics["nonzero"], 0)
+        self.assertEqual(len(statistics["zero"]), 1)
+        self.assertEqual(len(statistics["nonfinite_names"]), 1)
+
+    def test_reducer_can_supply_a_missing_shard_from_another_rank(self):
+        model = torch.nn.Module()
+        model.sla_linear = torch.nn.Linear(2, 2)
+
+        def reduce_tensors(present, nonfinite, squared_norm):
+            present.fill_(1)
+            squared_norm.fill_(4)
+
+        statistics = linear_gradient_statistics(
+            model.named_parameters(), reduce_tensors=reduce_tensors
+        )
+
+        self.assertEqual(statistics["with_gradient"], 2)
+        self.assertEqual(statistics["nonzero"], 2)
+        self.assertEqual(statistics["min_aggregated_l2"], 2.0)
 
 
 class SparseCheckpointContractTest(unittest.TestCase):

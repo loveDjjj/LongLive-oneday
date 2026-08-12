@@ -98,6 +98,60 @@ def should_save_final_checkpoint(*, start_step, final_step, save_interval, no_sa
     )
 
 
+def linear_gradient_statistics(named_parameters, *, reduce_tensors=None):
+    """Summarize sharded SLA-linear gradients using a caller-provided reducer."""
+    selected = sorted(
+        (str(name), parameter)
+        for name, parameter in named_parameters
+        if parameter.requires_grad and ".sla_linear." in f".{name}"
+    )
+    if not selected:
+        raise ValueError("linear gradient diagnostics found no trainable sla_linear tensors")
+
+    device = selected[0][1].device
+    present = torch.zeros(len(selected), dtype=torch.float32, device=device)
+    nonfinite = torch.zeros_like(present)
+    squared_norm = torch.zeros_like(present)
+    for index, (_, parameter) in enumerate(selected):
+        gradient = parameter.grad
+        if gradient is None or gradient.numel() == 0:
+            continue
+        present[index] = 1.0
+        finite = torch.isfinite(gradient)
+        nonfinite[index] = (~finite).any().to(torch.float32)
+        squared_norm[index] = torch.where(
+            finite, gradient.float(), torch.zeros_like(gradient, dtype=torch.float32)
+        ).square().sum()
+
+    if reduce_tensors is not None:
+        reduce_tensors(present, nonfinite, squared_norm)
+
+    norms = squared_norm.sqrt()
+    missing_indices = torch.nonzero(present == 0, as_tuple=False).flatten().cpu().tolist()
+    nonfinite_indices = torch.nonzero(nonfinite > 0, as_tuple=False).flatten().cpu().tolist()
+    zero_indices = torch.nonzero(
+        (present > 0) & (nonfinite == 0) & (squared_norm == 0), as_tuple=False
+    ).flatten().cpu().tolist()
+    active_norms = norms[(present > 0) & (nonfinite == 0)]
+    return {
+        "tensor_count": len(selected),
+        "with_gradient": int((present > 0).sum().item()),
+        "nonzero": int(
+            ((present > 0) & (nonfinite == 0) & (squared_norm > 0)).sum().item()
+        ),
+        "finite": int(((present > 0) & (nonfinite == 0)).sum().item()),
+        "min_aggregated_l2": (
+            float(active_norms.min().item()) if active_norms.numel() else 0.0
+        ),
+        "max_aggregated_l2": (
+            float(active_norms.max().item()) if active_norms.numel() else 0.0
+        ),
+        "missing": [selected[index][0] for index in missing_indices],
+        "nonfinite_names": [selected[index][0] for index in nonfinite_indices],
+        "zero": [selected[index][0] for index in zero_indices],
+    }
+
+
 def resume_samples_per_rank(
     checkpoint,
     *,
