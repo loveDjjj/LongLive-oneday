@@ -296,4 +296,8 @@ if [[ "${completed_dimensions}" -ne "${vbench_dimension_count}" ]]; then
   echo "[error] AISBench completed only ${completed_dimensions}/${vbench_dimension_count} dimensions; inspect ${aisbench_log}" >&2
   exit 1
 fi
+"${GENERATION_ENV}/bin/python" scripts/evaluation/summarize_vbench.py \
+  --work-dir "${aisbench_work_dir}" \
+  --output "${run_dir}/vbench_results.json" \
+  --copy-summary-to "${run_dir}"
 echo "[done] run=${run_dir}"

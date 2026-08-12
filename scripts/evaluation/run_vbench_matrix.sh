@@ -50,3 +50,10 @@ for preset in "${presets[@]}"; do
       bash scripts/evaluation/run_vbench.sh "${preset}"
   done
 done
+
+if [[ "${DRY_RUN}" == "0" ]]; then
+  suite_python="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}/bin/python"
+  [[ -x "${suite_python}" ]] || suite_python="python"
+  "${suite_python}" scripts/evaluation/summarize_suite.py vbench \
+    --suite-id "${SUITE_ID}"
+fi

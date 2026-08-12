@@ -62,8 +62,16 @@ Run the complete unprofiled matrix:
 ```bash
 PERF_DEVICES=0,1,2,3,4 \
 TASK=benchmark \
+SUITE_ID=sparse_release_01 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
+
+Every successful case writes both `summary.txt` and `summary.json`. After the
+matrix completes, the comparable rows are collected under
+`runs/suites/<suite-id>/benchmark/results.{csv,json}`. `dense_speedup` uses the
+dense row with the same duration preset and VAE mode. Always check
+`checkpoint_matched_to_dense`: a false value means the timing also changed the
+model checkpoint and is not a controlled kernel comparison.
 
 Use a dry run to audit all 36 combinations without reserving devices:
 
@@ -98,7 +106,16 @@ bash scripts/evaluation/run_performance_matrix.sh
 Use `TASK=msprof` for profiling. A profile includes collection overhead and is
 diagnostic evidence, not the release latency number. Use `dit_only` profiles
 for attention/operator comparison, then sync/async profiles for VAE and overlap
-analysis.
+analysis. Profile suites are written separately under
+`runs/suites/<suite-id>/msprof`; their rows carry `profiled=true`.
+
+If a matrix stops before all cases finish, completed run directories remain
+usable. Collect the partial evidence explicitly with:
+
+```bash
+python scripts/evaluation/summarize_suite.py benchmark \
+  --suite-id sparse_release_01
+```
 
 Before an end-to-end run, validate both sparse implementations at the real SP4
 tail shape:
@@ -131,8 +148,15 @@ Run the same checkpoint through all four methods:
 
 ```bash
 VBENCH_PRESETS=longlive2_standard_20pct \
+SUITE_ID=vbench_release_01 \
 bash scripts/evaluation/run_vbench_matrix.sh /path/to/merged_generator.pt
 ```
+
+Each run records its 16 dimension scores in `vbench_results.json` and copies the
+AISBench summary files beside it. The matrix writes
+`runs/suites/<suite-id>/vbench/results.{csv,json}`. Quality, semantic, and total
+scores are imported only when they are present in the official AISBench summary;
+the repository does not reconstruct those aggregates with a local formula.
 
 The same method-specific checkpoint variables can be used with
 `run_vbench_matrix.sh` when the goal is to compare each method's best trained

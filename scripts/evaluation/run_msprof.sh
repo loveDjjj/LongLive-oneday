@@ -105,6 +105,7 @@ profile_dir="${run_dir}/profiling/raw"
 analysis_dir="${run_dir}/profiling/analysis"
 raw_log="${log_dir}/msprof.log"
 summary_file="${run_dir}/summary.txt"
+summary_json="${run_dir}/summary.json"
 resolved_config="${run_dir}/resolved.yaml"
 mkdir -p "${video_dir}" "${profile_dir}" "${analysis_dir}" "${log_dir}"
 cp "${metadata_tmp}" "${run_dir}/manifest.json"
@@ -181,7 +182,8 @@ if [[ "${recover_parse}" == "true" || \
 fi
 
 "${GENERATION_ENV}/bin/python" scripts/evaluation/summarize_benchmark.py \
-  "${raw_log}" --warmup-per-rank "${warmup_per_rank}" | tee "${summary_file}"
+  "${raw_log}" --warmup-per-rank "${warmup_per_rank}" \
+  --json-output "${summary_json}" | tee "${summary_file}"
 
 analyze_input="${profile_dir}"
 if [[ "${#prof_dirs[@]}" -eq 1 ]]; then

@@ -101,6 +101,7 @@ log_dir="logs/benchmark/${run_id}"
 video_dir="${run_dir}/videos"
 raw_log="${log_dir}/torchrun.log"
 summary_file="${run_dir}/summary.txt"
+summary_json="${run_dir}/summary.json"
 resolved_config="${run_dir}/resolved.yaml"
 if [[ -e "${run_dir}" || -e "${log_dir}" ]]; then
   echo "[error] benchmark RUN_ID already exists: ${run_id}" >&2
@@ -138,6 +139,7 @@ if [[ "${benchmark_status}" -ne 0 ]]; then
 fi
 
 "${GENERATION_ENV}/bin/python" scripts/evaluation/summarize_benchmark.py \
-  "${raw_log}" --warmup-per-rank "${BENCHMARK_WARMUP}" | tee "${summary_file}"
+  "${raw_log}" --warmup-per-rank "${BENCHMARK_WARMUP}" \
+  --json-output "${summary_json}" | tee "${summary_file}"
 
 echo "[done] run=${run_dir}"
