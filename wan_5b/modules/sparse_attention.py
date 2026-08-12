@@ -13,6 +13,14 @@ from .sla_attention import SLAAttentionConfig, sla_cag_attention
 
 
 SPARSE_METHODS = ("hsa_cag", "sla_cag", "hsa_sla_cag")
+SPARSE_CACHE_KEYS = ("sparse_attention_cache", "sla_attention_cache")
+
+
+def clear_sparse_attention_cache(kv_cache) -> None:
+    """Remove per-video router/linear statistics from every transformer block."""
+    for block_cache in kv_cache:
+        for key in SPARSE_CACHE_KEYS:
+            block_cache.pop(key, None)
 
 
 def sparse_method(value: Mapping[str, Any] | None) -> str:
@@ -122,6 +130,6 @@ def sparse_attention(
 
 
 __all__ = [
-    "SPARSE_METHODS", "calculate_chunk_sparsities", "parse_sparse_config",
-    "sparse_attention", "sparse_method", "with_cag_schedule",
+    "SPARSE_METHODS", "calculate_chunk_sparsities", "clear_sparse_attention_cache",
+    "parse_sparse_config", "sparse_attention", "sparse_method", "with_cag_schedule",
 ]

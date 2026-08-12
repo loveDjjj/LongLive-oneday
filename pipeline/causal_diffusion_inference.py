@@ -1085,9 +1085,11 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
 
     def _zero_kv_data(self, kv_cache, current_start_tokens):
         """Reset KV cache for clean recache, preserving global sink."""
+        from wan_5b.modules.sparse_attention import clear_sparse_attention_cache
+
         global_sink_tokens = self.global_sink_size * self.frame_seq_length
+        clear_sparse_attention_cache(kv_cache)
         for block_cache in kv_cache:
-            block_cache.pop("sla_attention_cache", None)
             block_cache["local_end_index"].fill_(global_sink_tokens)
             block_cache["global_end_index"].fill_(current_start_tokens)
             block_cache["pinned_start"].fill_(-1)

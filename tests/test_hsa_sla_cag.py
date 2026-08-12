@@ -6,7 +6,11 @@ from wan_5b.modules.hsa_sla_attention import (
     hsa_sla_cag_attention,
 )
 from wan_5b.modules.sla_attention import _portable_sparse_attention
-from wan_5b.modules.sparse_attention import parse_sparse_config, sparse_method
+from wan_5b.modules.sparse_attention import (
+    clear_sparse_attention_cache,
+    parse_sparse_config,
+    sparse_method,
+)
 from wan_5b.modules.sparse_attention import calculate_chunk_sparsities
 
 
@@ -188,3 +192,21 @@ def test_hybrid_cag_budget_is_valid_for_all_release_durations():
         tail_blocks = 32 * 880 // 128
         tail_selected = math.ceil((1.0 - schedule[-1]) * tail_blocks)
         assert 20 <= tail_selected <= 22
+
+
+def test_sparse_cache_reset_clears_current_and_legacy_keys_only():
+    k = torch.ones(1)
+    caches = [
+        {
+            "k": k,
+            "sparse_attention_cache": {"router": object()},
+            "sla_attention_cache": {"linear": object()},
+        },
+        {"k": k, "sparse_attention_cache": {"router": object()}},
+    ]
+
+    clear_sparse_attention_cache(caches)
+
+    assert all("sparse_attention_cache" not in cache for cache in caches)
+    assert all("sla_attention_cache" not in cache for cache in caches)
+    assert all(cache["k"] is k for cache in caches)
