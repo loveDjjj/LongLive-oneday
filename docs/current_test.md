@@ -4,53 +4,43 @@
 
 ## 测试目标
 
-验证统一稀疏分发器可以直接接收模型层预解析后的 `HSAAttentionConfig`，并恢复 HSA+CAG 的真实 SP1 推理。原失败目录保留为证据，不覆盖、不删除。
+验证所有 shell 分布式启动器不再使用固定端口：单机评测和训练使用 `torchrun --standalone`，多机训练由 rank 0 动态申请端口并通过共享 run 目录发布。
 
-## 1. 更新与主机回归
+## 1. 更新与静态回归
 
 ```bash
 cd /mnt/share/r50063443/LongLive-oneday
 git pull origin feat/unified-sparse-attention
 
 conda activate /mnt/share/r50063443/conda_envs/longlive
-PYTHONPATH=. pytest -q tests/test_hsa_cag.py tests/test_sla_cag.py tests/test_hsa_sla_cag.py
+PYTHONPATH=. pytest -q tests/test_shell_launchers.py tests/test_evaluation_matrix.py
+
+while IFS= read -r script; do
+  bash -n "${script}"
+done < <(git ls-files '*.sh')
 ```
 
-预期全部通过，尤其是 `test_dispatcher_accepts_parsed_hsa_config_in_attention_path`。
+预期测试全部通过，所有 shell 脚本语法检查成功。
 
-## 2. HSA+CAG 真实推理回归
+## 2. 单机动态 rendezvous 回归
 
-失败的 `base-weight-speed-20260812-165636-hsa_cag-5s-dit_only-sp1` 已是不完整 run。使用新 ID 运行一个 5 秒 SP1 case：
+脚本不接收端口参数，直接使用 standalone rendezvous：
 
 ```bash
 source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
 
 export LONGLIVE_GENERATOR_CKPT=/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
-export SUITE_ID="hsa-dispatch-fix-$(date +%Y%m%d-%H%M%S)"
+export SUITE_ID="dynamic-port-$(date +%Y%m%d-%H%M%S)"
 
 METHODS=hsa_cag DURATIONS=5s SP_SIZES=1 MODES=dit_only PERF_DEVICES=4 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
 
-预期不再出现 `HSAAttentionConfig object is not iterable`，完成 1 次预热和 3 次有效测量，并生成：
+预期日志包含 `rendezvous=standalone`，完成 1 次预热和 3 次有效测量并生成：
 
 ```text
 runs/performance/${SUITE_ID}-hsa_cag-5s-dit_only-sp1/summary.json
 runs/suites/${SUITE_ID}/performance/results.csv
 ```
 
-## 3. 恢复完整性能矩阵
-
-定向回归通过后使用新的 suite ID 重跑完整矩阵。不要复用含失败目录的旧 ID：
-
-```bash
-export SUITE_ID="base-weight-speed-fixed-$(date +%Y%m%d-%H%M%S)"
-export METHODS=dense,hsa_cag,sla_cag,hsa_sla_cag
-export DURATIONS=5s,32s,64s
-export TASK=benchmark
-
-SP_SIZES=1 MODES=dit_only PERF_DEVICES=4 \
-bash scripts/evaluation/run_performance_matrix.sh
-```
-
-该命令先恢复当前中断的 SP1 DiT-only 阶段。后续 SP4、同步 VAE 和异步 VAE 命令仍按[推理与评测](inference_and_evaluation.md)中的矩阵流程执行，并在同一终端保持新的 `SUITE_ID` 不变。
+多节点动态端口需要两台机器共享 `runs/training/<TRAIN_RUN_NAME>/`，并先启动 rank 0；本轮若不安排多节点训练，可只完成上述单机验收。

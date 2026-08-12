@@ -12,8 +12,7 @@ export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longliv
 export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
 export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/weights/vbench_models/}"
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
-export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29530}"
+unset MASTER_PORT
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/vbench.yaml}"
 PRESET="${1:-longlive2_standard_20pct}"
@@ -93,20 +92,6 @@ prepared_dir="${run_dir}/videos/prepared"
 mkdir -p "${raw_root}" "${prepared_dir}" "${log_dir}"
 cp "${metadata_tmp}" "${run_dir}/manifest.json"
 
-select_master_port() {
-  "${GENERATION_ENV}/bin/python" - "$1" "$2" <<'PY'
-import socket, sys
-host, preferred = sys.argv[1], int(sys.argv[2])
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    try:
-        sock.bind((host, preferred))
-        print(preferred)
-    except OSError:
-        sock.bind((host, 0))
-        print(sock.getsockname()[1])
-PY
-}
-
 count_videos() {
   local directory="$1"
   if [[ ! -d "${directory}" ]]; then
@@ -179,13 +164,11 @@ for sample_index in "${!seed_array[@]}"; do
     "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py vbench \
       --config "${CONFIG_PATH}" --preset "${PRESET}" --seed "${seed}" \
       --output "${resolved_config}" --output-folder "${seed_dir}" >/dev/null
-    seed_port="$(select_master_port "${MASTER_ADDR}" "$((MASTER_PORT + sample_index))")"
-    echo "[generate] seed=${seed} ($((sample_index + 1))/${#seed_array[@]}) port=${seed_port}"
+    echo "[generate] seed=${seed} ($((sample_index + 1))/${#seed_array[@]}) rendezvous=standalone"
     LLV2_DEVICE=npu "${GENERATION_ENV}/bin/torchrun" \
+      --standalone \
       --nnodes=1 \
       --nproc_per_node="${nproc}" \
-      --master_addr="${MASTER_ADDR}" \
-      --master_port="${seed_port}" \
       "${entrypoint}" \
       --config_path "${resolved_config}" \
       >"${raw_log}" 2>&1 &

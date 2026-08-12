@@ -10,7 +10,7 @@ export SP_SIZE="${SP_SIZE:-4}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export SHARDING_STRATEGY="${SHARDING_STRATEGY:-}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29600}"
+unset MASTER_PORT
 export MAX_ITERS="${MAX_ITERS:-2000}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 export VIS_INTERVAL="${VIS_INTERVAL:-100}"
@@ -121,8 +121,13 @@ echo "[run] logs=${LOG_DIR}"
 
 CONFIG_OVERRIDE="${ARTIFACT_DIR}/config.resolved.yaml"
 CONFIG_READY="${CONFIG_OVERRIDE}.ready"
+RENDEZVOUS_FILE="${ARTIFACT_DIR}/rendezvous.env"
+RENDEZVOUS_READY="${RENDEZVOUS_FILE}.ready"
 if (( NODE_RANK == 0 )); then
     rm -f "${CONFIG_READY}"
+    if (( NNODES > 1 )); then
+        rm -f "${RENDEZVOUS_READY}"
+    fi
     cp "${CONFIG_PATH}" "${ARTIFACT_DIR}/config.source.yaml"
     "${PYTHON}" - "${CONFIG_PATH}" "${CONFIG_OVERRIDE}" <<'PY'
 import os
@@ -165,39 +170,47 @@ else
     fi
 fi
 
+torchrun_rendezvous_args=(--nnodes="${NNODES}")
 if (( NNODES == 1 )); then
-    MASTER_PORT="$(${PYTHON} - "${MASTER_ADDR}" "${MASTER_PORT}" <<'PY'
+    torchrun_rendezvous_args+=(--standalone)
+    echo "[run] rendezvous=standalone max_iters=${MAX_ITERS}"
+else
+    if (( NODE_RANK == 0 )); then
+        MASTER_PORT="$(${PYTHON} - "${MASTER_ADDR}" <<'PY'
 import socket
 import sys
 
-host, preferred = sys.argv[1], int(sys.argv[2])
+host = sys.argv[1]
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    try:
-        sock.bind((host, preferred))
-        print(preferred)
-    except OSError:
-        sock.bind((host, 0))
-        print(sock.getsockname()[1])
+    sock.bind((host, 0))
+    print(sock.getsockname()[1])
 PY
-    )"
-elif (( NODE_RANK == 0 )); then
-    "${PYTHON}" - "${MASTER_ADDR}" "${MASTER_PORT}" <<'PY'
-import socket
-import sys
-
-host, port = sys.argv[1], int(sys.argv[2])
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    try:
-        sock.bind((host, port))
-    except OSError as exc:
-        raise SystemExit(
-            f"[error] rendezvous {host}:{port} is unavailable; "
-            "choose the same free MASTER_PORT on both nodes"
-        ) from exc
-PY
+        )"
+        RENDEZVOUS_TMP="${RENDEZVOUS_FILE}.tmp.$$"
+        printf 'MASTER_PORT=%q\n' "${MASTER_PORT}" >"${RENDEZVOUS_TMP}"
+        mv "${RENDEZVOUS_TMP}" "${RENDEZVOUS_FILE}"
+        touch "${RENDEZVOUS_READY}"
+    else
+        echo "[run] waiting for rank-0 rendezvous: ${RENDEZVOUS_READY}"
+        for ((attempt = 0; attempt < 600; attempt++)); do
+            [[ -f "${RENDEZVOUS_READY}" ]] && break
+            sleep 1
+        done
+        if [[ ! -f "${RENDEZVOUS_READY}" ]]; then
+            echo "[error] timed out waiting for rank-0 rendezvous: ${RENDEZVOUS_READY}" >&2
+            exit 2
+        fi
+        # shellcheck disable=SC1090
+        source "${RENDEZVOUS_FILE}"
+    fi
+    export MASTER_PORT
+    torchrun_rendezvous_args+=(
+        --node_rank="${NODE_RANK}"
+        --master_addr="${MASTER_ADDR}"
+        --master_port="${MASTER_PORT}"
+    )
+    echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} source=dynamic max_iters=${MAX_ITERS}"
 fi
-export MASTER_PORT
-echo "[run] rendezvous=${MASTER_ADDR}:${MASTER_PORT} max_iters=${MAX_ITERS}"
 echo "[run] save_interval=${SAVE_INTERVAL} vis_interval=${VIS_INTERVAL} max_checkpoints=${MAX_CHECKPOINTS}"
 echo "[run] sparse_method=${SPARSE_METHOD} sparse_backend=${SPARSE_BACKEND} sparse_query_block_batch=${SPARSE_QUERY_BLOCK_BATCH} progress=${LLV2_TRAIN_PROGRESS}"
 echo "[run] sharding_strategy=${SHARDING_STRATEGY:-config default}"
@@ -222,11 +235,8 @@ if [[ "${DISABLE_WANDB}" == "1" ]]; then
 fi
 
 "${TORCHRUN}" \
-    --nnodes="${NNODES}" \
-    --node_rank="${NODE_RANK}" \
+    "${torchrun_rendezvous_args[@]}" \
     --nproc_per_node="${NPROC_PER_NODE}" \
-    --master_addr="${MASTER_ADDR}" \
-    --master_port="${MASTER_PORT}" \
     train.py \
     --config_path "${CONFIG_OVERRIDE}" \
     --output-dir "${ARTIFACT_DIR}" \

@@ -237,4 +237,4 @@ WORLD_SIZE % SP_SIZE == 0
 每个 chunk 的 8 个 latent 帧 % SP_SIZE == 0
 ```
 
-当前支持 `SP_SIZE=1/2/4/8`。多节点必须共享代码、模型、数据和运行目录，并使用一致的 `MASTER_ADDR`、`MASTER_PORT` 与 `TRAIN_RUN_NAME`。
+当前支持 `SP_SIZE=1/2/4/8`。多节点必须共享代码、模型、数据和运行目录，并使用一致的 `MASTER_ADDR` 与 `TRAIN_RUN_NAME`。先启动 rank 0，由系统动态分配 rendezvous 端口并写入共享 run 目录；其他节点自动读取，不设置 `MASTER_PORT`。

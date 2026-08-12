@@ -98,9 +98,8 @@ PY
 # absolute path from another repository.
 cd "${REPO_ROOT}"
 
-# Generation uses torchrun and exports a shared rendezvous port. Each AISBench
-# VBench task is an independent world-size-1 process and must choose its own
-# port; otherwise concurrent workers all try to listen on the generation port.
+# AISBench 的每个 VBench task 是独立的 world-size-1 进程，不继承生成阶段
+# torchrun 注入的 rendezvous 环境，避免并发 worker 复用同一个临时端口。
 unset MASTER_ADDR MASTER_PORT RANK LOCAL_RANK WORLD_SIZE
 
 ais_bench "${RENDERED_CONFIG}" \

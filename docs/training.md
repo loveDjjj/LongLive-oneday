@@ -129,7 +129,7 @@ configs/train/hsa_sla_cag.yaml
 | `ASCEND_RT_VISIBLE_DEVICES` | 当前节点可见 NPU | `0,...,15` |
 | `NPROC_PER_NODE` | 每节点 worker 数 | 16 |
 | `NNODES` / `NODE_RANK` | 节点数 / 当前节点编号 | 1 / 0 |
-| `MASTER_ADDR` / `MASTER_PORT` | 分布式 rendezvous | `127.0.0.1:29600` |
+| `MASTER_ADDR` | 多节点 rendezvous 所在的 rank 0 地址；单节点忽略 | `127.0.0.1` |
 | `SP_SIZE` | Ulysses SP 大小 | 4 |
 | `GRADIENT_ACCUMULATION_STEPS` | 梯度累积次数 | 16 |
 | `MAX_ITERS` | 训练结束目标 step | 2000 |
@@ -171,12 +171,12 @@ bash scripts/training/run_hsa_cag.sh
 bash scripts/training/run_sla_cag.sh
 ```
 
-双节点 24 卡示例，两个节点使用相同共享路径、运行名、地址和端口。节点 0：
+双节点 24 卡示例，两个节点使用相同共享路径、运行名和 rank 0 地址。先启动节点 0；节点 0 由系统动态分配空闲端口并写入共享 run 目录，节点 1 自动读取，不设置 `MASTER_PORT`。节点 0：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NNODES=2 NODE_RANK=0 NPROC_PER_NODE=12 \
-MASTER_ADDR=10.0.0.10 MASTER_PORT=29600 \
+MASTER_ADDR=10.0.0.10 \
 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=8 MAX_ITERS=1000 \
 TRAIN_RUN_NAME=hsa_sla_cag_24card_1k \
 bash scripts/training/run_hsa_sla_cag.sh

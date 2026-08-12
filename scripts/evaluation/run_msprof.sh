@@ -10,8 +10,7 @@ cd "${REPO_ROOT}"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4}"
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
-export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29820}"
+unset MASTER_PORT
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
 PRESET="${1:-32s}"
@@ -119,6 +118,7 @@ echo "[run] task=msprof preset=${PRESET} run_id=${run_id}"
 echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
 echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 echo "[run] mode=${MSPROF_MODE}"
+echo "[run] rendezvous=standalone"
 echo "[run] config=${resolved_config} profile=${profile_dir}"
 echo "[run] msprof_ai_core=${ai_core} task_time=${task_time}"
 
@@ -145,10 +145,9 @@ fi
 set +e
 LLV2_DEVICE=npu msprof "${profiler_args[@]}" \
   "${GENERATION_ENV}/bin/torchrun" \
+    --standalone \
     --nnodes=1 \
     --nproc_per_node="${nproc}" \
-    --master_addr="${MASTER_ADDR}" \
-    --master_port="${MASTER_PORT}" \
     inference_sp.py \
     --config_path "${resolved_config}" \
   2>&1 | tee "${raw_log}"
