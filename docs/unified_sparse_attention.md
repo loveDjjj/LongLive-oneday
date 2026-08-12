@@ -125,9 +125,9 @@ under `generator_linear` and can be exported with `merge_lora.py` using
 
 ```bash
 python scripts/checkpoints/merge_lora.py \
-  --config configs/train/hsa_sla_cag.yaml \
-  --generator-ckpt /path/to/longlive2_merged_generator.pt \
-  --lora-ckpt /path/to/checkpoints/step_0001000/train_state.pt \
-  --output-path /path/to/hsa_sla_cag_linear_1000.pt \
+  --config_path configs/train/hsa_sla_cag.yaml \
+  --generator_ckpt /path/to/longlive2_merged_generator.pt \
+  --lora_ckpt /path/to/checkpoints/step_0001000/train_state.pt \
+  --output_path /path/to/hsa_sla_cag_linear_1000.pt \
   --device npu:0 --dtype bf16
 ```
