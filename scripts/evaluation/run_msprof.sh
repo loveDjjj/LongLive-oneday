@@ -98,8 +98,8 @@ if [[ "${run_id}" == */* ]]; then
   echo "[error] RUN_ID must be a directory name: ${run_id}" >&2
   exit 1
 fi
-run_dir="runs/msprof/${run_id}"
-log_dir="logs/msprof/${run_id}"
+run_dir="runs/msprof/dit/${run_id}"
+log_dir="logs/msprof/dit/${run_id}"
 video_dir="${run_dir}/videos"
 profile_dir="${run_dir}/profiling/raw"
 analysis_dir="${run_dir}/profiling/analysis"

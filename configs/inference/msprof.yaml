@@ -90,8 +90,9 @@ sparsity:
       linear_eps: 1.0e-5
     sla_cag:
       backend: mindiesd
-      sparsity: 0.95
-      sparsity_base: 0.97
+      # 与混合方法保持相同 CAG 预算，用于公平比较全局 SLA 与帧候选 SLA。
+      sparsity: 0.90
+      sparsity_base: 0.93
       block_q: 128
       block_k: 128
       feature_map: softmax

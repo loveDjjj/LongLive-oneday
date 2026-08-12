@@ -116,8 +116,8 @@ def _config(method: str, backend: str, latent_frames: int):
     return SLAAttentionConfig.from_mapping(
         {
             **common,
-            "sparsity": 0.95,
-            "sparsity_base": 0.97,
+            "sparsity": 0.90,
+            "sparsity_base": 0.93,
             "feature_map": "softmax",
             "keep_sink_frames": 1,
             "keep_recent_frames": 1,

@@ -45,7 +45,7 @@ HSA 先在 latent 帧层面筛选历史，默认保留 6 帧，其中包含 1 �
 
 ### 3.2 SLA+CAG
 
-SLA 不先丢弃 latent 帧，而是对滚动 KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink 与 recent 帧 blocks 强制保留，当前 chunk 默认也参与稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.95/0.97`。
+SLA 不先丢弃 latent 帧，而是对滚动 KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink 与 recent 帧 blocks 强制保留，当前 chunk 默认也参与稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.90/0.93`，与混合方法一致，以保证两种路由的性能和质量对比使用相同预算。
 
 ### 3.3 HSA+SLA+CAG
 
@@ -55,16 +55,27 @@ SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。混合方法
 
 第一块或历史不足时会回退 dense。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
 
+### 3.4 物理稀疏边界
+
+当前稀疏 softmax 不是“先算完整 QK，再用 mask 清零”的逻辑稀疏：
+
+- MindIE-SD RainFusion 接收紧凑的 `select_idx` 和每行 `select_num_idx`，算子接口只声明选中 KV blocks。
+- Ascend Triton 前向和反向都只在 `SELECTED_BLOCKS` 循环中按 LUT 加载 K/V，不构造完整 QK 矩阵。
+- NPU smoke 会扰动所有未选 K/V blocks；稀疏输出必须保持不变，而 dense 输出必须变化。
+
+但 SLA 与混合方法的完整 attention 模块并非只访问选中 KV：路由阶段需要读取 K 的 block/frame 代表，线性补偿分支有意使用完整 KV 统计量。准确表述应为“稀疏 softmax 主分支只计算选中 blocks，路由和线性补偿仍覆盖完整 KV”。HSA+CAG 没有线性补偿，但仍需计算帧/block 路由摘要。
+
 ## 4. 算子微基准
 
 ```bash
-mkdir -p logs/benchmarks
+test_id="sparse-kernel-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "logs/tests/${test_id}"
 for method in hsa_cag sla_cag hsa_sla_cag; do
   ASCEND_RT_VISIBLE_DEVICES=15 \
   python tests/npu/benchmark_sparse_attention.py \
     --method "${method}" --backend mindiesd --device npu:0 \
     --latent-frames 192 --warmup 5 --iterations 20 \
-    | tee "logs/benchmarks/${method}-mindiesd-32s.txt"
+    | tee "logs/tests/${test_id}/${method}-mindiesd-32s.txt"
 done
 ```
 
@@ -152,7 +163,7 @@ SLA_CAG_GENERATOR_CKPT
 HSA_SLA_CAG_GENERATOR_CKPT
 ```
 
-未指定时统一使用 `LONGLIVE_GENERATOR_CKPT`。`RESUME_SUITE=1` 会跳过已有 `summary.json` 的完整用例；不完整目录不会被覆盖。汇总写入 `runs/suites/<suite-id>/<task>/results.csv` 和 `results.json`。
+未指定时统一使用 `LONGLIVE_GENERATOR_CKPT`。`RESUME_SUITE=1` 会跳过已有 `summary.json` 的完整用例；不完整目录不会被覆盖。无 profiler 汇总写入 `runs/suites/<suite-id>/performance/`，生成过程 msprof 汇总写入 `runs/suites/<suite-id>/msprof/dit/`。
 
 ## 8. VAE-only 测试
 
@@ -160,9 +171,9 @@ HSA_SLA_CAG_GENERATOR_CKPT
 
 ```bash
 python tests/npu/benchmark_vae_decode.py \
-  --latent runs/benchmark/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt \
+  --latent runs/performance/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt \
   --device npu:15 --chunk-frames 8 --iterations 1 \
-  | tee logs/benchmarks/vae-chunk8.txt
+  | tee logs/tests/vae-decode/vae-chunk8.txt
 ```
 
 该测试复现异步 VAE worker 的 cached decode、逐 chunk pinned DtoH、CPU 拼接和归一化，并拆分 `vae_device_seconds`、`dtoh_device_seconds` 与 `cpu_post_seconds`。
@@ -176,7 +187,7 @@ python tests/npu/benchmark_vae_decode.py \
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=15 RUN_ID=vae-16f-baseline \
 bash scripts/evaluation/run_vae_msprof.sh \
-  runs/benchmark/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt
+  runs/performance/dense-dit-32s/videos/rank0-1-0_regular_sp4.pt
 ```
 
 ## 9. msprof

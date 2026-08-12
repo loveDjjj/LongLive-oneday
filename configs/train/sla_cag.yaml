@@ -23,9 +23,10 @@ model_kwargs:
     enabled: true
     method: sla_cag
     backend: ascend_triton
-    # SLA 以 5% Top-K 为起点；CAG 为早期 chunk 分配更多历史预算。
-    sparsity: 0.95
-    sparsity_base: 0.97
+    # 与 HSA+SLA+CAG 使用相同预算，保证路由方法对比不混入稀疏率差异。
+    # sparsity 是全程目标平均稀疏率；sparsity_base 是 CAG 尾部调度基准。
+    sparsity: 0.90
+    sparsity_base: 0.93
     # Ulysses 交换后每个 8 帧 chunk 有 7040 token，可被 128-token block 整除。
     block_q: 128
     block_k: 128

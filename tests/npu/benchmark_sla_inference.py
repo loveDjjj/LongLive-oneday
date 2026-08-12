@@ -71,8 +71,8 @@ def _config(backend: str) -> SLAAttentionConfig:
         {
             "enabled": True,
             "backend": backend,
-            "sparsity": 0.95,
-            "sparsity_base": 0.97,
+            "sparsity": 0.90,
+            "sparsity_base": 0.93,
             "block_q": 128,
             "block_k": 128,
             "feature_map": "softmax",
@@ -113,6 +113,14 @@ def main() -> None:
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--kernel-selected-sweep",
+        default="",
+        help=(
+            "comma-separated selected-block counts used to verify that kernel time "
+            "scales with the compact LUT, for example 14,22,110,220"
+        ),
+    )
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         raise ValueError("warmup and iterations must be positive")
@@ -122,6 +130,14 @@ def main() -> None:
         raise RuntimeError(mindiesd_bsa_unavailable_reason())
     if args.backend == "ascend_triton" and not ascend_triton_available():
         raise RuntimeError(ascend_triton_unavailable_reason())
+    sweep_counts = []
+    if args.kernel_selected_sweep:
+        try:
+            sweep_counts = [
+                int(value) for value in args.kernel_selected_sweep.split(",")
+            ]
+        except ValueError as error:
+            raise ValueError("kernel-selected-sweep must contain integers") from error
 
     device = torch.device(args.device)
     torch.npu.set_device(device)
@@ -275,6 +291,39 @@ def main() -> None:
             f"speedup={dense_median / full_median:.3f}x",
             flush=True,
         )
+        if sweep_counts:
+            if any(count <= 0 or count > key_blocks for count in sweep_counts):
+                raise ValueError(
+                    f"kernel-selected-sweep values must be in [1, {key_blocks}]"
+                )
+            q_blocks = q.shape[1] // 128
+            for count in sweep_counts:
+                sweep_lut = torch.arange(
+                    count, dtype=torch.int64, device=device
+                ).view(1, 1, 1, count).expand(
+                    1, q.shape[2], q_blocks, count
+                ).contiguous()
+                if args.backend == "mindiesd":
+                    operation = lambda lut=sweep_lut: mindiesd_sparse_attention_blhd(
+                        q, k, v, lut
+                    )
+                elif args.backend == "mindiesd_bsa":
+                    operation = lambda lut=sweep_lut: mindiesd_bsa_sparse_attention_blhd(
+                        q, k, v, lut
+                    )
+                else:
+                    operation = lambda lut=sweep_lut: ascend_triton_sparse_attention_blhd(
+                        q, k, v, lut, block_q=128, block_k=128, validate_lut=False
+                    )
+                sweep_median, sweep_min = _measure(
+                    operation, warmup=args.warmup, iterations=args.iterations
+                )
+                print(
+                    f"kernel_sweep selected={count}/{key_blocks} "
+                    f"effective_sparsity={1.0-count/key_blocks:.3f} "
+                    f"median_ms={sweep_median:.3f} min_ms={sweep_min:.3f}",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

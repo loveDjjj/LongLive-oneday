@@ -132,8 +132,18 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     args = parse_args()
-    runs_root = args.runs_root or Path("runs") / args.task
-    output_dir = args.output_dir or Path("runs/suites") / args.suite_id / args.task
+    default_roots = {
+        "benchmark": Path("runs/performance"),
+        "msprof": Path("runs/msprof/dit"),
+        "vbench": Path("runs/vbench"),
+    }
+    runs_root = args.runs_root or default_roots[args.task]
+    suite_subdirs = {
+        "benchmark": Path("performance"),
+        "msprof": Path("msprof/dit"),
+        "vbench": Path("vbench"),
+    }
+    output_dir = args.output_dir or Path("runs/suites") / args.suite_id / suite_subdirs[args.task]
     run_dirs = sorted(
         path
         for path in runs_root.glob(f"{args.suite_id}-*")

@@ -43,8 +43,9 @@ def _cached_arange(
 class SLAAttentionConfig:
     enabled: bool = False
     backend: str = "portable"
-    sparsity: float = 0.95
-    sparsity_base: float = 0.97
+    # 与 HSA+SLA+CAG 使用相同 CAG 预算，便于隔离帧候选机制的影响。
+    sparsity: float = 0.90
+    sparsity_base: float = 0.93
     block_q: int = 64
     block_k: int = 64
     feature_map: str = "softmax"

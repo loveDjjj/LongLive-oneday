@@ -1,6 +1,9 @@
-# LongLive2.0-5B frame-filtered SLA+CAG linear-only fine-tuning on Ascend NPU.
+# LongLive2.0-5B 在昇腾上的 HSA+SLA+CAG 线性补偿微调配置。
+# Generator 主干冻结，只训练 30 层 sla_linear；Fake Critic 仍通过 LoRA 更新。
 infra:
+  # SP 组共同计算一个视频；DP 数为 world_size / sequence_parallel_size。
   sequence_parallel_size: 4
+  # 三个 5B 网络使用 FSDP hybrid full 分片，BF16 计算并开启激活重计算。
   sharding_strategy: hybrid_full
   mixed_precision: true
   gradient_checkpointing: true
@@ -10,26 +13,33 @@ infra:
   text_encoder_fsdp_wrap_strategy: size
 
 model_kwargs:
+  # 模型路径可由启动脚本的 MODEL_ROOT 覆盖。
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   num_frame_per_block: 8
+  # LongLive2.0 滚动 KV 最多保留 32 个 latent 帧。
   local_attn_size: 32
   sparse_config:
     enabled: true
     method: hsa_sla_cag
     backend: ascend_triton
+    # 与 SLA+CAG 使用相同预算：全程目标平均 90%，尾部调度基准 93%。
     sparsity: 0.90
     sparsity_base: 0.93
+    # RainFusion 使用 128-token block；训练 kernel 内部拆为较小 tile。
     block_q: 128
     block_k: 128
     feature_map: softmax
+    # HSA 先选 8 个候选 latent 帧，其中 sink/recent 各至少保留 1 帧。
     candidate_frames: 8
     keep_sink_frames: 1
     keep_recent_frames: 1
+    # 当前 chunk 也参加 SLA Top-K，避免当前 8/32 帧形成 25% 稠密下限。
     dense_current: false
     min_sparse_history_frames: 2
     query_block_batch: 1
+    # 线性补偿使用完整 KV，推理时缓存历史统计量；路由 softmax 只读选中 blocks。
     linear_cache: true
     linear_eps: 1.0e-5
     num_output_frames: 32
@@ -51,6 +61,7 @@ fake_model_kwargs:
   local_attn_size: 32
 
 checkpoints:
+  # LongLive2.0 合并 Generator；恢复时优先使用 run 目录最新 train_state.pt。
   generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   lora_ckpt: null
 
@@ -69,6 +80,7 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
+  # 只训练 30 层 sla_linear 的 weight/bias，共 60 个 Generator 张量。
   generator_train_scope: linear_only
   lr: 2.0e-05
   lr_critic: 4.0e-07
@@ -78,6 +90,7 @@ training:
   beta1_critic: 0.0
   beta2_critic: 0.999
   batch_size: 1
+  # 有效 batch = DP 数 x batch_size x gradient_accumulation_steps。
   gradient_accumulation_steps: 16
   max_grad_norm_generator: 10.0
   max_grad_norm_critic: 10.0
@@ -86,16 +99,19 @@ training:
   max_checkpoints: 20
   max_iters: 1000
   gc_interval: 50
+  # 线性补偿与 Critic 每个 optimizer step 都更新。
   dfake_gen_update_ratio: 1
   num_training_frames: 32
   slice_last_frames: 32
 
 data:
+  # UTF-8 文本每个非空行是一条提示词；shape 为 [B,T,C,H,W]。
   data_path: data/train/vidprom_filtered_extended/prompts_train.txt
   eval_data_path: data/benchmarks/vbench_standard/5pct/prompts.txt
   image_or_video_shape: [1, 32, 48, 44, 80]
 
 inference:
+  # backward simulation 与训练内验证都采用 LongLive2.0 四步采样。
   sampling_steps: 4
   local_attn_size: 32
   sink_size: 0
@@ -103,6 +119,7 @@ inference:
   multi_shot_rope_offset: 8
 
 evaluation:
+  # 默认只保存 latent，避免训练期间 VAE 解码阻塞所有 rank。
   interval: 100
   num_frames: 32
   use_ema: false
@@ -110,6 +127,7 @@ evaluation:
   save_latents_only: true
 
 adapter:
+  # Generator 不应用 LoRA；该适配器只服务 Fake Critic。
   type: lora
   rank: 128
   alpha: 128
@@ -117,6 +135,7 @@ adapter:
   apply_to_critic: true
   verbose: true
 
+# 昇腾 BF16 训练不启用 NVFP4 或其他量化。
 model_quant: false
 
 logging:

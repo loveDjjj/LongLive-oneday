@@ -96,8 +96,8 @@ if [[ "${run_id}" == */* ]]; then
   echo "[error] RUN_ID must be a directory name: ${run_id}" >&2
   exit 1
 fi
-run_dir="runs/benchmark/${run_id}"
-log_dir="logs/benchmark/${run_id}"
+run_dir="runs/performance/${run_id}"
+log_dir="logs/performance/${run_id}"
 video_dir="${run_dir}/videos"
 raw_log="${log_dir}/torchrun.log"
 summary_file="${run_dir}/summary.txt"

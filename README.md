@@ -85,11 +85,13 @@ bash scripts/evaluation/run_performance_matrix.sh
 
 ```text
 runs/training/<run-id>/       配置、manifest 和 checkpoint
-runs/benchmark/<run-id>/      视频或 latent 与延迟汇总
-runs/msprof/<run-id>/         profiler 数据和分析结果
+runs/performance/<run-id>/    无 profiler 视频或 latent 与延迟汇总
+runs/msprof/dit/<run-id>/     DiT/生成过程 profiler 数据
+runs/msprof/vae/<run-id>/     VAE-only profiler 数据
 runs/vbench/<run-id>/         生成视频与 AISBench 结果
 runs/suites/<suite-id>/       可比较的 CSV/JSON 矩阵汇总
-logs/<task>/<run-id>/         文本日志与 JSONL 指标
+logs/<task>/<run-id>/         与 runs 任务层级对应的文本日志
+logs/tests/<test-id>/         smoke、microbenchmark 和临时测试日志
 ```
 
 本项目基于 [NVlabs/LongLive](https://github.com/NVlabs/LongLive) 开发，并保留适用的上游许可证和版权声明。

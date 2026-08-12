@@ -17,10 +17,12 @@
 | 方法 | Generator 训练范围 | 默认目标/基准稀疏率 | 主要路由 |
 | --- | --- | --- | --- |
 | `hsa_cag` | LoRA | 0.85 / 0.95 | 帧级 HSA，保留 6 帧，当前 chunk 稠密 |
-| `sla_cag` | LoRA | 0.95 / 0.97 | 对滚动 KV 全局执行 Smooth-K block Top-K |
+| `sla_cag` | LoRA | 0.90 / 0.93 | 对滚动 KV 全局执行 Smooth-K block Top-K |
 | `hsa_sla_cag` | 仅 `sla_linear` | 0.90 / 0.93 | HSA 选 8 个候选帧，SLA 再选 block |
 
 Fake Critic 在三种方法中均使用 LoRA。混合方法的 Generator 主干冻结，只训练 30 层 `sla_linear` 的 weight/bias，共 60 个张量。
+
+当前 SLA+CAG 与混合方法统一使用 `0.90/0.93` CAG 预算。旧 SLA checkpoint 若使用 `0.95/0.97` 训练，其训练分布没有因配置更新而改变：可以先用新预算做算子和 DiT 性能探索，但正式质量结论必须重新训练或继续微调，并在 manifest 中记录实际训练预算。
 
 ## 2. 稀疏行为
 

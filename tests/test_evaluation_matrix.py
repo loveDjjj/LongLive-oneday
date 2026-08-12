@@ -42,6 +42,7 @@ def test_complete_performance_matrix_expands_all_36_cases():
         for line in suite_lines
     )
     assert any("devices=0,1,2,3,4" in line for line in dry_run_lines)
+    assert all("run_dir=runs/performance/contract-" in line for line in dry_run_lines)
 
 
 def test_dit_only_matrix_requires_only_four_devices():
@@ -54,6 +55,17 @@ def test_dit_only_matrix_requires_only_four_devices():
 
     assert len(suite_lines) == 4
     assert output.count("devices=8,9,10,11") == 4
+
+
+def test_msprof_matrix_uses_profiled_dit_directory():
+    output = _dry_run(
+        TASK="msprof",
+        PERF_DEVICES="0,1,2,3",
+        METHODS="dense",
+        MODES="dit_only",
+        DURATIONS="5s",
+    )
+    assert "run_dir=runs/msprof/dit/contract-dense-5s-dit_only" in output
 
 
 def test_matrix_rejects_invalid_resume_flag():

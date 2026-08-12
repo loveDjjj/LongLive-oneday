@@ -75,11 +75,15 @@ for method in "${methods[@]}"; do
       [[ "${mode}" == "async_vae" ]] && visible="${workers_and_vae}"
       echo "[suite] task=${TASK} method=${method} duration=${duration} mode=${mode} checkpoint=${checkpoint:-config-default}"
       run_id="${SUITE_ID}-${method}-${duration}-${mode}"
+      if [[ "${TASK}" == "benchmark" ]]; then
+        run_dir="runs/performance/${run_id}"
+      else
+        run_dir="runs/msprof/dit/${run_id}"
+      fi
       if [[ "${DRY_RUN}" == "1" ]]; then
-        echo "[dry-run] devices=${visible} run_id=${run_id}"
+        echo "[dry-run] devices=${visible} run_id=${run_id} run_dir=${run_dir}"
         continue
       fi
-      run_dir="runs/${TASK}/${run_id}"
       if [[ -f "${run_dir}/summary.json" && "${RESUME_SUITE}" == "1" ]]; then
         echo "[resume] completed case skipped: ${run_id}"
         continue

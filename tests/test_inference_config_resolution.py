@@ -98,7 +98,7 @@ def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     assert sparse.block_q == 128
     assert sparse.block_k == 128
     assert sparse.feature_map == "softmax"
-    assert sparse.sparsity == 0.95
+    assert sparse.sparsity == 0.90
     assert metadata["sparsity_method"] == "sla_cag"
     assert metadata["sparsity_backend"] == "mindiesd"
 

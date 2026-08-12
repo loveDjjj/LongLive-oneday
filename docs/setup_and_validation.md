@@ -129,12 +129,15 @@ bash scripts/evaluation/run_vbench_matrix.sh
 先验证小尺寸矩形 RainFusion：
 
 ```bash
-mkdir -p logs/benchmarks
+test_id="npu-acceptance-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "logs/tests/${test_id}"
 ASCEND_RT_VISIBLE_DEVICES=15 \
 python tests/npu/mindiesd_sla_kernel_smoke.py \
-  --device npu:0 --dtype bf16 \
-  | tee logs/benchmarks/mindiesd-rainfusion-smoke.txt
+  --device npu:0 --dtype bf16 --audit-unselected-kv \
+  | tee "logs/tests/${test_id}/mindiesd-rainfusion-smoke.txt"
 ```
+
+输出除数值误差通过外，还必须包含 `unselected_kv_audit=passed`。该审计只扰动 LUT 未选中的 K/V blocks：稀疏 softmax 输出必须保持不变，dense 对照必须发生变化。
 
 再测试三种稀疏方法的真实 SP4、32 秒尾部形状：
 
@@ -144,7 +147,7 @@ for method in hsa_cag sla_cag hsa_sla_cag; do
   python tests/npu/benchmark_sparse_attention.py \
     --method "${method}" --backend mindiesd --device npu:0 \
     --latent-frames 192 --warmup 5 --iterations 20 \
-    | tee "logs/benchmarks/${method}-mindiesd-32s.txt"
+    | tee "logs/tests/${test_id}/${method}-mindiesd-32s.txt"
 done
 ```
 
@@ -175,7 +178,7 @@ python tests/npu/benchmark_sparse_attention.py \
   --method hsa_sla_cag --backend ascend_triton --device npu:0 \
   --latent-frames 32 --warmup 1 --iterations 1 \
   --check-training-backward \
-  | tee logs/benchmarks/hybrid-training-backward.txt
+  | tee "logs/tests/${test_id}/hybrid-training-backward.txt"
 ```
 
 只有输出包含 `training_backward=passed`，才能启动多卡混合训练。`--check-linear-backward` 只验证本地线性投影可求导，不能替代稀疏 softmax 的 Q/K/V 反向检查。

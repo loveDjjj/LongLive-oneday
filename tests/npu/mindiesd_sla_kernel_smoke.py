@@ -74,6 +74,14 @@ def main() -> None:
         default=8,
         help="KV blocks retained by the sparse-LUT correctness check",
     )
+    parser.add_argument(
+        "--audit-unselected-kv",
+        action="store_true",
+        help=(
+            "perturb every unselected K/V block and require sparse output to remain "
+            "unchanged while dense output changes"
+        ),
+    )
     args = parser.parse_args()
     if args.q_tokens % 128 or args.kv_tokens % 128:
         raise ValueError("q-tokens and kv-tokens must be divisible by 128")
@@ -126,6 +134,26 @@ def main() -> None:
             query_block_batch=1,
             scale=None,
         )
+        if args.audit_unselected_kv:
+            selected_mask = torch.zeros(kv_blocks, dtype=torch.bool, device=device)
+            selected_mask[sparse_lut.unique().long()] = True
+            token_mask = (~selected_mask).repeat_interleave(128)
+            if not token_mask.any().item():
+                raise ValueError(
+                    "--audit-unselected-kv requires selected-blocks < total KV blocks"
+                )
+            perturbed_k = k.clone()
+            perturbed_v = v.clone()
+            perturbed_k[:, token_mask] += 8.0
+            perturbed_v[:, token_mask] -= 8.0
+            sparse_perturbed = sparse_attention(
+                q, perturbed_k, perturbed_v, sparse_lut
+            )
+            dense_perturbed = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                perturbed_k.transpose(1, 2),
+                perturbed_v.transpose(1, 2),
+            ).transpose(1, 2)
         torch.npu.synchronize()
 
     difference = (sparse.float() - dense.float()).abs()
@@ -154,6 +182,26 @@ def main() -> None:
             "MindIE-SD sparse-LUT output differs from the portable reference: "
             f"{sparse_max_abs:.6f} > {tolerance:.6f}"
         )
+    if args.audit_unselected_kv:
+        sparse_audit_max = (
+            sparse_selected.float() - sparse_perturbed.float()
+        ).abs().max().item()
+        dense_audit_max = (
+            dense.float() - dense_perturbed.float()
+        ).abs().max().item()
+        print(
+            f"unselected_kv_sparse_max_abs={sparse_audit_max:.6f} "
+            f"unselected_kv_dense_max_abs={dense_audit_max:.6f}"
+        )
+        if sparse_audit_max != 0.0:
+            raise AssertionError(
+                "sparse output changed after perturbing only unselected KV blocks"
+            )
+        if dense_audit_max <= tolerance:
+            raise AssertionError(
+                "dense control did not react to the unselected-KV perturbation"
+            )
+        print("unselected_kv_audit=passed")
     print("MindIE-SD SLA sparse smoke test passed")
 
 

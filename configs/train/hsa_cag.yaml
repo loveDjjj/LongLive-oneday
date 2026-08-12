@@ -1,6 +1,9 @@
-# LongLive2.0-5B HSA+CAG sparse post-training on Ascend NPU.
+# LongLive2.0-5B 在昇腾上的 HSA+CAG 稀疏后训练配置。
+# Generator 使用 HSA+CAG 和 LoRA；Real Teacher、Fake Critic 的注意力保持稠密。
 infra:
+  # SP 组共同计算一个视频；DP 数为 world_size / sequence_parallel_size。
   sequence_parallel_size: 4
+  # 三个 5B 网络使用 FSDP hybrid full 分片，BF16 计算并开启激活重计算。
   sharding_strategy: hybrid_full
   mixed_precision: true
   gradient_checkpointing: true
@@ -10,22 +13,28 @@ infra:
   text_encoder_fsdp_wrap_strategy: size
 
 model_kwargs:
+  # 模型路径可由启动脚本的 MODEL_ROOT 覆盖。
   model_name: Wan2.2-TI2V-5B
   model_root: /mnt/share/weight/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   num_frame_per_block: 8
+  # LongLive2.0 滚动 KV 最多保留 32 个 latent 帧。
   local_attn_size: 32
   sparse_config:
     enabled: true
     method: hsa_cag
     backend: ascend_triton
+    # CAG 全程目标平均稀疏率与尾部调度基准。
     sparsity: 0.85
     sparsity_base: 0.95
+    # HSA 训练沿用 40-token block；Ascend Triton 内部会继续切分以满足 UB 限制。
     block_q: 40
     block_k: 40
+    # 每次保留 6 个候选 latent 帧：1 个 sink、2 个近邻，其余动态选择。
     keep_frames: 6
     keep_sink: 1
     keep_near: 2
+    # 当前 8 帧 chunk 保持稠密，因此实际稀疏率低于纯历史目标值。
     dense_current: true
     min_sparse_history_frames: 2
     query_block_batch: 1
@@ -48,6 +57,7 @@ fake_model_kwargs:
   local_attn_size: 32
 
 checkpoints:
+  # LongLive2.0 合并 Generator；恢复时优先使用 run 目录最新 train_state.pt。
   generator_ckpt: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   lora_ckpt: null
 
@@ -66,6 +76,7 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
+  # Generator 与 Fake Critic 使用 LoRA；基础模型参数冻结。
   generator_train_scope: lora
   lr: 2.0e-06
   lr_critic: 4.0e-07
@@ -75,6 +86,7 @@ training:
   beta1_critic: 0.0
   beta2_critic: 0.999
   batch_size: 1
+  # 有效 batch = DP 数 x batch_size x gradient_accumulation_steps。
   gradient_accumulation_steps: 16
   max_grad_norm_generator: 10.0
   max_grad_norm_critic: 10.0
@@ -83,16 +95,19 @@ training:
   max_checkpoints: 20
   max_iters: 2000
   gc_interval: 50
+  # Critic 每步更新，Generator 每 5 个 optimizer step 更新一次。
   dfake_gen_update_ratio: 5
   num_training_frames: 32
   slice_last_frames: 32
 
 data:
+  # UTF-8 文本每个非空行是一条提示词；shape 为 [B,T,C,H,W]。
   data_path: data/train/vidprom_filtered_extended/prompts_train.txt
   eval_data_path: data/benchmarks/vbench_standard/5pct/prompts.txt
   image_or_video_shape: [1, 32, 48, 44, 80]
 
 inference:
+  # backward simulation 与训练内验证都采用 LongLive2.0 四步采样。
   sampling_steps: 4
   local_attn_size: 32
   sink_size: 0
@@ -100,6 +115,7 @@ inference:
   multi_shot_rope_offset: 8
 
 evaluation:
+  # 默认只保存 latent，避免训练期间 VAE 解码阻塞所有 rank。
   interval: 100
   num_frames: 32
   use_ema: false
@@ -107,6 +123,7 @@ evaluation:
   save_latents_only: true
 
 adapter:
+  # LoRA 同时应用于 Generator 和 Fake Critic；Real Teacher 始终冻结。
   type: lora
   rank: 128
   alpha: 128
@@ -114,6 +131,7 @@ adapter:
   apply_to_critic: true
   verbose: true
 
+# 昇腾 BF16 训练不启用 NVFP4 或其他量化。
 model_quant: false
 
 logging:
