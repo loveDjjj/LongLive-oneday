@@ -40,7 +40,12 @@ def main() -> None:
     from omegaconf import OmegaConf
 
     from utils.config import normalize_config
-    from utils.inference_utils import cpu_state_dict, load_generator_checkpoint, load_lora_state_dict
+    from utils.inference_utils import (
+        cpu_state_dict,
+        load_generator_checkpoint,
+        load_generator_linear_checkpoint,
+        load_lora_state_dict,
+    )
     from utils.lora_utils import configure_lora_for_model
     from utils.wan_5b_wrapper import WanDiffusionWrapper
 
@@ -49,6 +54,7 @@ def main() -> None:
     sparse_method = sparse_config.get(
         "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
     )
+    generator_train_scope = str(getattr(config, "generator_train_scope", "lora"))
     generator_ckpt = args.generator_ckpt or getattr(config, "generator_ckpt", None)
     lora_ckpt = args.lora_ckpt or getattr(config, "lora_ckpt", None)
     if not generator_ckpt:
@@ -78,28 +84,37 @@ def main() -> None:
     if unexpected:
         print(f"[Warning] Unexpected generator keys: {unexpected[:8]} ...")
 
-    print(f"Applying LoRA config: {config.adapter}")
-    generator.model = configure_lora_for_model(
-        generator.model,
-        model_name="generator",
-        lora_config=config.adapter,
-        is_main_process=True,
-        include_sla_linear=sparse_method == "sla_cag",
-    )
+    if generator_train_scope == "linear_only":
+        print(f"Loading generator linear checkpoint: {lora_ckpt}")
+        load_generator_linear_checkpoint(
+            generator.model,
+            lora_ckpt,
+            expected_sparse_method=sparse_method,
+        )
+        generator.to(device=device, dtype=dtype)
+    else:
+        print(f"Applying LoRA config: {config.adapter}")
+        generator.model = configure_lora_for_model(
+            generator.model,
+            model_name="generator",
+            lora_config=config.adapter,
+            is_main_process=True,
+            include_sla_linear=sparse_method == "sla_cag",
+        )
 
-    import peft
+        import peft
 
-    print(f"Loading LoRA checkpoint: {lora_ckpt}")
-    peft.set_peft_model_state_dict(
-        generator.model,
-        load_lora_state_dict(
-            lora_ckpt, expected_sparse_method=sparse_method
-        ),
-    )  # type: ignore[arg-type]
+        print(f"Loading LoRA checkpoint: {lora_ckpt}")
+        peft.set_peft_model_state_dict(
+            generator.model,
+            load_lora_state_dict(
+                lora_ckpt, expected_sparse_method=sparse_method
+            ),
+        )  # type: ignore[arg-type]
 
-    print(f"Merging LoRA on {device} in {dtype}...")
-    generator.to(device=device, dtype=dtype)
-    generator.model = generator.model.merge_and_unload(safe_merge=True)
+        print(f"Merging LoRA on {device} in {dtype}...")
+        generator.to(device=device, dtype=dtype)
+        generator.model = generator.model.merge_and_unload(safe_merge=True)
     generator.eval().requires_grad_(False)
 
     output_path = Path(args.output_path)
@@ -111,7 +126,8 @@ def main() -> None:
         "source_lora_ckpt": str(lora_ckpt),
         "model_name": getattr(config.model_kwargs, "model_name", None),
         "dtype": str(dtype).replace("torch.", ""),
-        "merged_lora": True,
+        "merged_lora": generator_train_scope == "lora",
+        "generator_train_scope": generator_train_scope,
         "sparse_method": sparse_method,
     }
     torch.save(checkpoint, output_path)

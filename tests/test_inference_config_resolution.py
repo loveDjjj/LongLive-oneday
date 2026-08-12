@@ -107,6 +107,26 @@ def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
     assert metadata["sparsity_method"] == "hsa_cag"
 
 
+def test_vbench_hybrid_selects_frame_filtered_sla_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_sla_cag")
+    output = tmp_path / "hybrid.yaml"
+
+    metadata = resolve_vbench(
+        _args(VBENCH_CONFIG, "longlive2_standard_5pct", output, seed=0)
+    )
+    sparse = OmegaConf.load(output).model_kwargs.sparse_config
+
+    assert sparse.method == "hsa_sla_cag"
+    assert sparse.sparsity == 0.90
+    assert sparse.sparsity_base == 0.93
+    assert sparse.candidate_frames == 8
+    assert sparse.keep_sink_frames == 1
+    assert sparse.keep_recent_frames == 1
+    assert sparse.linear_cache is True
+    assert "keep_frames" not in sparse
+    assert metadata["sparsity_method"] == "hsa_sla_cag"
+
+
 def test_vbench_rejects_bsa_for_hsa(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
     monkeypatch.setenv("LONGLIVE_SPARSE_BACKEND", "mindiesd_bsa")

@@ -77,7 +77,7 @@ presets:
   wan22_augmented_5pct: {engine: wan22, category: augmented, subset: 5pct}
   wan22_augmented_20pct: {engine: wan22, category: augmented, subset: 20pct}
 
-# 默认运行稠密对照；LONGLIVE_SPARSE_METHOD 可选择 hsa_cag 或 sla_cag。
+# 默认运行稠密对照；可选择 hsa_cag、sla_cag 或 hsa_sla_cag。
 sparsity:
   enabled: false
   method: dense
@@ -94,6 +94,21 @@ sparsity:
       dense_current: true
       min_sparse_history_frames: 2
       query_block_batch: 1
+    hsa_sla_cag:
+      backend: mindiesd
+      sparsity: 0.90
+      sparsity_base: 0.93
+      block_q: 128
+      block_k: 128
+      feature_map: softmax
+      candidate_frames: 8
+      keep_sink_frames: 1
+      keep_recent_frames: 1
+      dense_current: false
+      min_sparse_history_frames: 2
+      query_block_batch: 1
+      linear_cache: true
+      linear_eps: 1.0e-5
     sla_cag:
       backend: mindiesd
       sparsity: 0.95

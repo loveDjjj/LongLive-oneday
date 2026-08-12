@@ -26,8 +26,8 @@ export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:Tru
 # ---------- 可覆盖的路径参数 ----------
 export LONGLIVE_ROOT="${LONGLIVE_ROOT:-/mnt/share/r50063443/LongLive-oneday}"
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-if [[ "${SPARSE_METHOD}" != "sla_cag" && "${SPARSE_METHOD}" != "hsa_cag" ]]; then
-    echo "[error] SPARSE_METHOD must be sla_cag or hsa_cag" >&2
+if [[ ! "${SPARSE_METHOD}" =~ ^(sla_cag|hsa_cag|hsa_sla_cag)$ ]]; then
+    echo "[error] SPARSE_METHOD must be sla_cag, hsa_cag, or hsa_sla_cag" >&2
     exit 2
 fi
 export CONFIG_PATH="${CONFIG_PATH:-configs/train/${SPARSE_METHOD}.yaml}"

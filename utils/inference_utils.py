@@ -132,6 +132,51 @@ def load_lora_state_dict(
     return checkpoint
 
 
+def load_generator_linear_state_dict(
+    generator_model, state_dict: Mapping[str, torch.Tensor]
+) -> None:
+    """Strictly load the sparse linear-compensation tensors into a generator."""
+    expected = {
+        name: parameter
+        for name, parameter in generator_model.named_parameters()
+        if ".sla_linear." in name or name.startswith("sla_linear.")
+    }
+    prepared = clean_fsdp_state_dict_keys(state_dict)
+    prepared = {
+        name.removeprefix("model."): value for name, value in prepared.items()
+    }
+    missing = sorted(set(expected) - set(prepared))
+    unexpected = sorted(set(prepared) - set(expected))
+    if missing or unexpected:
+        raise ValueError(
+            "generator_linear keys do not match model: "
+            f"missing={missing[:4]} unexpected={unexpected[:4]}"
+        )
+    with torch.no_grad():
+        for name, parameter in expected.items():
+            parameter.copy_(prepared[name].to(parameter))
+
+
+def load_generator_linear_checkpoint(
+    generator_model,
+    checkpoint_path: str,
+    *,
+    expected_sparse_method: str,
+) -> None:
+    checkpoint = _torch_load(checkpoint_path)
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError("linear-only checkpoint must be a mapping")
+    from utils.training_state import validate_sparse_checkpoint_method
+
+    validate_sparse_checkpoint_method(checkpoint, expected_sparse_method)
+    if checkpoint.get("generator_train_scope") != "linear_only":
+        raise ValueError("checkpoint generator_train_scope must be linear_only")
+    state_dict = checkpoint.get("generator_linear")
+    if not isinstance(state_dict, Mapping) or not state_dict:
+        raise ValueError("linear-only checkpoint is missing generator_linear")
+    load_generator_linear_state_dict(generator_model, state_dict)
+
+
 def cpu_state_dict(module) -> dict[str, torch.Tensor]:
     """Return a detached CPU state dict suitable for portable checkpoints."""
     return {key: value.detach().cpu() for key, value in module.state_dict().items()}
@@ -165,6 +210,18 @@ def apply_and_merge_lora(
     sparse_method = sparse_config.get(
         "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
     )
+    generator_train_scope = str(getattr(config, "generator_train_scope", "lora"))
+    if generator_train_scope == "linear_only":
+        load_generator_linear_checkpoint(
+            pipeline.generator.model,
+            lora_ckpt,
+            expected_sparse_method=sparse_method,
+        )
+        pipeline.generator.to(dtype=dtype)
+        pipeline.generator.eval().requires_grad_(False)
+        pipeline.is_lora_enabled = False
+        pipeline.is_lora_merged = False
+        return True
     pipeline.generator.model = configure_lora_for_model(
         pipeline.generator.model,
         model_name="generator",

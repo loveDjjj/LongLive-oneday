@@ -23,6 +23,11 @@ from wan_5b.modules.hsa_attention import (
     build_hsa_block_lut,
     hsa_cag_attention,
 )
+from wan_5b.modules.hsa_sla_attention import (
+    HSASLAAttentionConfig,
+    build_hsa_sla_block_lut,
+    hsa_sla_cag_attention,
+)
 from wan_5b.modules.sla_attention import (
     SLAAttentionConfig,
     _run_sparse_backend,
@@ -83,6 +88,21 @@ def _config(method: str, backend: str, latent_frames: int):
                 "min_sparse_history_frames": 2,
             }
         )
+    if method == "hsa_sla_cag":
+        return HSASLAAttentionConfig.from_mapping(
+            {
+                **common,
+                "sparsity": 0.90,
+                "sparsity_base": 0.93,
+                "feature_map": "softmax",
+                "candidate_frames": 8,
+                "keep_sink_frames": 1,
+                "keep_recent_frames": 1,
+                "dense_current": False,
+                "min_sparse_history_frames": 2,
+                "linear_cache": True,
+            }
+        )
     return SLAAttentionConfig.from_mapping(
         {
             **common,
@@ -115,7 +135,9 @@ def _measure(operation, *, warmup: int, iterations: int) -> tuple[float, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--method", choices=("hsa_cag", "sla_cag"), required=True)
+    parser.add_argument(
+        "--method", choices=("hsa_cag", "sla_cag", "hsa_sla_cag"), required=True
+    )
     parser.add_argument("--device", default="npu:0")
     parser.add_argument(
         "--backend", choices=("mindiesd", "mindiesd_bsa", "ascend_triton"),
@@ -125,8 +147,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
     args = parser.parse_args()
-    if args.method == "hsa_cag" and args.backend == "mindiesd_bsa":
-        raise ValueError("native HSA supports mindiesd RainFusion or ascend_triton")
+    if args.method in {"hsa_cag", "hsa_sla_cag"} and args.backend == "mindiesd_bsa":
+        raise ValueError("HSA-based methods support mindiesd RainFusion or ascend_triton")
     if args.warmup < 1 or args.iterations < 1:
         raise ValueError("warmup and iterations must be positive")
 
@@ -173,13 +195,24 @@ def main() -> None:
                 q, k, v, frame_seq=880, chunk_id=chunk_id,
                 sparse_config=config, attention_cache=route_cache,
             )
-        else:
+        elif args.method == "sla_cag":
             route = lambda: build_sla_block_lut(
                 q, k, frame_seq=880, sparsity=sparsity, config=config,
                 cache=route_cache, cache_token=chunk_id,
             )
             full_cache = {}
             full = lambda: sla_cag_attention(
+                q, k, v, frame_seq=880, chunk_id=chunk_id,
+                sparse_config=config, linear_projection=projection,
+                attention_cache=full_cache,
+            )
+        else:
+            route = lambda: build_hsa_sla_block_lut(
+                q, k, frame_seq=880, sparsity=sparsity, config=config,
+                cache=route_cache, cache_token=chunk_id,
+            )
+            full_cache = {}
+            full = lambda: hsa_sla_cag_attention(
                 q, k, v, frame_seq=880, chunk_id=chunk_id,
                 sparse_config=config, linear_projection=projection,
                 attention_cache=full_cache,

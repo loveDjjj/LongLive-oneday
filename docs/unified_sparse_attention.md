@@ -2,9 +2,8 @@
 
 This branch keeps four concerns separate: LongLive rolling KV management,
 algorithm routing, block-sparse execution, and evaluation. The current baseline
-supports `dense`, native `hsa_cag`, and native `sla_cag`. The future hybrid is
-not enabled until it has an independent method id, quality results, and a
-matching checkpoint contract.
+supports `dense`, native `hsa_cag`, native `sla_cag`, and the experimental
+`hsa_sla_cag` hybrid.
 
 ## Method selection
 
@@ -15,12 +14,18 @@ without editing YAML:
 export LONGLIVE_SPARSE_METHOD=dense       # LongLive2 baseline
 export LONGLIVE_SPARSE_METHOD=hsa_cag     # frame-then-block routing
 export LONGLIVE_SPARSE_METHOD=sla_cag     # global block routing + linear branch
+export LONGLIVE_SPARSE_METHOD=hsa_sla_cag # frame-filtered SLA + linear branch
 export LONGLIVE_SPARSE_BACKEND=mindiesd   # optional backend override
 ```
 
 HSA preserves its original dense-current policy. SLA preserves its global
 Smooth-K block routing and linear compensation. Both emit the same compact
 block LUT and use the shared RainFusion/Ascend Triton execution code.
+
+The hybrid uses CAG for the final block budget, selects an eight-frame candidate
+pool using HSA, applies SLA Smooth-K Top-K inside that pool, and adds the full-KV
+linear compensation. Its initial profile uses target/base sparsity `0.90/0.93`,
+one sink frame, one recent frame, and does not force the current chunk dense.
 
 ## Performance matrix
 
@@ -73,6 +78,8 @@ python tests/npu/benchmark_sparse_attention.py \
   --method hsa_cag --device npu:0 --warmup 5 --iterations 20
 python tests/npu/benchmark_sparse_attention.py \
   --method sla_cag --device npu:0 --warmup 5 --iterations 20
+python tests/npu/benchmark_sparse_attention.py \
+  --method hsa_sla_cag --device npu:0 --warmup 5 --iterations 20
 ```
 
 ## VBench
@@ -90,7 +97,7 @@ merged checkpoint, prompt set, seed, frame count, resolution, and sampling
 settings. Comparing an HSA-trained checkpoint with an SLA-trained checkpoint
 mixes routing effects with training effects.
 
-Run the same checkpoint through all three methods:
+Run the same checkpoint through all four methods:
 
 ```bash
 VBENCH_PRESETS=longlive2_standard_20pct \
@@ -104,10 +111,23 @@ The native training entry points are:
 ```bash
 bash scripts/training/run_hsa_cag.sh
 bash scripts/training/run_sla_cag.sh
+bash scripts/training/run_hsa_sla_cag.sh
 ```
 
-Both delegate to `run_sparse_cag.sh`. The resolved config and checkpoint record
+All three delegate to `run_sparse_cag.sh`. The resolved config and checkpoint record
 the selected sparse method, and resume rejects a checkpoint from another
 method. The current native recipes retain their historical LoRA scope. The
-future hybrid linear-only recipe will use a separate method id and trainable
-parameter contract rather than silently changing these baselines.
+hybrid recipe uses `generator_train_scope=linear_only`: the original generator
+is frozen and only the 30 per-layer `sla_linear` projections are updated. The
+fake-score critic still uses LoRA for DMD. Checkpoints save the generator tensors
+under `generator_linear` and can be exported with `merge_lora.py` using
+`configs/train/hsa_sla_cag.yaml`.
+
+```bash
+python scripts/checkpoints/merge_lora.py \
+  --config configs/train/hsa_sla_cag.yaml \
+  --generator-ckpt /path/to/longlive2_merged_generator.pt \
+  --lora-ckpt /path/to/checkpoint_model_1000/model.pt \
+  --output-path /path/to/hsa_sla_cag_linear_1000.pt \
+  --device npu:0 --dtype bf16
+```

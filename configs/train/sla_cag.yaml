@@ -79,6 +79,7 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
+  generator_train_scope: lora
   lr: 2.0e-06
   lr_critic: 4.0e-07
   weight_decay: 0.0

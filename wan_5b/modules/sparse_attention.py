@@ -8,10 +8,11 @@ import math
 from typing import Any, Mapping
 
 from .hsa_attention import HSAAttentionConfig, hsa_cag_attention
+from .hsa_sla_attention import HSASLAAttentionConfig, hsa_sla_cag_attention
 from .sla_attention import SLAAttentionConfig, sla_cag_attention
 
 
-SPARSE_METHODS = ("hsa_cag", "sla_cag")
+SPARSE_METHODS = ("hsa_cag", "sla_cag", "hsa_sla_cag")
 
 
 def sparse_method(value: Mapping[str, Any] | None) -> str:
@@ -34,6 +35,8 @@ def parse_sparse_config(value: Mapping[str, Any] | None):
         return SLAAttentionConfig()
     if method == "hsa_cag":
         return HSAAttentionConfig.from_mapping(value)
+    if method == "hsa_sla_cag":
+        return HSASLAAttentionConfig.from_mapping(value)
     return SLAAttentionConfig.from_mapping(value)
 
 
@@ -105,6 +108,12 @@ def sparse_attention(
         )
     if method == "sla_cag":
         return sla_cag_attention(
+            q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
+            sparse_config=sparse_config, linear_projection=linear_projection,
+            attention_cache=attention_cache,
+        )
+    if method == "hsa_sla_cag":
+        return hsa_sla_cag_attention(
             q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
             sparse_config=sparse_config, linear_projection=linear_projection,
             attention_cache=attention_cache,

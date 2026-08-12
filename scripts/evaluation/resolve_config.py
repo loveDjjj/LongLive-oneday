@@ -65,7 +65,7 @@ def _sparse_model_config(sparsity) -> dict | None:
     if not enabled:
         return None
     method = method_override or str(sparsity.method)
-    if method not in {"sla_cag", "hsa_cag"}:
+    if method not in {"sla_cag", "hsa_cag", "hsa_sla_cag"}:
         raise ValueError(f"unsupported sparse attention method={method!r}")
     profiles = getattr(sparsity, "profiles", None)
     if profiles is not None:
@@ -77,13 +77,15 @@ def _sparse_model_config(sparsity) -> dict | None:
     backend_override = os.environ.get("LONGLIVE_SPARSE_BACKEND", "").strip()
     if not backend_override:
         legacy_name = (
-            "LONGLIVE_HSA_BACKEND" if method == "hsa_cag" else "LONGLIVE_SLA_BACKEND"
+            "LONGLIVE_HSA_BACKEND"
+            if method in {"hsa_cag", "hsa_sla_cag"}
+            else "LONGLIVE_SLA_BACKEND"
         )
         backend_override = os.environ.get(legacy_name, "").strip()
     if backend_override:
         allowed = (
             {"mindiesd", "ascend_triton"}
-            if method == "hsa_cag"
+            if method in {"hsa_cag", "hsa_sla_cag"}
             else {"mindiesd", "mindiesd_bsa", "ascend_triton"}
         )
         if backend_override not in allowed:
@@ -109,7 +111,9 @@ def _sparse_backend(sparsity) -> str:
     override = os.environ.get("LONGLIVE_SPARSE_BACKEND", "").strip()
     if not override:
         legacy_name = (
-            "LONGLIVE_HSA_BACKEND" if method == "hsa_cag" else "LONGLIVE_SLA_BACKEND"
+            "LONGLIVE_HSA_BACKEND"
+            if method in {"hsa_cag", "hsa_sla_cag"}
+            else "LONGLIVE_SLA_BACKEND"
         )
         override = os.environ.get(legacy_name, "").strip()
     if override:

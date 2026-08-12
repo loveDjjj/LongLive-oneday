@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 TASK="${TASK:-benchmark}"
-METHODS="${METHODS:-dense,hsa_cag,sla_cag}"
+METHODS="${METHODS:-dense,hsa_cag,sla_cag,hsa_sla_cag}"
 DURATIONS="${DURATIONS:-5s,32s,64s}"
 MODES="${MODES:-dit_only,sync_vae,async_vae}"
 PERF_DEVICES="${PERF_DEVICES:-0,1,2,3,4}"
@@ -28,7 +28,7 @@ IFS=',' read -r -a methods <<<"${METHODS}"
 IFS=',' read -r -a durations <<<"${DURATIONS}"
 IFS=',' read -r -a modes <<<"${MODES}"
 for method in "${methods[@]}"; do
-  if [[ ! "${method}" =~ ^(dense|hsa_cag|sla_cag)$ ]]; then
+  if [[ ! "${method}" =~ ^(dense|hsa_cag|sla_cag|hsa_sla_cag)$ ]]; then
     echo "[error] unsupported method: ${method}" >&2
     exit 2
   fi

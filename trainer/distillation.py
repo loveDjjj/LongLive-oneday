@@ -27,7 +27,11 @@ from utils.training_state import (
     validate_sparse_checkpoint_method,
 )
 from utils.device import current_device, empty_cache
-from utils.inference_utils import load_generator_state_dict
+from utils.inference_utils import (
+    clean_fsdp_state_dict_keys,
+    load_generator_linear_state_dict,
+    load_generator_state_dict,
+)
 import torch.distributed as dist
 from omegaconf import OmegaConf
 from model import DMD
@@ -158,6 +162,13 @@ class Trainer:
         # ================================= LoRA Configuration =================================
         self.is_lora_enabled = False
         self.lora_config = None
+        self.generator_train_scope = str(
+            getattr(config, "generator_train_scope", "lora")
+        )
+        if self.generator_train_scope not in {"lora", "linear_only"}:
+            raise ValueError(
+                "training.generator_train_scope must be lora or linear_only"
+            )
 
         if hasattr(config, 'adapter') and config.adapter is not None:
             self.is_lora_enabled = True
@@ -234,7 +245,12 @@ class Trainer:
             # 2. Apply LoRA wrapping now (after loading base model, before FSDP wrapping)
             if self.is_main_process:
                 print("Applying LoRA to models...")
-            self.model.generator.model = self._configure_lora_for_model(self.model.generator.model, "generator")
+            if self.generator_train_scope == "lora":
+                self.model.generator.model = self._configure_lora_for_model(
+                    self.model.generator.model, "generator"
+                )
+            else:
+                self._configure_generator_linear_only(self.model.generator.model)
 
             # Configure LoRA for fake_score if needed
             if getattr(self.lora_config, 'apply_to_critic', True):
@@ -287,15 +303,40 @@ class Trainer:
                     else "sla_cag",
                 )
                 validate_sparse_checkpoint_method(lora_checkpoint, sparse_method)
+                checkpoint_scope = lora_checkpoint.get(
+                    "generator_train_scope", "lora"
+                )
+                if checkpoint_scope != self.generator_train_scope:
+                    raise ValueError(
+                        f"checkpoint generator train scope is {checkpoint_scope}, "
+                        f"expected {self.generator_train_scope}"
+                    )
 
-                if "generator_lora" not in lora_checkpoint:
-                    raise ValueError(f"LoRA checkpoint {lora_checkpoint_path} is not a valid LoRA checkpoint. "
-                                     f"Found keys: {list(lora_checkpoint.keys())}")
-
-                if self.is_main_process:
-                    print(f"Loading LoRA generator weights: {len(lora_checkpoint['generator_lora'])} keys in checkpoint")
-                peft.set_peft_model_state_dict(self.model.generator.model, lora_checkpoint["generator_lora"])
-                del lora_checkpoint["generator_lora"]
+                if self.generator_train_scope == "lora":
+                    if "generator_lora" not in lora_checkpoint:
+                        raise ValueError(
+                            f"LoRA checkpoint {lora_checkpoint_path} is missing generator_lora. "
+                            f"Found keys: {list(lora_checkpoint.keys())}"
+                        )
+                    if self.is_main_process:
+                        print(
+                            "Loading LoRA generator weights: "
+                            f"{len(lora_checkpoint['generator_lora'])} keys in checkpoint"
+                        )
+                    peft.set_peft_model_state_dict(
+                        self.model.generator.model, lora_checkpoint["generator_lora"]
+                    )
+                    del lora_checkpoint["generator_lora"]
+                else:
+                    if "generator_linear" not in lora_checkpoint:
+                        raise ValueError(
+                            f"linear-only checkpoint {lora_checkpoint_path} is missing "
+                            f"generator_linear. Found keys: {list(lora_checkpoint.keys())}"
+                        )
+                    self._load_generator_linear_state(
+                        self.model.generator.model, lora_checkpoint["generator_linear"]
+                    )
+                    del lora_checkpoint["generator_linear"]
 
                 if getattr(self.lora_config, 'apply_to_critic', True):
                     if "critic_lora" not in lora_checkpoint:
@@ -531,6 +572,30 @@ class Trainer:
         if self.is_main_process:
             print("Restored generator and critic AdamW state from LoRA checkpoint")
 
+    def _configure_generator_linear_only(self, transformer):
+        transformer.requires_grad_(False)
+        trainable = []
+        for name, parameter in transformer.named_parameters():
+            if ".sla_linear." in name or name.startswith("sla_linear."):
+                parameter.requires_grad_(True)
+                trainable.append(name)
+        if not trainable:
+            raise ValueError("linear_only training found no sla_linear parameters")
+        if self.is_main_process:
+            count = sum(
+                parameter.numel()
+                for parameter in transformer.parameters()
+                if parameter.requires_grad
+            )
+            print(
+                f"Generator linear-only training: {len(trainable)} tensors, "
+                f"{count} parameters"
+            )
+
+    @staticmethod
+    def _load_generator_linear_state(transformer, state_dict):
+        load_generator_linear_state_dict(transformer, state_dict)
+
     def _resume_samples_per_rank(self, batch_size):
         checkpoint = self._resume_training_state
         if checkpoint is None:
@@ -652,8 +717,17 @@ class Trainer:
 
         if self.is_lora_enabled:
             rng_states = self._gather_rng_states()
-            gen_lora_sd = self._gather_lora_state_dict(
-                self.model.generator.model)
+            generator_state_key = (
+                "generator_lora"
+                if self.generator_train_scope == "lora"
+                else "generator_linear"
+            )
+            if self.generator_train_scope == "lora":
+                generator_train_state = self._gather_lora_state_dict(
+                    self.model.generator.model
+                )
+            else:
+                generator_train_state = self._gather_generator_linear_state()
             crit_lora_sd = self._gather_lora_state_dict(
                 self.model.fake_score.model)
 
@@ -681,12 +755,18 @@ class Trainer:
                 )
 
             state_dict = {
-                "generator_lora": gen_lora_sd,
+                generator_state_key: generator_train_state,
                 "critic_lora": crit_lora_sd,
                 "generator_optimizer": generator_optim_state,
                 "critic_optimizer": critic_optim_state,
                 "step": self.step,
-                "checkpoint_format_version": 3,
+                "checkpoint_format_version": 4,
+                "generator_train_scope": self.generator_train_scope,
+                "generator_trainable_parameters": sorted(
+                    name
+                    for name, parameter in self.model.generator.named_parameters()
+                    if parameter.requires_grad
+                ),
                 "sparse_method": str(
                     self.config.model_kwargs.sparse_config.get(
                         "method",
@@ -1051,6 +1131,20 @@ class Trainer:
         ):
             full = lora_model.state_dict()
         return get_peft_model_state_dict(lora_model, state_dict=full)
+
+    def _gather_generator_linear_state(self):
+        with FSDP.state_dict_type(
+            self.model.generator,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+        ):
+            full = self.model.generator.state_dict()
+        full = clean_fsdp_state_dict_keys(full)
+        return {
+            name.removeprefix("model."): value
+            for name, value in full.items()
+            if ".sla_linear." in name or name.startswith("sla_linear.")
+        }
     
     # --------------------------------------------------------------------------------------------------------------
     # Visualization helpers

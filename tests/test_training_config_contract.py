@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATHS = {
     "sla_cag": ROOT / "configs" / "train" / "sla_cag.yaml",
     "hsa_cag": ROOT / "configs" / "train" / "hsa_cag.yaml",
+    "hsa_sla_cag": ROOT / "configs" / "train" / "hsa_sla_cag.yaml",
 }
 
 
@@ -46,6 +47,8 @@ class TrainingConfigContractTest(unittest.TestCase):
                 self.assertEqual(validated.sampling_steps, 4)
                 self.assertEqual(validated.image_or_video_shape, [1, 32, 48, 44, 80])
                 self.assertEqual(validated.model_kwargs.sparse_config.method, method)
+                expected_scope = "linear_only" if method == "hsa_sla_cag" else "lora"
+                self.assertEqual(validated.generator_train_scope, expected_scope)
 
     def test_sp_must_divide_heads_and_block_frames(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

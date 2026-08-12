@@ -220,8 +220,8 @@ def validate_sparse_training_config(config):
         sparse_method = "hsa_cag" if "keep_frames" in sparse else "sla_cag"
         sparse["method"] = sparse_method
     require(
-        sparse_method in {"hsa_cag", "sla_cag"},
-        "sparse method must be hsa_cag or sla_cag",
+        sparse_method in {"hsa_cag", "sla_cag", "hsa_sla_cag"},
+        "sparse method must be hsa_cag, sla_cag, or hsa_sla_cag",
     )
     require(
         sparse.get("backend") in {"ascend_triton", "portable"},
@@ -255,6 +255,21 @@ def validate_sparse_training_config(config):
     adapter = config.get("adapter", {})
     require(adapter.get("type") == "lora", "adapter.type must be lora")
     require(bool(adapter.get("apply_to_critic", False)), "adapter.apply_to_critic must be true")
+    generator_train_scope = str(config.get("generator_train_scope", "lora"))
+    require(
+        generator_train_scope in {"lora", "linear_only"},
+        "training.generator_train_scope must be lora or linear_only",
+    )
+    if sparse_method == "hsa_sla_cag":
+        require(
+            generator_train_scope == "linear_only",
+            "hsa_sla_cag requires training.generator_train_scope=linear_only",
+        )
+    else:
+        require(
+            generator_train_scope == "lora",
+            "native hsa_cag/sla_cag baselines require generator_train_scope=lora",
+        )
 
     quant_flags = (
         "model_quant",

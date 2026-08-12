@@ -1,4 +1,4 @@
-# LongLive2.0-5B HSA+CAG sparse post-training on Ascend NPU.
+# LongLive2.0-5B frame-filtered SLA+CAG linear-only fine-tuning on Ascend NPU.
 infra:
   sequence_parallel_size: 4
   sharding_strategy: hybrid_full
@@ -17,18 +17,21 @@ model_kwargs:
   local_attn_size: 32
   sparse_config:
     enabled: true
-    method: hsa_cag
+    method: hsa_sla_cag
     backend: ascend_triton
-    sparsity: 0.85
-    sparsity_base: 0.95
-    block_q: 40
-    block_k: 40
-    keep_frames: 6
-    keep_sink: 1
-    keep_near: 2
-    dense_current: true
+    sparsity: 0.90
+    sparsity_base: 0.93
+    block_q: 128
+    block_k: 128
+    feature_map: softmax
+    candidate_frames: 8
+    keep_sink_frames: 1
+    keep_recent_frames: 1
+    dense_current: false
     min_sparse_history_frames: 2
     query_block_batch: 1
+    linear_cache: true
+    linear_eps: 1.0e-5
     num_output_frames: 32
     num_frame_per_block: 8
     local_attn_size: 32
@@ -66,8 +69,8 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
-  generator_train_scope: lora
-  lr: 2.0e-06
+  generator_train_scope: linear_only
+  lr: 2.0e-05
   lr_critic: 4.0e-07
   weight_decay: 0.0
   beta1: 0.0
@@ -81,9 +84,9 @@ training:
   ema_weight: 0.0
   log_iters: 10
   max_checkpoints: 20
-  max_iters: 2000
+  max_iters: 1000
   gc_interval: 50
-  dfake_gen_update_ratio: 5
+  dfake_gen_update_ratio: 1
   num_training_frames: 32
   slice_last_frames: 32
 
@@ -120,4 +123,4 @@ logging:
   seed: 42
   wandb_key: null
   wandb_entity: null
-  wandb_project: LongLive2-HSA-CAG-NPU
+  wandb_project: LongLive2-HSA-SLA-CAG-NPU

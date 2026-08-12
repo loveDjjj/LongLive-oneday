@@ -18,7 +18,11 @@ from pipeline.causal_diffusion_inference_sp import CausalDiffusionInferencePipel
 from utils.config import normalize_config, section_get
 from utils.dataset import PromptDataset, prompt_collate_fn
 from utils.device import distributed_backend, is_npu, set_device
-from utils.inference_utils import load_generator_checkpoint, load_lora_state_dict
+from utils.inference_utils import (
+    load_generator_checkpoint,
+    load_generator_linear_checkpoint,
+    load_lora_state_dict,
+)
 from utils.lora_utils import configure_lora_for_model
 from utils.memory import DynamicSwapInstaller, get_cuda_free_memory_gb
 from utils.misc import set_seed
@@ -263,27 +267,38 @@ if has_lora_adapter:
         "method",
         "hsa_cag" if "keep_frames" in runtime_sparse_config else "sla_cag",
     )
-    pipeline.generator.model = configure_lora_for_model(
-        pipeline.generator.model,
-        model_name="generator",
-        lora_config=config.adapter,
-        is_main_process=is_main_process,
-        include_sla_linear=runtime_sparse_method == "sla_cag",
-    )
     lora_ckpt_path = getattr(config, "lora_ckpt", None)
     if not lora_ckpt_path:
         raise ValueError("An adapter config requires checkpoints.lora_ckpt")
-    peft.set_peft_model_state_dict(
-        pipeline.generator.model,
-        load_lora_state_dict(
-            lora_ckpt_path, expected_sparse_method=runtime_sparse_method
-        ),
+    generator_train_scope = str(
+        getattr(config, "generator_train_scope", "lora")
     )
-    if merge_lora:
-        pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)
-        pipeline.is_lora_merged = True
+    if generator_train_scope == "linear_only":
+        load_generator_linear_checkpoint(
+            pipeline.generator.model,
+            lora_ckpt_path,
+            expected_sparse_method=runtime_sparse_method,
+        )
+        pipeline.is_lora_merged = False
     else:
-        pipeline.is_lora_enabled = True
+        pipeline.generator.model = configure_lora_for_model(
+            pipeline.generator.model,
+            model_name="generator",
+            lora_config=config.adapter,
+            is_main_process=is_main_process,
+            include_sla_linear=runtime_sparse_method == "sla_cag",
+        )
+        peft.set_peft_model_state_dict(
+            pipeline.generator.model,
+            load_lora_state_dict(
+                lora_ckpt_path, expected_sparse_method=runtime_sparse_method
+            ),
+        )
+        if merge_lora:
+            pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)
+            pipeline.is_lora_merged = True
+        else:
+            pipeline.is_lora_enabled = True
 elif merge_lora and is_main_process:
     print("merge_lora=True requested but no adapter config was found; continuing without LoRA merge")
 

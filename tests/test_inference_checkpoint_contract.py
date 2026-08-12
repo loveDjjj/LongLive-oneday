@@ -5,6 +5,8 @@ from utils.inference_utils import (
     clean_fsdp_state_dict_keys,
     extract_generator_state_dict,
     load_generator_state_dict,
+    load_generator_linear_checkpoint,
+    load_generator_linear_state_dict,
     load_lora_state_dict,
 )
 
@@ -75,3 +77,77 @@ def test_dense_checkpoint_synthesizes_zero_sla_projection():
 
     assert torch.count_nonzero(generator.sla_linear.weight) == 0
     assert torch.count_nonzero(generator.sla_linear.bias) == 0
+
+
+def test_generator_linear_state_loads_only_compensation_parameters():
+    class Generator(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense = torch.nn.Linear(2, 2)
+            self.sla_linear = torch.nn.Linear(2, 2)
+
+    generator = Generator()
+    dense_before = generator.dense.weight.detach().clone()
+    state = {
+        "sla_linear.weight": torch.ones_like(generator.sla_linear.weight),
+        "sla_linear.bias": torch.ones_like(generator.sla_linear.bias),
+    }
+
+    load_generator_linear_state_dict(generator, state)
+
+    assert torch.equal(generator.sla_linear.weight, state["sla_linear.weight"])
+    assert torch.equal(generator.dense.weight, dense_before)
+
+
+def test_generator_linear_state_accepts_fsdp_and_model_prefixes():
+    generator = torch.nn.Module()
+    generator.sla_linear = torch.nn.Linear(2, 2)
+    state = {
+        "_fsdp_wrapped_module.model.sla_linear.weight": torch.ones(2, 2),
+        "_fsdp_wrapped_module.model.sla_linear.bias": torch.ones(2),
+    }
+
+    load_generator_linear_state_dict(generator, state)
+
+    assert torch.count_nonzero(generator.sla_linear.weight) == 4
+    assert torch.count_nonzero(generator.sla_linear.bias) == 2
+
+
+def test_generator_linear_checkpoint_validates_method_and_scope(tmp_path):
+    class Generator(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.sla_linear = torch.nn.Linear(2, 2)
+
+    generator = Generator()
+    state = {
+        "sla_linear.weight": torch.ones_like(generator.sla_linear.weight),
+        "sla_linear.bias": torch.ones_like(generator.sla_linear.bias),
+    }
+    path = tmp_path / "linear.pt"
+    torch.save(
+        {
+            "sparse_method": "hsa_sla_cag",
+            "generator_train_scope": "linear_only",
+            "generator_linear": state,
+        },
+        path,
+    )
+
+    load_generator_linear_checkpoint(
+        generator, str(path), expected_sparse_method="hsa_sla_cag"
+    )
+    with pytest.raises(ValueError, match="expected sla_cag"):
+        load_generator_linear_checkpoint(
+            generator, str(path), expected_sparse_method="sla_cag"
+        )
+
+
+def test_generator_linear_state_rejects_missing_keys():
+    generator = torch.nn.Module()
+    generator.sla_linear = torch.nn.Linear(2, 2)
+
+    with pytest.raises(ValueError, match="keys do not match"):
+        load_generator_linear_state_dict(
+            generator, {"sla_linear.weight": torch.ones(2, 2)}
+        )
