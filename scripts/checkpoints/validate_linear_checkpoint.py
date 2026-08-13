@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a LongLive hybrid linear-only training checkpoint."""
+"""Validate a LongLive SLA raw-linear training checkpoint."""
 
 from __future__ import annotations
 

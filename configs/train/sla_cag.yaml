@@ -81,8 +81,11 @@ algorithm:
   fake_guidance_scale: 0.0
 
 training:
-  generator_train_scope: lora
+  # 与混合方法统一：主干训练 LoRA，30 层 sla_linear 直接训练原始 weight/bias。
+  generator_train_scope: lora_plus_linear
+  # 主干 LoRA 与原始补偿层分别使用独立学习率。
   lr: 2.0e-06
+  lr_linear: 2.0e-05
   lr_critic: 4.0e-07
   weight_decay: 0.0
   beta1: 0.0
@@ -132,6 +135,7 @@ evaluation:
   save_latents_only: true
 
 adapter:
+  # Generator attention 主干与 Fake Critic 使用 LoRA；原始 sla_linear 不包装 LoRA。
   type: lora
   rank: 128
   alpha: 128

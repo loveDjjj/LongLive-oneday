@@ -7,7 +7,7 @@
 - `sla_cag`：对滚动 KV 全局执行 Smooth-K 块路由，并加入线性补偿与 CAG。
 - `hsa_sla_cag`：先用 HSA 筛选候选帧，再用 SLA 选择 token block，以 CAG 控制预算，并使用全 KV 线性补偿。
 
-三种稀疏方法使用独立训练契约。`hsa_cag` 和 `sla_cag` 训练 Generator LoRA；`hsa_sla_cag` 主方案联合训练 Generator attention 主干 LoRA 与 30 层原始 `sla_linear`，并保留 linear-only 对照入口。DMD Fake Critic 在三种方法中均训练 LoRA。
+三种稀疏方法使用明确的训练契约。`hsa_cag` 训练 Generator LoRA；`sla_cag` 与 `hsa_sla_cag` 均联合训练 Generator attention 主干 LoRA 与 30 层原始 `sla_linear`，保证两种 SLA 路由使用相同参数化和折叠补偿计算。混合方法另保留 linear-only 对照入口，DMD Fake Critic 在三种方法中均训练 LoRA。
 
 ## 支持范围
 

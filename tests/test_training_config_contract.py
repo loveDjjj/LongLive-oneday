@@ -48,8 +48,14 @@ class TrainingConfigContractTest(unittest.TestCase):
                 self.assertEqual(validated.sampling_steps, 4)
                 self.assertEqual(validated.image_or_video_shape, [1, 32, 48, 44, 80])
                 self.assertEqual(validated.model_kwargs.sparse_config.method, method)
-                expected_scope = "lora_plus_linear" if method == "hsa_sla_cag" else "lora"
+                expected_scope = (
+                    "lora_plus_linear"
+                    if method in {"sla_cag", "hsa_sla_cag"}
+                    else "lora"
+                )
                 self.assertEqual(validated.generator_train_scope, expected_scope)
+                if method in {"sla_cag", "hsa_sla_cag"}:
+                    self.assertEqual(validated.lr_linear, 2.0e-5)
 
                 if method in {"sla_cag", "hsa_sla_cag"}:
                     self.assertEqual(validated.gradient_accumulation_steps, 4)
@@ -68,6 +74,16 @@ class TrainingConfigContractTest(unittest.TestCase):
             validated = validate_sla_cag_training_config(config)
 
             self.assertEqual(validated.generator_train_scope, "linear_only")
+
+    def test_sla_rejects_legacy_lora_only_scope(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            config = self._load_config_with_temporary_paths(
+                Path(temporary_dir), "sla_cag"
+            )
+            config.generator_train_scope = "lora"
+
+            with self.assertRaisesRegex(ValueError, "lora_plus_linear"):
+                validate_sla_cag_training_config(config)
 
     def test_sp_must_divide_heads_and_block_frames(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

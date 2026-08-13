@@ -10,8 +10,24 @@ from utils.inference_utils import (
     load_generator_linear_checkpoint,
     load_generator_linear_state_dict,
     load_lora_state_dict,
-    include_sla_linear_in_lora,
 )
+from utils.lora_utils import lora_target_linear_modules
+
+
+def test_lora_targets_always_exclude_raw_sla_compensation():
+    CausalWanAttentionBlock = type(
+        "CausalWanAttentionBlock", (torch.nn.Module,), {}
+    )
+    attention = CausalWanAttentionBlock()
+    attention.q = torch.nn.Linear(2, 2)
+    attention.sla_linear = torch.nn.Linear(2, 2)
+    model = torch.nn.Sequential(attention)
+
+    targets = lora_target_linear_modules(
+        model, ["CausalWanAttentionBlock"]
+    )
+
+    assert targets == ["0.q"]
 
 
 def test_extract_generator_prefers_explicit_generator():
@@ -149,11 +165,6 @@ def test_generator_linear_state_loads_into_peft_prefixed_target():
     load_generator_linear_state_dict(generator, state)
 
     assert torch.count_nonzero(generator.base_model.model.sla_linear.weight) == 4
-
-
-def test_hybrid_lora_excludes_raw_compensation_projection():
-    assert include_sla_linear_in_lora("sla_cag", "lora")
-    assert not include_sla_linear_in_lora("hsa_sla_cag", "lora_plus_linear")
 
 
 def test_generator_linear_checkpoint_validates_method_and_scope(tmp_path):

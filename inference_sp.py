@@ -286,7 +286,6 @@ if has_lora_adapter:
             model_name="generator",
             lora_config=config.adapter,
             is_main_process=is_main_process,
-            include_sla_linear=runtime_sparse_method == "sla_cag",
         )
         peft.set_peft_model_state_dict(
             pipeline.generator.model,
@@ -294,6 +293,12 @@ if has_lora_adapter:
                 lora_ckpt_path, expected_sparse_method=runtime_sparse_method
             ),
         )
+        if generator_train_scope == "lora_plus_linear":
+            load_generator_linear_checkpoint(
+                pipeline.generator.model,
+                lora_ckpt_path,
+                expected_sparse_method=runtime_sparse_method,
+            )
         if merge_lora:
             pipeline.generator.model = pipeline.generator.model.merge_and_unload(safe_merge=True)
             pipeline.is_lora_merged = True

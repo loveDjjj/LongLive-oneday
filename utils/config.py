@@ -270,10 +270,19 @@ def validate_sparse_training_config(config):
                 float(config.get("lr_linear", 0.0)) > 0.0,
                 "lora_plus_linear requires training.lr_linear > 0",
             )
+    elif sparse_method == "sla_cag":
+        require(
+            generator_train_scope == "lora_plus_linear",
+            "sla_cag requires lora_plus_linear generator training",
+        )
+        require(
+            float(config.get("lr_linear", 0.0)) > 0.0,
+            "lora_plus_linear requires training.lr_linear > 0",
+        )
     else:
         require(
             generator_train_scope == "lora",
-            "native hsa_cag/sla_cag baselines require generator_train_scope=lora",
+            "hsa_cag requires generator_train_scope=lora",
         )
 
     quant_flags = (

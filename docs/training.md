@@ -17,13 +17,13 @@
 | 方法 | Generator 训练范围 | 默认目标/基准稀疏率 | 主要路由 |
 | --- | --- | --- | --- |
 | `hsa_cag` | LoRA | 0.85 / 0.95 | 帧级 HSA，保留 6 帧，当前 chunk 稠密 |
-| `sla_cag` | LoRA | 0.90 / 0.93 | 对滚动 KV 全局执行 Smooth-K block Top-K |
+| `sla_cag` | 主干 LoRA + 原始 `sla_linear` | 0.90 / 0.93 | 对滚动 KV 全局执行 Smooth-K block Top-K |
 | `hsa_sla_cag` 主方案 | 主干 LoRA + 原始 `sla_linear` | 0.90 / 0.93 | HSA 选 8 个候选帧，SLA 再选 block |
 | `hsa_sla_cag` 对照 | 仅原始 `sla_linear` | 0.90 / 0.93 | 路由与主方案相同，隔离补偿层自身能力 |
 
-Fake Critic 在三种方法中均使用 LoRA。混合主方案的 `sla_linear` 不再包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；其余 attention 线性层使用 rank 128 LoRA。主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率。linear-only 对照冻结 Generator 主干，仅训练相同的 60 个补偿层张量。
+Fake Critic 在三种方法中均使用 LoRA。SLA+CAG 与混合主方案的 `sla_linear` 都不包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；其余 attention 线性层使用 rank 128 LoRA。两种方法的主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率，只比较路由差异。linear-only 对照冻结 Generator 主干，仅训练混合方法相同的 60 个补偿层张量。
 
-当前 SLA+CAG 与混合方法统一使用 `0.90/0.93` CAG 预算。旧 SLA checkpoint 若使用 `0.95/0.97` 训练，其训练分布没有因配置更新而改变：可以先用新预算做算子和 DiT 性能探索，但正式质量结论必须重新训练或继续微调，并在 manifest 中记录实际训练预算。
+当前 SLA+CAG 与混合方法统一使用 `0.90/0.93` CAG 预算及 `lora_plus_linear` 参数化。SLA+CAG 尚无需要兼容的旧训练产物，正式训练只维护该统一契约。
 
 ## 2. 稀疏行为
 
@@ -222,7 +222,7 @@ logs/training/<run-name>/
 └── metrics.jsonl
 ```
 
-混合训练每次 Generator 更新都会记录：
+SLA+CAG 与混合训练每次 Generator 更新都会记录：
 
 ```text
 linear_grad_tensors
@@ -233,7 +233,7 @@ linear_grad_l2_min
 linear_grad_l2_max
 ```
 
-前四项都应为 60，L2 范数应为有限非零值。缺失、全零或非有限梯度会在 optimizer step 前失败。原生 HSA/SLA 则重点检查 Generator LoRA、Critic LoRA 的梯度范数和 loss 是否有限。
+前四项都应为 60，L2 范数应为有限非零值。缺失、全零或非有限梯度会在 optimizer step 前失败。HSA+CAG 则重点检查 Generator LoRA、Critic LoRA 的梯度范数和 loss 是否有限。
 
 ## 9. Checkpoint 与恢复
 
@@ -241,7 +241,7 @@ linear_grad_l2_max
 
 `MAX_ITERS` 是最终目标 step。例如已恢复到 100，设置 `MAX_ITERS=200` 表示继续到 200，而不是再训练 200 步。不同稀疏方法的 checkpoint 不能混用。
 
-混合主方案还会写出轻量 `generator_adapter.pt`，同时包含 Generator LoRA 与原始 `sla_linear`；linear-only 对照写出 `generator_linear.pt`。完整恢复始终使用 `train_state.pt`。两种 scope 的参数集合和优化器状态不同，不能交叉恢复。正常结束时，即使最终 step 不能整除 `SAVE_INTERVAL`，也会补存最终 checkpoint 并验证 sidecar。
+SLA+CAG 与混合主方案都会写出轻量 `generator_adapter.pt`，同时包含 Generator LoRA 与原始 `sla_linear`；linear-only 对照写出 `generator_linear.pt`。完整恢复始终使用 `train_state.pt`。不同方法或 scope 的参数集合和优化器状态不能交叉恢复。SLA+CAG 与混合方法正常结束时都会自动校验最终完整 checkpoint 和 sidecar；即使最终 step 不能整除 `SAVE_INTERVAL`，也会补存最终 checkpoint。
 
 手工验证：
 
@@ -258,13 +258,13 @@ python scripts/checkpoints/validate_linear_checkpoint.py \
 
 ## 10. 导出推理权重
 
-原生 HSA/SLA checkpoint 需要把 Generator LoRA 合并到训练时使用的 LongLive2.0 基础 Generator：
+SLA+CAG 使用 `generator_adapter.pt`：先把主干 LoRA 合并到训练时使用的 LongLive2.0 基础 Generator，再加载原始 `sla_linear`：
 
 ```bash
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/sla_cag.yaml \
   --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
-  --lora_ckpt runs/training/sla_cag_16card_200step/checkpoints/step_0000200/train_state.pt \
+  --lora_ckpt runs/training/sla_cag_16card_200step/checkpoints/step_0000200/generator_adapter.pt \
   --output_path runs/merged/longlive2_sla_cag_200step.pt \
   --device npu:0
 ```

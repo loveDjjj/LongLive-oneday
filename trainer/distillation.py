@@ -37,7 +37,6 @@ from utils.inference_utils import (
     canonical_generator_parameter_name,
     configure_generator_linear_only,
     enable_generator_linear_parameters,
-    include_sla_linear_in_lora,
     is_sla_linear_parameter,
     load_generator_linear_state_dict,
     load_generator_state_dict,
@@ -1155,22 +1154,9 @@ class Trainer:
         for name, module in transformer.named_modules():
             if module.__class__.__name__ in adapter_target_modules:
                 for full_submodule_name, submodule in module.named_modules(prefix=name):
-                    sparse_config = self.config.model_kwargs.sparse_config
-                    sparse_method = sparse_config.get(
-                        "method",
-                        "hsa_cag" if "keep_frames" in sparse_config else "sla_cag",
-                    )
                     if (
                         isinstance(submodule, torch.nn.Linear)
-                        and not (
-                            full_submodule_name.endswith(".sla_linear")
-                            and (
-                                model_name == "fake_score"
-                                or not include_sla_linear_in_lora(
-                                    sparse_method, self.generator_train_scope
-                                )
-                            )
-                        )
+                        and not full_submodule_name.endswith(".sla_linear")
                     ):
                         target_linear_modules.add(full_submodule_name)
         

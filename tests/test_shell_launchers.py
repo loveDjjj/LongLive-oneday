@@ -59,6 +59,13 @@ def test_sla_launcher_exposes_16_card_training_defaults():
     assert 'MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-5}"' in script
 
 
+def test_sla_and_hybrid_share_raw_linear_checkpoint_validation():
+    script = _read("scripts/training/run_sparse_cag.sh")
+    assert '"${SPARSE_METHOD}" == "sla_cag"' in script
+    assert '"${SPARSE_METHOD}" == "hsa_sla_cag"' in script
+    assert '--expected-method "${SPARSE_METHOD}"' in script
+
+
 def test_merge_script_exposes_scope_override_for_linear_only_export():
     script = (ROOT / "scripts/checkpoints/merge_lora.py").read_text(encoding="utf-8")
     assert '"--generator_train_scope"' in script

@@ -8,12 +8,24 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import torch
-import peft
-from peft import get_peft_model_state_dict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import (
     StateDictType, FullStateDictConfig
 )
+
+
+def lora_target_linear_modules(transformer, adapter_target_modules):
+    """返回 LoRA 目标层，原始 SLA 补偿层始终由独立优化器参数组训练。"""
+    target_linear_modules = set()
+    for name, module in transformer.named_modules():
+        if module.__class__.__name__ in adapter_target_modules:
+            for full_submodule_name, submodule in module.named_modules(prefix=name):
+                if (
+                    isinstance(submodule, torch.nn.Linear)
+                    and not full_submodule_name.endswith(".sla_linear")
+                ):
+                    target_linear_modules.add(full_submodule_name)
+    return sorted(target_linear_modules)
 
 
 def configure_lora_for_model(
@@ -22,7 +34,6 @@ def configure_lora_for_model(
     lora_config,
     is_main_process=True,
     all_causal=False,
-    include_sla_linear=True,
 ):
     """Configure LoRA for a WanDiffusionWrapper model
     
@@ -36,8 +47,8 @@ def configure_lora_for_model(
     Returns:
         lora_model: The LoRA-wrapped model
     """
-    target_linear_modules = set()
-    
+    import peft
+
     if model_name == 'generator':
         adapter_target_modules = ['CausalWanAttentionBlock']
     elif model_name == 'fake_score':
@@ -45,19 +56,9 @@ def configure_lora_for_model(
     else:
         raise ValueError(f"Invalid model name: {model_name}")
     
-    for name, module in transformer.named_modules():
-        if module.__class__.__name__ in adapter_target_modules:
-            for full_submodule_name, submodule in module.named_modules(prefix=name):
-                if (
-                    isinstance(submodule, torch.nn.Linear)
-                    and not (
-                        full_submodule_name.endswith(".sla_linear")
-                        and (model_name == "fake_score" or not include_sla_linear)
-                    )
-                ):
-                    target_linear_modules.add(full_submodule_name)
-    
-    target_linear_modules = list(target_linear_modules)
+    target_linear_modules = lora_target_linear_modules(
+        transformer, adapter_target_modules
+    )
     
     if is_main_process:
         print(f"LoRA target modules for {model_name}: {len(target_linear_modules)} Linear layers")
@@ -88,6 +89,8 @@ def configure_lora_for_model(
 
 
 def gather_lora_state_dict(lora_model):
+    from peft import get_peft_model_state_dict
+
     with FSDP.state_dict_type(
         lora_model,                  
         StateDictType.FULL_STATE_DICT,
@@ -106,6 +109,8 @@ def load_lora_checkpoint(lora_model, lora_state_dict, model_name, is_main_proces
         model_name: 'generator' or 'critic'
         is_main_process: Whether this is the main process (for logging)
     """
+    import peft
+
     if is_main_process:
         print(f"Loading LoRA {model_name} weights: {len(lora_state_dict)} keys in checkpoint")
     

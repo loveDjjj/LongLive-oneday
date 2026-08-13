@@ -47,7 +47,6 @@ def main() -> None:
     from utils.config import normalize_config
     from utils.inference_utils import (
         cpu_state_dict,
-        include_sla_linear_in_lora,
         load_generator_checkpoint,
         load_generator_linear_checkpoint,
         load_lora_state_dict,
@@ -108,9 +107,6 @@ def main() -> None:
             model_name="generator",
             lora_config=config.adapter,
             is_main_process=True,
-            include_sla_linear=include_sla_linear_in_lora(
-                sparse_method, generator_train_scope
-            ),
         )
 
         import peft

@@ -24,13 +24,6 @@ def is_sla_linear_parameter(name: str) -> bool:
     return name.startswith("sla_linear.") or ".sla_linear." in name
 
 
-def include_sla_linear_in_lora(
-    sparse_method: str, generator_train_scope: str
-) -> bool:
-    """Return whether SLA compensation should itself be represented by LoRA."""
-    return sparse_method == "sla_cag" and generator_train_scope == "lora"
-
-
 def canonical_generator_parameter_name(name: str) -> str:
     """Remove FSDP, wrapper, and PEFT prefixes from a generator parameter name."""
     return (
@@ -282,9 +275,6 @@ def apply_and_merge_lora(
         model_name="generator",
         lora_config=adapter_cfg,
         is_main_process=verbose,
-        include_sla_linear=include_sla_linear_in_lora(
-            sparse_method, generator_train_scope
-        ),
     )
 
     if verbose:

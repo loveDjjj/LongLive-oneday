@@ -254,12 +254,14 @@ fi
     --wandb-save-dir "${WANDB_DIR}" \
     "${extra_args[@]}"
 
-if [[ "${SPARSE_METHOD}" == "hsa_sla_cag" && "${VALIDATE_LINEAR_CHECKPOINT}" == "1" ]] \
+if [[ ( "${SPARSE_METHOD}" == "sla_cag" || "${SPARSE_METHOD}" == "hsa_sla_cag" ) \
+    && "${VALIDATE_LINEAR_CHECKPOINT}" == "1" ]] \
     && (( NODE_RANK == 0 )); then
     FINAL_CHECKPOINT_DIR="${ARTIFACT_DIR}/checkpoints/step_$(printf '%07d' "${MAX_ITERS}")"
-    echo "[validate] hybrid final checkpoint=${FINAL_CHECKPOINT_DIR}"
+    echo "[validate] SLA final checkpoint=${FINAL_CHECKPOINT_DIR}"
     "${PYTHON}" scripts/checkpoints/validate_linear_checkpoint.py \
         "${FINAL_CHECKPOINT_DIR}/train_state.pt" \
+        --expected-method "${SPARSE_METHOD}" \
         --expected-step "${MAX_ITERS}" \
         --require-resume-state \
         --json-output "${FINAL_CHECKPOINT_DIR}/validation.json"
@@ -268,5 +270,7 @@ if [[ "${SPARSE_METHOD}" == "hsa_sla_cag" && "${VALIDATE_LINEAR_CHECKPOINT}" == 
         GENERATOR_SIDECAR="${FINAL_CHECKPOINT_DIR}/generator_adapter.pt"
     fi
     "${PYTHON}" scripts/checkpoints/validate_linear_checkpoint.py \
-        "${GENERATOR_SIDECAR}" --expected-step "${MAX_ITERS}"
+        "${GENERATOR_SIDECAR}" \
+        --expected-method "${SPARSE_METHOD}" \
+        --expected-step "${MAX_ITERS}"
 fi
