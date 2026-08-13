@@ -2,8 +2,8 @@
 # 模型路径可通过 LONGLIVE_MODEL_ROOT 和 LONGLIVE_GENERATOR_CKPT 环境变量覆盖。
 model:
   name: Wan2.2-TI2V-5B
-  root: /mnt/share/weight/Wan2.2-TI2V-5B
-  generator_checkpoint: /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+  root: /mnt/a800_share/r50063443/Wan2.2-TI2V-5B
+  generator_checkpoint: /mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   timestep_shift: 5.0
   num_frame_per_block: 8
   local_attn_size: 32

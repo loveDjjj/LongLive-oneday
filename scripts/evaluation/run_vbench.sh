@@ -8,10 +8,10 @@ cd "${REPO_ROOT}"
 
 # 部署参数。模型结构、数据、帧数和随机种子由 YAML 管理。
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
-export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/weights/vbench_models/}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/mnt/a800_share/r50063443/conda_envs/longlive}"
+export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/a800_share/r50063443/conda_envs/aisbench_npu}"
+export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/a800_share/r50063443/vbench_models}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/vbench.yaml}"

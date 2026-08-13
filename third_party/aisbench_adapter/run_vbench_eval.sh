@@ -8,11 +8,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export LONGLIVE_VBENCH_DATA_PATH="${LONGLIVE_VBENCH_DATA_PATH:-${REPO_ROOT}/videos/benchmarks/vbench_mini_5s_vbench}"
 export LONGLIVE_VBENCH_FULL_INFO="${LONGLIVE_VBENCH_FULL_INFO:-${REPO_ROOT}/data/benchmarks/vbench_standard/5pct/full_info.json}"
-export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/weights/vbench_models/}"
+export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/a800_share/r50063443/vbench_models}"
 export AISBENCH_WORK_DIR="${AISBENCH_WORK_DIR:-${REPO_ROOT}/outputs/default}"
 
 # Restore CANN/HCCL paths before changing the C++ runtime search order.
-CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 if [[ ! -f "${CANN_ENV_SCRIPT}" ]]; then
   echo "[error] CANN environment script not found: ${CANN_ENV_SCRIPT}" >&2
   echo "        Override it with CANN_ENV_SCRIPT=/actual/path/set_env.sh" >&2
@@ -39,7 +39,7 @@ if ! NPU_IMPORT_ERROR="$(python -c 'import torch; import torch_npu; print(torch_
   echo "${NPU_IMPORT_ERROR}" >&2
   echo >&2
   echo "Source the CANN environment before running this launcher, for example:" >&2
-  echo "  source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh" >&2
+  echo "  source /mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh" >&2
   echo "Do not concatenate LD_LIBRARY_PATH entries without a separating colon." >&2
   exit 1
 fi

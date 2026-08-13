@@ -263,7 +263,7 @@ SLA+CAG 使用 `generator_adapter.pt`：先把主干 LoRA 合并到训练时使�
 ```bash
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/sla_cag.yaml \
-  --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
+  --generator_ckpt /mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
   --lora_ckpt runs/training/sla_cag_16card_200step/checkpoints/step_0000200/generator_adapter.pt \
   --output_path runs/merged/longlive2_sla_cag_200step.pt \
   --device npu:0
@@ -276,7 +276,7 @@ python scripts/checkpoints/merge_lora.py \
 ```bash
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/hsa_sla_cag.yaml \
-  --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
+  --generator_ckpt /mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
   --lora_ckpt runs/training/hsa_sla_cag_16card_200step/checkpoints/step_0000200/generator_adapter.pt \
   --output_path runs/merged/longlive2_hsa_sla_cag_lora_plus_linear_200step.pt \
   --device npu:0
@@ -288,7 +288,7 @@ linear-only 对照使用同一源配置，但必须显式覆盖训练范围：
 python scripts/checkpoints/merge_lora.py \
   --config_path configs/train/hsa_sla_cag.yaml \
   --generator_train_scope linear_only \
-  --generator_ckpt /mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
+  --generator_ckpt /mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
   --lora_ckpt runs/training/hsa_sla_cag_linear_only_12card_200step/checkpoints/step_0000200/generator_linear.pt \
   --output_path runs/merged/longlive2_hsa_sla_cag_linear_only_200step.pt \
   --device npu:0

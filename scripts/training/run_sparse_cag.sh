@@ -27,15 +27,17 @@ export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 
 # ---------- 可覆盖的路径参数 ----------
-export LONGLIVE_ROOT="${LONGLIVE_ROOT:-/mnt/share/r50063443/LongLive-oneday}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+export LONGLIVE_ROOT="${LONGLIVE_ROOT:-${REPO_ROOT}}"
+export GENERATION_ENV="${GENERATION_ENV:-/mnt/a800_share/r50063443/conda_envs/longlive}"
 if [[ ! "${SPARSE_METHOD}" =~ ^(sla_cag|hsa_cag|hsa_sla_cag)$ ]]; then
     echo "[error] SPARSE_METHOD must be sla_cag, hsa_cag, or hsa_sla_cag" >&2
     exit 2
 fi
 export CONFIG_PATH="${CONFIG_PATH:-configs/train/${SPARSE_METHOD}.yaml}"
-export MODEL_ROOT="${MODEL_ROOT:-/mnt/share/weight/Wan2.2-TI2V-5B}"
-export GENERATOR_CKPT="${GENERATOR_CKPT:-/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt}"
+export MODEL_ROOT="${MODEL_ROOT:-/mnt/a800_share/r50063443/Wan2.2-TI2V-5B}"
+export GENERATOR_CKPT="${GENERATOR_CKPT:-/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt}"
 export TRAIN_PROMPTS="${TRAIN_PROMPTS:-data/train/vidprom_filtered_extended/prompts_train.txt}"
 export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_${SPARSE_METHOD}_npu_bf16}"
 export DISABLE_WANDB="${DISABLE_WANDB:-1}"

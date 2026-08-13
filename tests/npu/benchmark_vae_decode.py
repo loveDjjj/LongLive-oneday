@@ -115,7 +115,7 @@ def main() -> None:
     parser.add_argument(
         "--model-root",
         default=os.environ.get(
-            "LONGLIVE_MODEL_ROOT", "/mnt/share/weight/Wan2.2-TI2V-5B"
+            "LONGLIVE_MODEL_ROOT", "/mnt/a800_share/r50063443/Wan2.2-TI2V-5B"
         ),
     )
     parser.add_argument("--device", default="npu:0")

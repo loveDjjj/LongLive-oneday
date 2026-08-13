@@ -58,11 +58,15 @@ configs/inference/vbench.yaml
 常用路径覆盖：
 
 ```bash
-export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
-export CANN_ENV_SCRIPT=/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-export LONGLIVE_MODEL_ROOT=/mnt/share/weight/Wan2.2-TI2V-5B
-export LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt
+export GENERATION_ENV=/mnt/a800_share/r50063443/conda_envs/longlive
+export AISBENCH_ENV=/mnt/a800_share/r50063443/conda_envs/aisbench_npu
+export VBENCH_CACHE_DIR=/mnt/a800_share/r50063443/vbench_models
+export CANN_ENV_SCRIPT=/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+export LONGLIVE_MODEL_ROOT=/mnt/a800_share/r50063443/Wan2.2-TI2V-5B
+export LONGLIVE_GENERATOR_CKPT=/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 ```
+
+评测其他合并权重时，再将 `LONGLIVE_GENERATOR_CKPT` 覆盖为对应 checkpoint 路径。
 
 `train_state.pt` 不能直接当作完整 Generator。先按照[训练指南](training.md)导出合并权重。推理加载器支持 `{"generator": state_dict}`、`{"model": state_dict}`、raw state dict，以及配置开启 EMA 时的 `generator_ema`。
 

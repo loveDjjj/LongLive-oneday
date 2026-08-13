@@ -21,19 +21,24 @@
 ## 1. 环境与代码
 
 ```bash
-cd /mnt/share/r50063443/LongLive-oneday
+cd /path/to/LongLive-oneday
 git pull origin feat/unified-sparse-attention
 git rev-parse --short HEAD
 
-source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-conda activate /mnt/share/r50063443/conda_envs/longlive
+source /mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+conda activate /mnt/a800_share/r50063443/conda_envs/longlive
 ```
 
 预期提交不低于 `d9c5597`。确认 16 张卡均可用，并设置本轮公共路径：
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export BASE_CKPT=/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+export GENERATION_ENV=/mnt/a800_share/r50063443/conda_envs/longlive
+export AISBENCH_ENV=/mnt/a800_share/r50063443/conda_envs/aisbench_npu
+export VBENCH_CACHE_DIR=/mnt/a800_share/r50063443/vbench_models
+export CANN_ENV_SCRIPT=/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+export LONGLIVE_MODEL_ROOT=/mnt/a800_share/r50063443/Wan2.2-TI2V-5B
+export BASE_CKPT=/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 export HYBRID_STEP_DIR=runs/training/hsa_sla_cag_16card_200step/checkpoints/step_0000200
 export TRAINED_CKPT=runs/merged/longlive2_hsa_sla_cag_200step.pt
 
