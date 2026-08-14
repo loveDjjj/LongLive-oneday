@@ -25,6 +25,8 @@ def set_peft_model_state_dict_for_ulysses(lora_model, lora_state_dict):
     """
     import peft
 
+    from peft.utils import save_and_load as peft_save_and_load
+
     metadata = []
     for module in lora_model.modules():
         saved = {}
@@ -35,9 +37,17 @@ def set_peft_model_state_dict_for_ulysses(lora_model, lora_state_dict):
         if saved:
             metadata.append((module, saved))
 
+    tp_shard = getattr(peft_save_and_load, "_maybe_shard_state_dict_for_tp", None)
+    if tp_shard is not None:
+        peft_save_and_load._maybe_shard_state_dict_for_tp = (
+            lambda _model, _state_dict, _adapter_name: None
+        )
+
     try:
         return peft.set_peft_model_state_dict(lora_model, lora_state_dict)
     finally:
+        if tp_shard is not None:
+            peft_save_and_load._maybe_shard_state_dict_for_tp = tp_shard
         for module, saved in metadata:
             for attribute, value in saved.items():
                 setattr(module, attribute, value)

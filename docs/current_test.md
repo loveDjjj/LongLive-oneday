@@ -50,7 +50,25 @@ python scripts/checkpoints/validate_linear_checkpoint.py \
 
 必须输出 `linear_checkpoint=passed`。正式续训前另行归档 step 200，避免其被 `MAX_CHECKPOINTS=5` 的滚动清理删除。
 
-## 3. 双节点 32 卡续训
+## 3. 单节点 16 卡立即重试
+
+先用当前已占用的 16 卡确认真实 PEFT checkpoint 可以越过 LoRA 加载并进入 step 200。该命令会直接继续正式训练，不是只加载后退出：
+
+```bash
+cd /mnt/a800_share/r50063443/LongLive-oneday
+conda activate /mnt/a800_share/r50063443/conda_envs/longlive
+source /mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+NPROC_PER_NODE=16 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
+MAX_ITERS=1000 SAVE_INTERVAL=50 MAX_CHECKPOINTS=5 VIS_INTERVAL=100 \
+TRAIN_RUN_NAME=sla_cag_16card_1000step \
+bash scripts/training/run_sla_cag.sh
+```
+
+单节点布局保持原训练的 `SP8 × DP2 × accumulation4`，有效 batch 仍为 8，因此可以恢复逐 rank RNG，并保持最接近原 200-step 训练的连续性。
+
+## 4. 双节点 32 卡续训
 
 两台机器必须访问同一个仓库和 `runs/training/sla_cag_16card_1000step/`。将下面的 `<rank0-ip>` 替换为节点 0 在双节点训练网络中的实际 IP；不要设置 `MASTER_PORT`。
 
@@ -86,7 +104,7 @@ TRAIN_RUN_NAME=sla_cag_16card_1000step \
 bash scripts/training/run_sla_cag.sh
 ```
 
-## 4. 必须确认的恢复日志
+## 5. 必须确认的恢复日志
 
 修复后的启动日志必须依次包含：
 
@@ -98,7 +116,7 @@ Restored generator and critic AdamW state from LoRA checkpoint
 Warning: training layout changed from world=16, SP=8, DP=2, batch=1, accumulation=4 to world=32, SP=8, DP=4, batch=1, accumulation=2
 ```
 
-world size 改变后，原 checkpoint 的 16 份逐 rank RNG 无法映射到 32 个 rank，因此还会出现 RNG fallback 警告。这意味着续训不保证 bitwise 一致，但有效 batch 仍保持为 `DP4 × accumulation2 = 8`。
+最后一条布局变更警告只在双节点 32 卡续训时出现。world size 改变后，原 checkpoint 的 16 份逐 rank RNG 无法映射到 32 个 rank，因此还会出现 RNG fallback 警告。这意味着双节点续训不保证 bitwise 一致，但有效 batch 仍保持为 `DP4 × accumulation2 = 8`。
 
 确认训练进入 `step 200: accumulation 1/2`，并至少完成一次 optimizer update。若仍失败，保留两个节点的：
 
