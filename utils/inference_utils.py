@@ -244,8 +244,10 @@ def apply_and_merge_lora(
     if adapter_cfg is None or not lora_ckpt:
         return False
 
-    import peft
-    from utils.lora_utils import configure_lora_for_model
+    from utils.lora_utils import (
+        configure_lora_for_model,
+        set_peft_model_state_dict_for_ulysses,
+    )
 
     if device is not None:
         pipeline.generator.to(device=torch.device(device), dtype=dtype)
@@ -282,7 +284,7 @@ def apply_and_merge_lora(
     lora_state = load_lora_state_dict(
         lora_ckpt, expected_sparse_method=sparse_method
     )
-    peft.set_peft_model_state_dict(pipeline.generator.model, lora_state)  # type: ignore[arg-type]
+    set_peft_model_state_dict_for_ulysses(pipeline.generator.model, lora_state)
 
     if verbose:
         print("[LoRA] Merging LoRA delta into base weights (merge_and_unload)...")

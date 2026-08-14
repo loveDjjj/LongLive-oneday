@@ -51,7 +51,10 @@ def main() -> None:
         load_generator_linear_checkpoint,
         load_lora_state_dict,
     )
-    from utils.lora_utils import configure_lora_for_model
+    from utils.lora_utils import (
+        configure_lora_for_model,
+        set_peft_model_state_dict_for_ulysses,
+    )
     from utils.wan_5b_wrapper import WanDiffusionWrapper
 
     config = normalize_config(OmegaConf.load(args.config_path))
@@ -109,15 +112,13 @@ def main() -> None:
             is_main_process=True,
         )
 
-        import peft
-
         print(f"Loading LoRA checkpoint: {lora_ckpt}")
-        peft.set_peft_model_state_dict(
+        set_peft_model_state_dict_for_ulysses(
             generator.model,
             load_lora_state_dict(
                 lora_ckpt, expected_sparse_method=sparse_method
             ),
-        )  # type: ignore[arg-type]
+        )
 
         print(f"Merging LoRA on {device} in {dtype}...")
         generator.to(device=device, dtype=dtype)

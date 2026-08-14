@@ -41,6 +41,7 @@ from utils.inference_utils import (
     load_generator_linear_state_dict,
     load_generator_state_dict,
 )
+from utils.lora_utils import set_peft_model_state_dict_for_ulysses
 import torch.distributed as dist
 from omegaconf import OmegaConf
 from model import DMD
@@ -341,7 +342,7 @@ class Trainer:
                             "Loading LoRA generator weights: "
                             f"{len(lora_checkpoint['generator_lora'])} keys in checkpoint"
                         )
-                    peft.set_peft_model_state_dict(
+                    set_peft_model_state_dict_for_ulysses(
                         self.model.generator.model, lora_checkpoint["generator_lora"]
                     )
                     del lora_checkpoint["generator_lora"]
@@ -361,7 +362,9 @@ class Trainer:
                         raise ValueError(f"LoRA checkpoint {lora_checkpoint_path} is missing critic_lora.")
                     if self.is_main_process:
                         print(f"Loading LoRA critic weights: {len(lora_checkpoint['critic_lora'])} keys in checkpoint")
-                    peft.set_peft_model_state_dict(self.model.fake_score.model, lora_checkpoint["critic_lora"])
+                    set_peft_model_state_dict_for_ulysses(
+                        self.model.fake_score.model, lora_checkpoint["critic_lora"]
+                    )
                     del lora_checkpoint["critic_lora"]
                 gc.collect()
 

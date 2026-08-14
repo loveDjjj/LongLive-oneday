@@ -5,7 +5,6 @@ import os
 import time
 from math import gcd
 
-import peft
 import torch
 import torch.distributed as dist
 from einops import rearrange
@@ -23,7 +22,10 @@ from utils.inference_utils import (
     load_generator_linear_checkpoint,
     load_lora_state_dict,
 )
-from utils.lora_utils import configure_lora_for_model
+from utils.lora_utils import (
+    configure_lora_for_model,
+    set_peft_model_state_dict_for_ulysses,
+)
 from utils.memory import DynamicSwapInstaller, get_cuda_free_memory_gb
 from utils.misc import set_seed
 
@@ -287,7 +289,7 @@ if has_lora_adapter:
             lora_config=config.adapter,
             is_main_process=is_main_process,
         )
-        peft.set_peft_model_state_dict(
+        set_peft_model_state_dict_for_ulysses(
             pipeline.generator.model,
             load_lora_state_dict(
                 lora_ckpt_path, expected_sparse_method=runtime_sparse_method

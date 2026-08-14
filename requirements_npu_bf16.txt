@@ -21,7 +21,8 @@ ftfy
 regex
 sentencepiece
 easydict
-peft
+# 固定已验证版本；项目兼容层会关闭不适用于 Ulysses SP 的 Hugging Face TP 加载分支。
+peft==0.19.1
 opencv-python>=4.9.0.80
 pydantic==2.10.6
 huggingface_hub[cli]

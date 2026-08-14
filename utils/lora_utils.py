@@ -14,6 +14,35 @@ from torch.distributed.fsdp import (
 )
 
 
+def set_peft_model_state_dict_for_ulysses(lora_model, lora_state_dict):
+    """Load PEFT weights without treating Ulysses metadata as HF tensor parallelism.
+
+    PEFT 0.19 enters its Hugging Face TP sharding path whenever distributed is
+    initialized and LoRA base layers expose ``_hf_tp_plan`` and
+    ``_hf_device_mesh``. LongLive uses Ulysses SP instead of HF TP, so those
+    attributes must not affect adapter loading. Preserve and restore them to
+    avoid changing the model after this compatibility boundary.
+    """
+    import peft
+
+    metadata = []
+    for module in lora_model.modules():
+        saved = {}
+        for attribute in ("_hf_tp_plan", "_hf_device_mesh"):
+            if hasattr(module, attribute):
+                saved[attribute] = getattr(module, attribute)
+                setattr(module, attribute, None)
+        if saved:
+            metadata.append((module, saved))
+
+    try:
+        return peft.set_peft_model_state_dict(lora_model, lora_state_dict)
+    finally:
+        for module, saved in metadata:
+            for attribute, value in saved.items():
+                setattr(module, attribute, value)
+
+
 def lora_target_linear_modules(transformer, adapter_target_modules):
     """返回 LoRA 目标层，原始 SLA 补偿层始终由独立优化器参数组训练。"""
     target_linear_modules = set()
@@ -109,12 +138,10 @@ def load_lora_checkpoint(lora_model, lora_state_dict, model_name, is_main_proces
         model_name: 'generator' or 'critic'
         is_main_process: Whether this is the main process (for logging)
     """
-    import peft
-
     if is_main_process:
         print(f"Loading LoRA {model_name} weights: {len(lora_state_dict)} keys in checkpoint")
     
-    peft.set_peft_model_state_dict(lora_model, lora_state_dict)
+    set_peft_model_state_dict_for_ulysses(lora_model, lora_state_dict)
     
     if is_main_process:
         print(f"LoRA {model_name} weights loaded successfully")
