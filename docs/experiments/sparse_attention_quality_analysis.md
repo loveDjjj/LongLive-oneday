@@ -1,8 +1,8 @@
-# LongLive2.0 基础权重稀疏注意力质量分析
+# LongLive2.0 稀疏注意力质量分析：基础权重与 200-step 后训练
 
 ## 1. 报告范围
 
-本文分析 LongLive2.0-5B 基础权重在四种注意力路径下的 VBench Standard 5% 质量结果：
+本文分析 LongLive2.0-5B 在 VBench Standard 5% 上的两阶段质量结果。第一阶段使用基础权重比较四种注意力路径：
 
 ```text
 dense
@@ -19,15 +19,15 @@ hsa_sla_cag
 
 该路径来自本次历史 run 的原始记录，仅用于保证实验可追溯；当前服务器默认权重路径已迁移到 `/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt`，本文不改写历史字段。
 
-因此本文衡量的是“在未进行对应稀疏后训练适配时，直接替换运行时注意力路径”的质量变化，不代表训练后 SLA 或 Hybrid 的最终质量。
+第二阶段使用完成 200 step `lora_plus_linear` 训练并导出的同一份 HSA+SLA+CAG 权重，分别运行 `dense` 与 `hsa_sla_cag`。该消融用于区分 Generator 主干 LoRA 后训练造成的变化与运行时稀疏注意力造成的额外变化。
 
 | 报告元数据 | 值 |
 | --- | --- |
-| 数据日期 | 2026-08-13 收到汇总结果 |
+| 数据日期 | 基础权重：2026-08-13；训练后权重：2026-08-13 至 2026-08-14 |
 | 仓库分支 | `feat/unified-sparse-attention` |
-| 整理时提交 | `67145af` |
+| 首次整理提交 | `67145af` |
 | 数据类型 | AISBench VBench 聚合结果 |
-| 报告状态 | 基础权重 5% 阶段性分析 |
+| 报告状态 | 基础权重与 200-step 后训练 5% 阶段性分析 |
 
 ## 2. 实验条件与可比性
 
@@ -44,6 +44,15 @@ hsa_sla_cag
 | checkpoint | 四组完全相同 |
 | 稀疏后端 | MindIE-SD RainFusion |
 | 评测器 | AISBench VBench |
+
+训练后新增两组沿用相同的 VBench preset、提示词、seed、视频长度、采样步数和 `SP2 × DP8` 布局。按实验设计，两组使用同一个导出 checkpoint：
+
+| 训练后 run | 注意力 | 评测时间 |
+| --- | --- | --- |
+| `longlive2-hybrid-200step-dense-5pct` | dense | `20260814_001749` |
+| `longlive2-hybrid-200step-hsa_sla_cag-5pct` | HSA+SLA+CAG | `20260813_172004` |
+
+严格配对结论仍要求两个 run 的 manifest、resolved YAML 和 checkpoint SHA 一致。本文依据既定测试矩阵和用户回传结果进行分析；原始运行目录是最终审计依据。
 
 基础 checkpoint 不包含后续引入的 `sla_linear` 参数。加载 SLA/Hybrid 模型结构时，代码只为缺失的 `sla_linear` 合成严格的零初始化，因此：
 
@@ -192,7 +201,7 @@ Hybrid 在 Object Class 上优于 SLA 3.33 分，但 Spatial Relationship、Imag
 | sla_cag | **1.290x** | 77.79 | <span style="color:#c00000"><strong>-5.04</strong></span> | 速度最高，但 zero-shot 质量不可接受 |
 | hsa_sla_cag | 1.268x | 77.75 | <span style="color:#c00000"><strong>-5.08</strong></span> | 比 SLA 更慢，基础权重质量未改善 |
 
-在训练后结果产生之前，HSA 是唯一同时表现出明确 DiT 加速和近似保持聚合质量的方法。SLA/Hybrid 的性能潜力更高，但必须依靠稀疏后训练恢复对象和空间语义。
+基础权重阶段，HSA 是唯一同时表现出明确 DiT 加速和近似保持聚合质量的方法。第 10 节进一步表明，200-step 后训练能够恢复 Hybrid 的部分质量，但尚未消除运行时稀疏代价。
 
 ## 9. 机制解释与证据边界
 
@@ -200,33 +209,91 @@ Hybrid 在 Object Class 上优于 SLA 3.33 分，但 Spatial Relationship、Imag
 
 > 在 LongLive2.0 基础权重、零初始化 `sla_linear`、当前默认稀疏预算和 VBench Standard 5% 条件下，SLA+CAG 与 HSA+SLA+CAG 的 Total 分别比 dense 低 5.04 和 5.08 分，退化集中于对象类别、多对象、空间关系和一致性维度。
 
-当前数据不能支持以下更强结论：
+基础权重数据单独不能支持以下更强结论：
 
-- “SLA 算法必然损失约 5 分”：训练后的非零补偿层和 LoRA 尚未纳入本组数据。
+- “SLA 算法必然损失约 5 分”：200-step 训练结果已证明损失可以部分恢复，但不能外推到其他步数、稀疏率或数据规模。
 - “HSA 与 dense 质量等价”：没有逐视频分数和置信区间，不能做等价性检验。
 - “Hybrid 不如 SLA”：两者 Total 只差 0.04 分，远小于该子集可可靠解释的尺度。
 - “Human Action 得到提升”：该指标接近满分，可能是小样本和天花板效应。
 
-## 10. 后续实验判定框架
+## 10. 200-step 后训练消融
 
-完成 200 step HSA+SLA+CAG 训练后，至少需要增加：
+### 10.1 官方聚合分数
+
+| 200-step 权重运行方式 | Quality | Semantic | Total |
+| --- | ---: | ---: | ---: |
+| dense | **85.81** | **70.88** | **82.82** |
+| HSA+SLA+CAG | 82.22 | 69.65 | 79.71 |
+| Hybrid - dense | <span style="color:#c00000"><strong>-3.59</strong></span> | <span style="color:#c00000"><strong>-1.23</strong></span> | <span style="color:#c00000"><strong>-3.12</strong></span> |
+
+训练后 dense 的 Total 为 82.82，基础权重 dense 为 82.83，观测差异仅 -0.01 分。这说明 200-step 主干 LoRA 后训练没有造成可见量级的总体质量下降，但单项指标发生了重新分布。相同训练权重切换到 Hybrid 后，Total 下降 3.12 分，因此当前剩余退化主要来自运行时稀疏路径，而不是主干 LoRA 本身。
+
+由官方结果可核验：
 
 ```text
-训练后完整权重 + dense attention
-训练后完整权重 + hsa_sla_cag attention
+Total = 0.8 × Quality + 0.2 × Semantic
 ```
 
-建议按下列差分解释：
+训练后 Hybrid 的 Total 差距中，Quality 贡献约 2.87 分，约占总差距的 92%；Semantic 贡献约 0.25 分。因此后续恢复重点应放在视觉质量、主体/背景一致性和复杂对象结构，而不是只追求 Semantic 聚合分数。
 
-| 对比 | 研究问题 |
-| --- | --- |
-| 训练后 dense - 基础 dense | 主干 LoRA 后训练本身是否导致分布漂移 |
-| 训练后 Hybrid - 训练后 dense | 同一训练权重下的运行时稀疏代价 |
-| 训练后 Hybrid - 基础 Hybrid | 200 step 适配对稀疏误差的补偿量 |
+### 10.2 全部 16 个维度及运行时稀疏差值
 
-首要恢复指标是 Object Class、Multiple Objects、Spatial Relationship、Background Consistency 和 Subject Consistency。仅恢复 Total 而这些关键维度仍大幅下降，不能认为补偿已充分。
+正值表示训练后 Hybrid 高于同 checkpoint dense，负值表示低于 dense。
 
-5% 回归通过后，应在完全相同提示词版本、seed、分辨率和采样设置下进行 20% 或 Full 复验。5% 与 20% 是独立抽样，不能把两者当作嵌套样本直接合并。
+| VBench 维度 | 训练后 dense | 训练后 Hybrid | Hybrid - dense |
+| --- | ---: | ---: | ---: |
+| Aesthetic Quality | **60.30** | 58.38 | -1.92 |
+| Appearance Style | **19.34** | 18.83 | -0.51 |
+| Background Consistency | **95.29** | 88.41 | <span style="color:#c00000"><strong>-6.88</strong></span> |
+| Color | 82.50 | **84.46** | +1.96 |
+| Dynamic Degree | **93.33** | **93.33** | 0.00 |
+| Human Action | 92.00 | **100.00** | +8.00 |
+| Imaging Quality | **65.65** | 63.59 | -2.06 |
+| Motion Smoothness | **98.63** | 98.55 | -0.08 |
+| Multiple Objects | **61.25** | 45.00 | <span style="color:#c00000"><strong>-16.25</strong></span> |
+| Object Class | **80.42** | 68.33 | <span style="color:#c00000"><strong>-12.08</strong></span> |
+| Overall Consistency | 22.96 | **23.37** | +0.41 |
+| Scene | 22.81 | **41.88** | +19.06 |
+| Spatial Relationship | **92.75** | 77.34 | <span style="color:#c00000"><strong>-15.41</strong></span> |
+| Subject Consistency | **96.64** | 90.46 | <span style="color:#c00000"><strong>-6.18</strong></span> |
+| Temporal Flickering | **99.74** | 98.81 | -0.93 |
+| Temporal Style | 25.68 | **25.75** | +0.07 |
+
+主要退化仍集中在 Multiple Objects、Spatial Relationship、Object Class、Background Consistency 和 Subject Consistency，与基础权重 Hybrid 的退化模式一致。200-step 训练降低了部分误差，但没有改变主要薄弱维度。
+
+Scene 的 +19.06 和 Human Action 的 +8.00 不应直接解释为 Hybrid 改善模型能力。训练后 dense 的 Scene 相比基础 dense 从 39.06 降至 22.81，而训练后 Hybrid 为 41.88；Human Action 又接近满分上界。这些现象更可能同时受到小样本、指标离散性、天花板效应和注意力路径差异影响，需要更大子集和逐视频结果验证。
+
+### 10.3 三组关键差分
+
+| 差分 | Quality | Semantic | Total | 解释 |
+| --- | ---: | ---: | ---: | --- |
+| 训练后 dense - 基础 dense | +0.27 | -1.11 | **-0.01** | 主干 LoRA 的总体影响近似中性 |
+| 训练后 Hybrid - 训练后 dense | <span style="color:#c00000"><strong>-3.59</strong></span> | -1.23 | <span style="color:#c00000"><strong>-3.12</strong></span> | 同权重下的运行时稀疏代价 |
+| 训练后 Hybrid - 基础 Hybrid | +1.73 | +2.86 | **+1.96** | 200-step 后训练带来的恢复 |
+
+基础权重的 Hybrid-dense Total 差距为 -5.08 分；训练后差距缩小到 -3.12 分，即约恢复 1.96 分，补回原差距的约 38.6%。分项恢复并不均衡：
+
+| 聚合项 | 基础权重差距 | 训练后差距 | 约恢复分数 | 约恢复比例 |
+| --- | ---: | ---: | ---: | ---: |
+| Quality | -5.05 | -3.59 | +1.46 | 28.9% |
+| Semantic | -5.20 | -1.23 | +3.97 | 76.3% |
+| Total | -5.08 | -3.12 | +1.96 | 38.6% |
+
+这证明 `lora_plus_linear` 训练线路具有补偿能力，但 200 step 尚不足以让约 90% 有效稀疏率的 Hybrid 接近 dense。尤其 Multiple Objects 的同权重差距仍为 -16.25 分，不能仅凭 Total 恢复就认为训练已经充分。
+
+### 10.4 当前结论与下一步
+
+当前最稳健的结论是：
+
+> 在 VBench Standard 5% 条件下，200-step HSA+SLA+CAG 后训练将 Hybrid Total 从 77.75 提升到 79.71；同一训练权重运行 dense 为 82.82，仍存在 3.12 分运行时稀疏代价。剩余损失主要集中在多对象、空间关系、对象类别和主体/背景一致性。
+
+下一步按优先级执行：
+
+1. 核对两个训练后 run 的 checkpoint SHA、manifest 和 resolved YAML，排除 checkpoint 或配置不一致。
+2. 检查推理加载日志，确认 30 层共 60 个非零 `sla_linear` 张量被加载，未落入缺失参数零初始化路径。
+3. 使用同一训练后权重补测 `hsa_cag` 与 `sla_cag`，区分 HSA 帧预筛选和 SLA block 路由各自的质量代价。
+4. 对 `0.85/0.88/0.90` 等稀疏预算做消融，判断约 90% 稀疏率是否超过复杂对象和空间关系的可恢复范围。
+5. 在确认加载链无误后扩展训练步数，并在完全相同设置下进行 20% 或 Full VBench 复验。5% 与 20% 是独立抽样，不能合并为同一统计样本。
 
 ## 11. 科研有效性与限制
 
@@ -234,7 +301,8 @@ Hybrid 在 Object Class 上优于 SLA 3.33 分，但 Spatial Relationship、Imag
 - 每组由 5 个 seed 生成 215 个视频，但当前输入只有每维聚合值，没有逐视频 evaluator 分数，因此无法计算方差、置信区间或配对显著性检验。
 - 不同维度的有效提示词数量不同，维度分数不能按同等样本量理解。
 - 本报告中的小差值，特别是 HSA Total 的 -0.03 和 SLA/Hybrid 间的 -0.04，不能过度解释。
-- SLA/Hybrid 约 5 分的 Total 下降和多个维度超过 7–24 分的下降具有较大效应量，但仍须用训练后对照和更大子集复验。
+- 训练后 dense 与 Hybrid 虽使用既定的同 checkpoint 测试设计，但报告尚未直接读取服务器 manifest 和 checkpoint SHA；推送前的本地仓库不包含服务器 run 产物。
+- 基础 SLA/Hybrid 约 5 分的 Total 下降已由训练后对照补充；200-step 训练将 Hybrid 差距缩小到 3.12 分，但仍须用更大子集复验。
 - 本报告不包含人工主观评测，不能排除自动指标与感知质量不一致。
 
 ## 附录 A：关键原始 run 与聚合数据
@@ -245,5 +313,14 @@ Hybrid 在 Object Class 上优于 SLA 3.33 分，但 Spatial Relationship、Imag
 | `longlive2-base-5pct-longlive2_standard_5pct-hsa_cag` | hsa_cag | mindiesd | 85.43 | 72.26 | **82.80** |
 | `longlive2-base-5pct-longlive2_standard_5pct-sla_cag` | sla_cag | mindiesd | 80.63 | 66.43 | 77.79 |
 | `longlive2-base-5pct-longlive2_standard_5pct-hsa_sla_cag` | hsa_sla_cag | mindiesd | 80.49 | 66.79 | 77.75 |
+| `longlive2-hybrid-200step-dense-5pct` | dense | dense | 85.81 | 70.88 | **82.82** |
+| `longlive2-hybrid-200step-hsa_sla_cag-5pct` | hsa_sla_cag | mindiesd | 82.22 | 69.65 | 79.71 |
 
-第 5 节保留全部 16 个维度的关键原始分数，第 6 节给出全部派生差值。完整 AISBench JSON、官方 summary 和逐 run manifest 应继续以 `runs/vbench/<run-id>/` 产物作为权威实验记录。
+第 5 节保留基础权重全部 16 个维度，第 6 节给出基础权重派生差值，第 10 节保留训练后全部 16 个维度及关键派生计算。完整 AISBench JSON、官方 summary 和逐 run manifest 应继续以 `runs/vbench/<run-id>/` 产物作为权威实验记录。
+
+## 附录 B：训练后官方聚合原始精度
+
+| run_id | Quality | Semantic | Total |
+| --- | ---: | ---: | ---: |
+| `longlive2-hybrid-200step-dense-5pct` | 85.81054024372492 | 70.88211757495851 | 82.82485570997163 |
+| `longlive2-hybrid-200step-hsa_sla_cag-5pct` | 82.21941098663825 | 69.65160623564537 | 79.70585003643967 |
