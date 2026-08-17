@@ -216,9 +216,7 @@ def validate_sparse_training_config(config):
     sparse = model_kwargs.get("sparse_config", {})
     require(bool(sparse.get("enabled", False)), "model_kwargs.sparse_config.enabled must be true")
     sparse_method = sparse.get("method")
-    if sparse_method is None:
-        sparse_method = "hsa_cag" if "keep_frames" in sparse else "sla_cag"
-        sparse["method"] = sparse_method
+    require(sparse_method is not None, "model_kwargs.sparse_config.method is required")
     require(
         sparse_method in {"hsa_cag", "sla_cag", "hsa_sla_cag"},
         "sparse method must be hsa_cag, sla_cag, or hsa_sla_cag",
@@ -251,6 +249,60 @@ def validate_sparse_training_config(config):
     require(int(sparse.get("query_block_batch", 0)) > 0, "sparse query_block_batch must be positive")
     require(0.0 <= float(sparse.get("sparsity", -1.0)) < 1.0, "sparse sparsity must be in [0, 1)")
     require(0.0 <= float(sparse.get("sparsity_base", -1.0)) < 1.0, "sparse sparsity_base must be in [0, 1)")
+    require(float(sparse.get("sparsity", -1.0)) == 0.85, "sparse sparsity must be 0.85 for fair comparison")
+    require(float(sparse.get("sparsity_base", -1.0)) == 0.95, "sparse sparsity_base must be 0.95 for fair comparison")
+    require(block_q == 128 and block_k == 128, "all maintained sparse methods require 128-token blocks")
+    require(bool(sparse.get("first_chunk_dense", False)), "sparse first_chunk_dense must be true")
+    require(
+        sparse.get("budget_reference") == "full_resident_kv",
+        "sparse budget_reference must be full_resident_kv",
+    )
+    require(
+        not bool(sparse.get("dense_current_blocks", True)),
+        "sparse dense_current_blocks must be false",
+    )
+    if sparse_method in {"hsa_cag", "hsa_sla_cag"}:
+        require(bool(sparse.get("protect_current_frames", False)), "HSA routing must protect current frames")
+        require(bool(sparse.get("protect_longlive_sink_frames", False)), "HSA routing must protect LongLive sink frames")
+        require(
+            int(sparse.get("keep_near_history_frames", -1)) == 4,
+            "HSA keep_near_history_frames must be 4",
+        )
+        require(
+            int(sparse.get("keep_dynamic_history_frames", -1)) == 4,
+            "HSA keep_dynamic_history_frames must be 4",
+        )
+    if sparse_method in {"sla_cag", "hsa_sla_cag"}:
+        if sparse_method == "sla_cag":
+            require(
+                int(sparse.get("hard_keep_sink_frames", -1)) == 1,
+                "SLA hard_keep_sink_frames must be 1",
+            )
+            require(
+                int(sparse.get("hard_keep_recent_frames", -1)) == 1,
+                "SLA hard_keep_recent_frames must be 1",
+            )
+        else:
+            require(
+                int(sparse.get("max_global_sink_frames", -1)) == 2,
+                "HSA-SLA max_global_sink_frames must be 2",
+            )
+            require(
+                int(sparse.get("max_shot_sink_frames", -1)) == 2,
+                "HSA-SLA max_shot_sink_frames must be 2",
+            )
+            require(
+                "hard_keep_sink_frames" not in sparse,
+                "HSA-SLA must not define hard_keep_sink_frames",
+            )
+            require(
+                "hard_keep_recent_frames" not in sparse,
+                "HSA-SLA must not define hard_keep_recent_frames",
+            )
+        require(
+            bool(sparse.get("full_kv_linear_compensation", False)),
+            "SLA full_kv_linear_compensation must be true",
+        )
 
     adapter = config.get("adapter", {})
     require(adapter.get("type") == "lora", "adapter.type must be lora")

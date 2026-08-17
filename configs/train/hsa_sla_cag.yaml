@@ -25,20 +25,32 @@ model_kwargs:
     enabled: true
     method: hsa_sla_cag
     backend: ascend_triton
-    # 与 SLA+CAG 使用相同预算：全程目标平均 90%，尾部调度基准 93%。
-    sparsity: 0.90
-    sparsity_base: 0.93
+    # 三种方法统一使用 85% 目标平均稀疏率与 95% CAG 尾部调度基准。
+    sparsity: 0.85
+    sparsity_base: 0.95
     # RainFusion 使用 128-token block；训练 kernel 内部拆为较小 tile。
     block_q: 128
     block_k: 128
     feature_map: softmax
-    # HSA 先选 8 个候选 latent 帧，其中 sink/recent 各至少保留 1 帧。
-    candidate_frames: 8
-    keep_sink_frames: 1
-    keep_recent_frames: 1
-    # 当前 chunk 也参加 SLA Top-K，避免当前 8/32 帧形成 25% 稠密下限。
-    dense_current: false
-    min_sparse_history_frames: 2
+    # 与 HSA+CAG 调用同一个 history-only frame router；当前 8 帧不参与 history quota。
+    protect_current_frames: true
+    # 直接复用 LongLive KV manager 的 global/shot sink metadata。
+    protect_longlive_sink_frames: true
+    # frame-stage 固定保留最近 4 个非 protected history frame。
+    keep_near_history_frames: 4
+    # frame-stage 从剩余 history 中按 HSA frame score 动态选择最多 4 帧。
+    keep_dynamic_history_frames: 4
+    # 当前 blocks 与候选 history blocks 共同参加 Smooth-K 全局 Top-K。
+    dense_current_blocks: false
+    # 只保留 global sink / shot sink 各前 2 帧进入候选池，避免把整个 sink chunk 都当作固定先验。
+    max_global_sink_frames: 2
+    max_shot_sink_frames: 2
+    # 首个 AR chunk 没有 history，必须执行 dense attention。
+    first_chunk_dense: true
+    # 最终 K 以完整 resident KV blocks 为分母，HSA 只限制 eligible candidate pool。
+    budget_reference: full_resident_kv
+    # 线性补偿分支始终读取完整 resident KV 统计量，不受 frame/block router 限制。
+    full_kv_linear_compensation: true
     query_block_batch: 1
     # 线性补偿使用完整 KV，推理时缓存历史统计量；路由 softmax 只读选中 blocks。
     linear_cache: true

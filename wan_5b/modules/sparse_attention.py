@@ -10,6 +10,7 @@ from typing import Any, Mapping, TypeAlias
 from .hsa_attention import HSAAttentionConfig, hsa_cag_attention
 from .hsa_sla_attention import HSASLAAttentionConfig, hsa_sla_cag_attention
 from .sla_attention import SLAAttentionConfig, sla_cag_attention
+from .sparse_routing import SparseKVLayout, reset_sparse_routing_debug
 
 
 SPARSE_METHODS = ("hsa_cag", "sla_cag", "hsa_sla_cag")
@@ -25,6 +26,7 @@ def clear_sparse_attention_cache(kv_cache) -> None:
     for block_cache in kv_cache:
         for key in SPARSE_CACHE_KEYS:
             block_cache.pop(key, None)
+    reset_sparse_routing_debug()
 
 
 def sparse_method(value: SparseConfig | None) -> str:
@@ -39,7 +41,7 @@ def sparse_method(value: SparseConfig | None) -> str:
         return "dense"
     method = str(config.get("method", "")).strip()
     if not method:
-        method = "hsa_cag" if "keep_frames" in config else "sla_cag"
+        raise ValueError("enabled sparse attention requires an explicit method.")
     if method not in SPARSE_METHODS:
         raise ValueError(
             f"unsupported sparse attention method={method!r}; choose one of {SPARSE_METHODS}"
@@ -118,24 +120,28 @@ def sparse_attention(
     chunk_id: int,
     sparse_config,
     linear_projection,
+    kv_layout: SparseKVLayout | None = None,
     attention_cache=None,
 ):
     method = sparse_method(sparse_config)
     if method == "hsa_cag":
         return hsa_cag_attention(
             q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
-            sparse_config=sparse_config, attention_cache=attention_cache,
+            sparse_config=sparse_config, kv_layout=kv_layout,
+            attention_cache=attention_cache,
         )
     if method == "sla_cag":
         return sla_cag_attention(
             q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
             sparse_config=sparse_config, linear_projection=linear_projection,
+            kv_layout=kv_layout,
             attention_cache=attention_cache,
         )
     if method == "hsa_sla_cag":
         return hsa_sla_cag_attention(
             q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
             sparse_config=sparse_config, linear_projection=linear_projection,
+            kv_layout=kv_layout,
             attention_cache=attention_cache,
         )
     raise AssertionError(f"unexpected sparse method: {method}")

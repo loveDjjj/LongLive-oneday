@@ -265,10 +265,9 @@ if has_lora_adapter:
     if is_main_process:
         print(f"[SP] Applying LoRA config: {config.adapter}")
     runtime_sparse_config = sparse_config or {}
-    runtime_sparse_method = runtime_sparse_config.get(
-        "method",
-        "hsa_cag" if "keep_frames" in runtime_sparse_config else "sla_cag",
-    )
+    runtime_sparse_method = runtime_sparse_config.get("method")
+    if not runtime_sparse_method:
+        raise ValueError("model_kwargs.sparse_config.method is required")
     lora_ckpt_path = getattr(config, "lora_ckpt", None)
     if not lora_ckpt_path:
         raise ValueError("An adapter config requires checkpoints.lora_ckpt")

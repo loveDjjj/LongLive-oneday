@@ -37,7 +37,7 @@ def test_inference_revisits_current_chunk_after_rolling_cache():
             current_end=6,
             frame_seqlen=1,
         )
-        k_full, v_full = attention._update_cache_and_get_kv(
+        k_full, v_full, kv_layout = attention._update_cache_and_get_kv(
             _tokens([40, 50]),
             _tokens([140, 150]),
             cache,
@@ -52,6 +52,9 @@ def test_inference_revisits_current_chunk_after_rolling_cache():
     assert cache["v"].flatten().tolist() == [10, 13, 140, 150]
     assert k_full.flatten().tolist() == [0, 3, 40, 50]
     assert v_full.flatten().tolist() == [10, 13, 140, 150]
+    assert kv_layout.history_frames == 2
+    assert kv_layout.current_frames == 2
+    assert kv_layout.global_sink_frames == (0,)
 
 
 def test_autograd_recompute_still_rejects_a_rolling_cache():
@@ -82,3 +85,38 @@ def test_autograd_recompute_still_rejects_a_rolling_cache():
             current_end=6,
             frame_seqlen=1,
         )
+
+
+def test_multishot_sink_metadata_follows_assembled_resident_kv():
+    attention = UlyssesCausalWanSelfAttention(
+        dim=1,
+        num_heads=1,
+        local_attn_size=4,
+        sink_size=1,
+    )
+    attention.global_sink_size = 1
+    attention.max_attention_size = 4
+    cache = {
+        "k": _tokens(range(8)),
+        "v": _tokens(range(10, 18)),
+        "global_end_index": torch.tensor([8]),
+        "local_end_index": torch.tensor([8]),
+        "pinned_start": torch.tensor([2]),
+        "pinned_len": torch.tensor([1]),
+    }
+
+    with torch.no_grad():
+        k_full, _, kv_layout = attention._update_cache_and_get_kv(
+            _tokens([60, 70]),
+            _tokens([160, 170]),
+            cache,
+            current_start=6,
+            current_end=8,
+            frame_seqlen=1,
+        )
+
+    assert k_full.flatten().tolist() == [0, 2, 60, 70]
+    assert kv_layout.history_frames == 2
+    assert kv_layout.current_frames == 2
+    assert kv_layout.global_sink_frames == (0,)
+    assert kv_layout.shot_sink_frames == (1,)

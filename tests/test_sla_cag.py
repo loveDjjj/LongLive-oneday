@@ -37,10 +37,10 @@ def _config(**overrides) -> SLAAttentionConfig:
         "block_q": 2,
         "block_k": 2,
         "feature_map": "softmax",
-        "keep_sink_frames": 1,
-        "keep_recent_frames": 1,
-        "dense_current": False,
-        "min_sparse_history_frames": 1,
+        "hard_keep_sink_frames": 1,
+        "hard_keep_recent_frames": 1,
+        "dense_current_blocks": False,
+        "first_chunk_dense": True,
     }
     values.update(overrides)
     return SLAAttentionConfig(**values)
@@ -108,15 +108,38 @@ def test_rectangular_lut_keeps_sink_and_recent_blocks():
     assert torch.all(lut[..., 1] == 5)
 
 
-def test_dense_current_is_optional_quality_mode():
-    torch.manual_seed(11)
-    q = torch.randn(1, 4, 2, 4)
-    k = torch.randn(1, 12, 2, 4)
-    config = _config(dense_current=True)
-    lut = build_sla_block_lut(
-        q, k, frame_seq=2, sparsity=config.sparsity, config=config
+def test_dense_current_blocks_is_rejected():
+    try:
+        _config(dense_current_blocks=True).validate()
+    except ValueError as error:
+        assert "dense_current_blocks=false" in str(error)
+    else:
+        raise AssertionError("expected dense current blocks to be rejected")
+
+
+def test_sla_global_block_ids_are_invariant_to_head_sharding():
+    torch.manual_seed(23)
+    q = torch.randn(1, 4, 4, 4)
+    k = torch.randn(1, 12, 4, 4)
+    config = _config(sparsity=0.5)
+    full = build_sla_block_lut(
+        q,
+        k,
+        frame_seq=2,
+        sparsity=0.5,
+        config=config,
     )
-    assert torch.all(lut[..., -2:] == torch.tensor([4, 5]))
+    shards = [
+        build_sla_block_lut(
+            q[:, :, start:start + 2],
+            k[:, :, start:start + 2],
+            frame_seq=2,
+            sparsity=0.5,
+            config=config,
+        )
+        for start in (0, 2)
+    ]
+    torch.testing.assert_close(torch.cat(shards, dim=1), full)
 
 
 def test_zero_linear_projection_matches_sparse_branch():
@@ -430,8 +453,8 @@ def test_router_matches_smooth_k_and_is_invariant_to_global_key_shift():
     k = torch.randn(1, 12, 2, 4)
     config = _config(
         sparsity=0.5,
-        keep_sink_frames=0,
-        keep_recent_frames=0,
+        hard_keep_sink_frames=0,
+        hard_keep_recent_frames=0,
     )
 
     actual = build_sla_block_lut(

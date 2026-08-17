@@ -316,11 +316,10 @@ class Trainer:
                     print(f"Loading LoRA checkpoint from {lora_checkpoint_path} (before FSDP wrapping)")
 
                 sparse_method = self.config.model_kwargs.sparse_config.get(
-                    "method",
-                    "hsa_cag"
-                    if "keep_frames" in self.config.model_kwargs.sparse_config
-                    else "sla_cag",
+                    "method"
                 )
+                if not sparse_method:
+                    raise ValueError("sparse_config.method is required")
                 validate_sparse_checkpoint_method(lora_checkpoint, sparse_method)
                 checkpoint_scope = lora_checkpoint.get(
                     "generator_train_scope", "lora"
@@ -784,10 +783,7 @@ class Trainer:
                 ),
                 "sparse_method": str(
                     self.config.model_kwargs.sparse_config.get(
-                        "method",
-                        "hsa_cag"
-                        if "keep_frames" in self.config.model_kwargs.sparse_config
-                        else "sla_cag",
+                        "method"
                     )
                 ),
                 "world_size": self.world_size,

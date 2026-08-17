@@ -4,6 +4,7 @@
 
 from transformers.models.x_clip.modeling_x_clip import x_clip_loss
 from wan_5b.modules.attention import attention
+from wan_5b.modules.sparse_routing import build_sparse_kv_layout
 from wan_5b.modules.model import (
     WanRMSNorm,
     rope_apply,
@@ -615,6 +616,16 @@ class CausalWanSelfAttention(nn.Module):
                 effective_sink = global_sink_tokens
             else:
                 effective_sink = max(global_sink_tokens, sink_tokens)
+            base_sink_tokens = (
+                global_sink_tokens
+                if global_sink_tokens > 0
+                else (effective_sink if not has_pinned else 0)
+            )
+            merged_shot_tokens = (
+                pinned_len_val
+                if has_pinned and pinned_start_val == global_sink_tokens
+                else 0
+            )
 
             # iter-39: read cache indices from _CURRENT_GRID_META (published
             # by CausalWanModel._forward_inference) to avoid 6+ `.item()`
@@ -733,6 +744,8 @@ class CausalWanSelfAttention(nn.Module):
                 has_pinned and pinned_start_val >= effective_sink
                 and pinned_start_val < window_start
             )
+            global_ranges = []
+            shot_ranges = []
 
             if prepend_sink and prepend_pinned:
                 # [global+sink] + [pinned] + [local window]
@@ -749,11 +762,20 @@ class CausalWanSelfAttention(nn.Module):
                     temp_v[:, pinned_start_val:pinned_start_val + pinned_len_val],
                     temp_v[:, local_window_start:local_end_index],
                 ], dim=1)
+                if base_sink_tokens:
+                    global_ranges.append((0, base_sink_tokens))
+                shot_ranges.append((effective_sink, effective_sink + pinned_len_val))
             elif prepend_sink:
                 effective_local_size = self.max_attention_size - effective_sink
                 local_window_start = max(effective_sink, local_end_index - effective_local_size)
                 window_k = torch.cat([temp_k[:, :effective_sink], temp_k[:, local_window_start:local_end_index]], dim=1)
                 window_v = torch.cat([temp_v[:, :effective_sink], temp_v[:, local_window_start:local_end_index]], dim=1)
+                if base_sink_tokens:
+                    global_ranges.append((0, base_sink_tokens))
+                if merged_shot_tokens:
+                    shot_ranges.append(
+                        (base_sink_tokens, base_sink_tokens + merged_shot_tokens)
+                    )
             elif prepend_pinned:
                 effective_local_size = self.max_attention_size - pinned_len_val
                 local_window_start = max(0, local_end_index - effective_local_size)
@@ -763,9 +785,42 @@ class CausalWanSelfAttention(nn.Module):
                 window_v = torch.cat(
                     [temp_v[:, pinned_start_val:pinned_start_val + pinned_len_val],
                      temp_v[:, local_window_start:local_end_index]], dim=1)
+                shot_ranges.append((0, pinned_len_val))
             else:
                 window_k = temp_k[:, window_start:local_end_index]
                 window_v = temp_v[:, window_start:local_end_index]
+                protected_source_ranges = []
+                if base_sink_tokens:
+                    protected_source_ranges.append(
+                        ("global", 0, base_sink_tokens)
+                    )
+                if merged_shot_tokens:
+                    protected_source_ranges.append(
+                        ("shot", base_sink_tokens, effective_sink)
+                    )
+                elif has_pinned:
+                    protected_source_ranges.append(
+                        (
+                            "shot",
+                            pinned_start_val,
+                            pinned_start_val + pinned_len_val,
+                        )
+                    )
+                for kind, source_start, source_end in protected_source_ranges:
+                    start = max(source_start, window_start)
+                    end = min(source_end, local_end_index)
+                    if start >= end:
+                        continue
+                    target = (start - window_start, end - window_start)
+                    (global_ranges if kind == "global" else shot_ranges).append(target)
+
+            kv_layout = build_sparse_kv_layout(
+                total_tokens=window_k.shape[1],
+                current_tokens=num_new_tokens,
+                frame_seq=frame_seqlen,
+                global_sink_token_ranges=tuple(global_ranges),
+                shot_sink_token_ranges=tuple(shot_ranges),
+            )
 
             if use_relative_rope:
                 if prepend_sink:
@@ -829,6 +884,7 @@ class CausalWanSelfAttention(nn.Module):
                         chunk_id=chunk_id,
                         sparse_config=self._sparse_config,
                         linear_projection=self.sla_linear,
+                        kv_layout=kv_layout,
                         attention_cache=(
                             None if torch.is_grad_enabled()
                             else kv_cache.setdefault("sparse_attention_cache", {})
@@ -846,6 +902,7 @@ class CausalWanSelfAttention(nn.Module):
                         chunk_id=chunk_id,
                         sparse_config=self._sparse_config,
                         linear_projection=self.sla_linear,
+                        kv_layout=kv_layout,
                         attention_cache=(
                             None if torch.is_grad_enabled()
                             else kv_cache.setdefault("sparse_attention_cache", {})

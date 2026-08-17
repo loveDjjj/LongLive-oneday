@@ -16,14 +16,14 @@
 
 | 方法 | Generator 训练范围 | 默认目标/基准稀疏率 | 主要路由 |
 | --- | --- | --- | --- |
-| `hsa_cag` | LoRA | 0.85 / 0.95 | 帧级 HSA，保留 6 帧，当前 chunk 稠密 |
-| `sla_cag` | 主干 LoRA + 原始 `sla_linear` | 0.90 / 0.93 | 对滚动 KV 全局执行 Smooth-K block Top-K |
-| `hsa_sla_cag` 主方案 | 主干 LoRA + 原始 `sla_linear` | 0.90 / 0.93 | HSA 选 8 个候选帧，SLA 再选 block |
-| `hsa_sla_cag` 对照 | 仅原始 `sla_linear` | 0.90 / 0.93 | 路由与主方案相同，隔离补偿层自身能力 |
+| `hsa_cag` | LoRA | 0.85 / 0.95 | history-only HSA frame router + 全局 block Top-K |
+| `sla_cag` | 主干 LoRA + 原始 `sla_linear` | 0.85 / 0.95 | 对完整 resident KV 全局执行 Smooth-K block Top-K |
+| `hsa_sla_cag` 主方案 | 主干 LoRA + 原始 `sla_linear` | 0.85 / 0.95 | 共享 history-only HSA router，再执行 SLA global block Top-K |
+| `hsa_sla_cag` 对照 | 仅原始 `sla_linear` | 0.85 / 0.95 | 路由与主方案相同，隔离补偿层自身能力 |
 
 Fake Critic 在三种方法中均使用 LoRA。SLA+CAG 与混合主方案的 `sla_linear` 都不包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；其余 attention 线性层使用 rank 128 LoRA。两种方法的主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率，只比较路由差异。linear-only 对照冻结 Generator 主干，仅训练混合方法相同的 60 个补偿层张量。
 
-当前 SLA+CAG 与混合方法统一使用 `0.90/0.93` CAG 预算及 `lora_plus_linear` 参数化。SLA+CAG 尚无需要兼容的旧训练产物，正式训练只维护该统一契约。
+三种方法统一使用 `0.85/0.95` CAG 预算；SLA+CAG 与 HSA+SLA+CAG 主方案统一使用 `lora_plus_linear` 参数化，HSA+CAG 维持 LoRA。SLA+CAG 尚无需要兼容的旧训练产物，正式训练只维护该统一契约。
 
 ## 2. 稀疏行为
 
@@ -31,22 +31,22 @@ LongLive2.0 最多保留 32 个 latent 帧的滚动 KV。每帧在 patch embeddi
 
 ### 2.1 HSA+CAG
 
-- HSA 先在 latent 帧层面选择历史 KV，默认保留 1 个 sink 帧、2 个相邻帧和动态选择帧，共 6 帧。
-- 当前 8 帧 chunk 默认保持稠密，因此长序列理论稀疏上限会受到当前块占比限制。
-- CAG 根据 AR rollout 位置改变稀疏预算；没有足够历史时回退 dense。
-- 正式配置使用 40-token block，与 Light Forcing 风格的帧优先路由保持一致。
+- HSA 只在 history 中选择 protected、near 4 帧和 dynamic 4 帧；current 8 帧始终进入候选 frame pool。
+- current blocks 不再 dense append，而是和候选 history blocks 一起参加全局 CAG Top-K。
+- CAG 根据 AR rollout 位置改变稀疏预算；仅首个没有 history 的 AR chunk 回退 dense，history 不足时使用全部可用 history 后继续进入 block sparse stage。
+- 训练和推理统一使用 128-token block，适配 MindIE-SD RainFusion 和 Ascend Triton 的共同执行契约。
 
 ### 2.2 SLA+CAG
 
 - 不先裁剪 latent 帧，而是对当前滚动 KV 的 128-token blocks 全局打分并 Top-K。
 - 强制保留 sink 与最近帧对应的 block。
-- 默认 `dense_current=false`，避免当前 8/32 帧将理论稀疏率限制在 75%。
+- `dense_current_blocks=false`，表示 current blocks 参加全局 Top-K；`hard_keep_*_frames` 只表示 SLA block-stage safety anchor，且占用最终 CAG K。
 - 线性注意力分支使用完整 KV 统计量，补偿稀疏 softmax 丢失的信息。
 
 ### 2.3 HSA+SLA+CAG
 
-- HSA 先保留 sink 1 帧、recent 1 帧，并按重要度补足到 8 个候选帧。
-- SLA 只在候选帧的 blocks 内执行 Smooth-K Top-K，而不是将候选帧全部计算。
+- HSA 调用与 HSA+CAG 相同的 history-only router：protected + near 4 + dynamic 4，再加入 current8；global sink / shot sink 只让前 2 帧进入候选池。
+- SLA 只在候选帧的 blocks 内执行 Smooth-K Top-K，而不是将候选帧全部计算；current blocks 不保证全部选中。
 - CAG 控制每个 AR chunk 的最终 block 预算，线性补偿仍使用完整 KV。
 - SP4、32 秒尾部形状为 `Q=7040`、`KV=28160`，当前配置通常选择约 20 至 22 个/220 个 KV blocks，即约 90% 的有效稀疏率；最终值以运行日志为准。
 

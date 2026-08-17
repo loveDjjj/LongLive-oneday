@@ -25,6 +25,7 @@ from wan_5b.modules.model import (
     rope_params,
     sinusoidal_embedding_1d,
 )
+from wan_5b.modules.sparse_routing import build_sparse_kv_layout
 from wan_5b.modules.causal_model import causal_rope_apply, MultiShotT2VCrossAttention
 from wan_5b.distributed.sp_ulysses_inference import (
     get_sp_rank,
@@ -222,7 +223,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                 ).type_as(v_heads)
 
         with NVTXRange("ulysses_cache_update"):
-            k_full, v_full = self._update_cache_and_get_kv(
+            k_full, v_full, kv_layout = self._update_cache_and_get_kv(
                 key_to_cache, v_heads, kv_cache, current_start, current_end, frame_seqlen,
             )
 
@@ -240,6 +241,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                     chunk_id=chunk_id,
                     sparse_config=self._sparse_config,
                     linear_projection=self.sla_linear,
+                    kv_layout=kv_layout,
                     attention_cache=(
                         None if torch.is_grad_enabled()
                         else kv_cache.setdefault("sparse_attention_cache", {})
@@ -282,6 +284,17 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         is_gradient_recompute = is_recompute and torch.is_grad_enabled()
 
         effective_sink, pinned_start, pinned_len, has_pinned = self._effective_sink(kv_cache, frame_seqlen)
+        global_sink_tokens = getattr(self, "global_sink_size", 0) * frame_seqlen
+        base_sink_tokens = (
+            global_sink_tokens
+            if global_sink_tokens > 0
+            else (effective_sink if not has_pinned else 0)
+        )
+        merged_shot_tokens = (
+            pinned_len
+            if has_pinned and pinned_start == global_sink_tokens
+            else 0
+        )
         need_roll = (
             self.local_attn_size != -1
             and current_end > global_end_prev
@@ -339,6 +352,8 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         window_start = max(0, local_end_new - self.max_attention_size)
         prepend_sink = effective_sink > 0 and window_start > 0
         prepend_pinned = has_pinned and pinned_start >= effective_sink and pinned_start < window_start
+        global_ranges = []
+        shot_ranges = []
 
         if prepend_sink and prepend_pinned:
             extra = effective_sink + pinned_len
@@ -354,6 +369,9 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                 kv_cache["v"][:, pinned_start:pinned_start + pinned_len],
                 kv_cache["v"][:, local_window_start:local_end_new],
             ], dim=1)
+            if base_sink_tokens:
+                global_ranges.append((0, base_sink_tokens))
+            shot_ranges.append((effective_sink, effective_sink + pinned_len))
         elif prepend_sink:
             effective_local_size = max(0, self.max_attention_size - effective_sink)
             local_window_start = max(effective_sink, local_end_new - effective_local_size)
@@ -365,6 +383,12 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                 kv_cache["v"][:, :effective_sink],
                 kv_cache["v"][:, local_window_start:local_end_new],
             ], dim=1)
+            if base_sink_tokens:
+                global_ranges.append((0, base_sink_tokens))
+            if merged_shot_tokens:
+                shot_ranges.append(
+                    (base_sink_tokens, base_sink_tokens + merged_shot_tokens)
+                )
         elif prepend_pinned:
             effective_local_size = max(0, self.max_attention_size - pinned_len)
             local_window_start = max(0, local_end_new - effective_local_size)
@@ -376,9 +400,30 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                 kv_cache["v"][:, pinned_start:pinned_start + pinned_len],
                 kv_cache["v"][:, local_window_start:local_end_new],
             ], dim=1)
+            shot_ranges.append((0, pinned_len))
         else:
             k_full = kv_cache["k"][:, window_start:local_end_new]
             v_full = kv_cache["v"][:, window_start:local_end_new]
+            protected_source_ranges = []
+            if base_sink_tokens:
+                protected_source_ranges.append(
+                    ("global", 0, base_sink_tokens)
+                )
+            if merged_shot_tokens:
+                protected_source_ranges.append(
+                    ("shot", base_sink_tokens, effective_sink)
+                )
+            elif has_pinned:
+                protected_source_ranges.append(
+                    ("shot", pinned_start, pinned_start + pinned_len)
+                )
+            for kind, source_start, source_end in protected_source_ranges:
+                start = max(source_start, window_start)
+                end = min(source_end, local_end_new)
+                if start >= end:
+                    continue
+                target = (start - window_start, end - window_start)
+                (global_ranges if kind == "global" else shot_ranges).append(target)
 
         if torch.is_grad_enabled():
             # Cache entries are state, not graph tensors. Replace the current
@@ -391,7 +436,14 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                 v_full = torch.cat(
                     [v_full[:, :-live_len].detach(), v_new[:, -live_len:]], dim=1
                 )
-        return k_full, v_full
+        kv_layout = build_sparse_kv_layout(
+            total_tokens=k_full.shape[1],
+            current_tokens=s_new,
+            frame_seq=frame_seqlen,
+            global_sink_token_ranges=tuple(global_ranges),
+            shot_sink_token_ranges=tuple(shot_ranges),
+        )
+        return k_full, v_full, kv_layout
 
 
 class UlyssesCausalWanAttentionBlock(nn.Module):

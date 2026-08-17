@@ -8,7 +8,7 @@
 - 维护的方法为 `dense`、`hsa_cag`、`sla_cag` 和 `hsa_sla_cag`。
 - 训练稀疏后端为 `ascend_triton`；推理稀疏后端默认为 MindIE-SD RainFusion。未经真实 NPU 验证，不得把实验后端改为默认值。
 - LongLive2.0 的滚动 KV 窗口为 32 个 latent 帧。改变窗口长度属于模型行为变更，必须重新训练和评测，不能作为普通推理参数优化。
-- SLA 与混合方法默认使用相同的 CAG 目标/基准稀疏率 `0.90/0.93`，用于公平比较路由差异。
+- 三种稀疏方法默认使用相同的 CAG 目标/基准稀疏率 `0.85/0.95`，用于公平比较路由差异。
 - SLA+CAG 与 HSA+SLA+CAG 默认训练范围均为 `lora_plus_linear`：主干使用 LoRA，原始 `sla_linear` 直接训练且不得包装 LoRA；`linear_only` 只作为混合方法隔离补偿层能力的对照。
 
 ## 2. 开始任务前
@@ -30,7 +30,7 @@
 ## 4. 配置规范
 
 - 所有 YAML 配置必须使用中文注释说明用途、单位、默认行为和关键约束。
-- 稀疏配置至少解释：`sparsity`、`sparsity_base`、block 大小、固定保留策略、`dense_current`、最小历史长度、缓存和后端。
+- 稀疏配置至少解释：`sparsity`、`sparsity_base`、128-token block、frame-stage protected 策略、block-stage hard anchor、`dense_current_blocks`、首 chunk 行为、缓存和后端。
 - 训练配置至少解释：并行布局、训练范围、有效 batch、更新频率、checkpoint、数据形状和训练内验证。
 - 推理配置至少解释：模型路径、帧数换算、SP/DP、VAE 模式、预热、profiler 参数和稀疏 profile。
 - 修改配置默认值时，必须同步 dataclass 默认值、配置解析测试、NPU benchmark 默认值和中文文档。

@@ -14,11 +14,17 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
+
+from .sparse_routing import (
+    SparseKVLayout,
+    cached_arange,
+    emit_sparse_routing_debug,
+    resolve_global_block_budget,
+)
 
 
 _ASCEND_BLHD_INFERENCE = os.environ.get("LONGLIVE_SLA_BLHD_INFERENCE", "1") == "1"
@@ -29,30 +35,24 @@ def _device_key(device: torch.device) -> tuple[str, int | None]:
     return device.type, device.index
 
 
-@lru_cache(maxsize=128)
-def _cached_arange(
-    device_type: str,
-    device_index: int | None,
-    start: int,
-    end: int,
-) -> torch.Tensor:
-    return torch.arange(start, end, device=torch.device(device_type, device_index))
+_cached_arange = cached_arange
 
 
 @dataclass(frozen=True)
 class SLAAttentionConfig:
     enabled: bool = False
     backend: str = "portable"
-    # 与 HSA+SLA+CAG 使用相同 CAG 预算，便于隔离帧候选机制的影响。
-    sparsity: float = 0.90
-    sparsity_base: float = 0.93
-    block_q: int = 64
-    block_k: int = 64
+    sparsity: float = 0.85
+    sparsity_base: float = 0.95
+    block_q: int = 128
+    block_k: int = 128
     feature_map: str = "softmax"
-    keep_sink_frames: int = 1
-    keep_recent_frames: int = 1
-    dense_current: bool = False
-    min_sparse_history_frames: int = 1
+    hard_keep_sink_frames: int = 1
+    hard_keep_recent_frames: int = 1
+    dense_current_blocks: bool = False
+    first_chunk_dense: bool = True
+    budget_reference: str = "full_resident_kv"
+    full_kv_linear_compensation: bool = True
     query_block_batch: int = 1
     linear_cache: bool = True
     linear_eps: float = 1.0e-5
@@ -66,6 +66,15 @@ class SLAAttentionConfig:
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "SLAAttentionConfig":
         if not value:
             return cls()
+        removed = {
+            "keep_sink_frames", "keep_recent_frames", "dense_current",
+            "min_sparse_history_frames",
+        }
+        stale = removed.intersection(value)
+        if stale:
+            raise ValueError(
+                "removed SLA config fields: " + ", ".join(sorted(stale))
+            )
         aliases = {"BLKQ": "block_q", "BLKK": "block_k", "topk": "topk"}
         normalized: dict[str, Any] = {}
         raw = dict(value)
@@ -109,8 +118,16 @@ class SLAAttentionConfig:
                 raise ValueError(f"{name} must be in [0, 1), got {value}.")
         if self.block_q <= 0 or self.block_k <= 0:
             raise ValueError("block_q and block_k must be positive.")
-        if min(self.keep_sink_frames, self.keep_recent_frames) < 0:
+        if min(self.hard_keep_sink_frames, self.hard_keep_recent_frames) < 0:
             raise ValueError("SLA frame keep counts must be non-negative.")
+        if self.enabled and self.dense_current_blocks:
+            raise ValueError("SLA requires dense_current_blocks=false.")
+        if self.enabled and not self.first_chunk_dense:
+            raise ValueError("SLA requires first_chunk_dense=true.")
+        if self.budget_reference != "full_resident_kv":
+            raise ValueError("SLA budget_reference must be full_resident_kv.")
+        if self.enabled and not self.full_kv_linear_compensation:
+            raise ValueError("SLA requires full_kv_linear_compensation=true.")
         if self.feature_map not in {"softmax", "elu", "relu"}:
             raise ValueError("feature_map must be softmax, elu, or relu.")
         if self.query_block_batch <= 0:
@@ -378,6 +395,7 @@ def build_sla_block_lut(
     frame_seq: int,
     sparsity: float,
     config: SLAAttentionConfig,
+    kv_layout: SparseKVLayout | None = None,
     cache: dict[str, Any] | None = None,
     cache_token: Any = None,
 ) -> torch.Tensor:
@@ -433,14 +451,16 @@ def build_sla_block_lut(
         key_blocks=key_count,
         frame_seq=frame_seq,
         block_k=config.block_k,
-        keep_sink_frames=config.keep_sink_frames,
-        keep_recent_frames=config.keep_recent_frames,
+        keep_sink_frames=config.hard_keep_sink_frames,
+        keep_recent_frames=config.hard_keep_recent_frames,
         device=q.device,
     )
-    if config.dense_current:
-        fixed_mask[history_count:] = True
-    selected_count = max(1, math.ceil((1.0 - sparsity) * key_count))
     fixed_ids = torch.nonzero(fixed_mask, as_tuple=False).flatten()
+    selected_count = resolve_global_block_budget(
+        sparsity=sparsity,
+        full_block_count=key_count,
+        candidate_block_count=key_count,
+    )
     selected_count = min(key_count, max(selected_count, fixed_ids.numel()))
 
     with torch.no_grad():
@@ -467,6 +487,24 @@ def build_sla_block_lut(
                 )
             selected = torch.cat(parts, dim=-1)
         selected = torch.sort(selected, dim=-1).values
+
+    layout = kv_layout or SparseKVLayout.contiguous(
+        k.shape[1] // frame_seq, q.shape[1] // frame_seq
+    )
+    eligible = torch.ones(
+        batch, heads, query_count, key_count,
+        dtype=torch.bool, device=q.device,
+    )
+    emit_sparse_routing_debug(
+        method="sla_cag",
+        chunk_id=int(cache_token or 0),
+        layout=layout,
+        frame_seq=frame_seq,
+        block_k=config.block_k,
+        sparsity=sparsity,
+        block_lut=selected,
+        eligible_blocks=eligible,
+    )
 
     return selected.contiguous()
 
@@ -634,6 +672,7 @@ def sla_cag_attention(
     chunk_id: int,
     sparse_config: Mapping[str, Any] | SLAAttentionConfig | None,
     linear_projection: torch.nn.Module,
+    kv_layout: SparseKVLayout | None = None,
     attention_cache: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     """Run rectangular SLA+CAG on BLHD query and rolling cached KV tensors."""
@@ -656,13 +695,8 @@ def sla_cag_attention(
         raise ValueError("q/k lengths must be divisible by the configured SLA blocks.")
 
     history_tokens = k.shape[1] - q.shape[1]
-    history_frames = history_tokens // frame_seq
     sparsity = resolve_chunk_sparsity(config, chunk_id)
-    if (
-        history_tokens <= 0
-        or history_frames < config.min_sparse_history_frames
-        or sparsity <= 0
-    ):
+    if history_tokens <= 0 or sparsity <= 0:
         return _dense_attention(q, k, v, config.softmax_scale)
 
     router_cache = None if attention_cache is None else attention_cache.setdefault("router", {})
@@ -673,6 +707,7 @@ def sla_cag_attention(
         frame_seq=frame_seq,
         sparsity=sparsity,
         config=config,
+        kv_layout=kv_layout,
         cache=router_cache,
         cache_token=chunk_id,
     )

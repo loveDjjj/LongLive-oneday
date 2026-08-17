@@ -4,19 +4,22 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
 
-from .hsa_attention import _cached_frame_block_overlap, _required_history_frames
 from .sla_attention import (
-    _cached_arange,
     _dense_attention,
-    _fixed_key_blocks,
     _projected_linear_attention,
     _run_sparse_backend,
+)
+from .sparse_routing import (
+    SparseKVLayout,
+    candidate_block_mask,
+    emit_sparse_routing_debug,
+    resolve_global_block_budget,
+    select_hsa_history_frames,
 )
 
 
@@ -24,16 +27,21 @@ from .sla_attention import (
 class HSASLAAttentionConfig:
     enabled: bool = False
     backend: str = "portable"
-    sparsity: float = 0.90
-    sparsity_base: float = 0.93
+    sparsity: float = 0.85
+    sparsity_base: float = 0.95
     block_q: int = 128
     block_k: int = 128
     feature_map: str = "softmax"
-    candidate_frames: int = 8
-    keep_sink_frames: int = 1
-    keep_recent_frames: int = 1
-    dense_current: bool = False
-    min_sparse_history_frames: int = 2
+    protect_current_frames: bool = True
+    protect_longlive_sink_frames: bool = True
+    keep_near_history_frames: int = 4
+    keep_dynamic_history_frames: int = 4
+    dense_current_blocks: bool = False
+    max_global_sink_frames: int = 2
+    max_shot_sink_frames: int = 2
+    first_chunk_dense: bool = True
+    budget_reference: str = "full_resident_kv"
+    full_kv_linear_compensation: bool = True
     query_block_batch: int = 1
     linear_cache: bool = True
     linear_eps: float = 1.0e-5
@@ -49,7 +57,17 @@ class HSASLAAttentionConfig:
     ) -> "HSASLAAttentionConfig":
         if not value:
             return cls()
-        aliases = {"BLKQ": "block_q", "BLKK": "block_k", "keep_frames": "candidate_frames"}
+        aliases = {"BLKQ": "block_q", "BLKK": "block_k"}
+        removed = {
+            "candidate_frames", "keep_frames", "keep_sink_frames",
+            "keep_recent_frames", "dense_current", "min_sparse_history_frames",
+            "hard_keep_sink_frames", "hard_keep_recent_frames",
+        }
+        stale = removed.intersection(value)
+        if stale:
+            raise ValueError(
+                "removed HSA-SLA config fields: " + ", ".join(sorted(stale))
+            )
         normalized = {}
         for key, item in dict(value).items():
             key = aliases.get(key, key)
@@ -82,14 +100,25 @@ class HSASLAAttentionConfig:
                 raise ValueError(f"{name} must be in [0, 1), got {value}.")
         if self.block_q <= 0 or self.block_k <= 0:
             raise ValueError("block_q and block_k must be positive.")
-        if self.candidate_frames <= 0:
-            raise ValueError("candidate_frames must be positive.")
-        if min(self.keep_sink_frames, self.keep_recent_frames) < 0:
+        if min(
+            self.keep_near_history_frames,
+            self.keep_dynamic_history_frames,
+            self.max_global_sink_frames,
+            self.max_shot_sink_frames,
+        ) < 0:
             raise ValueError("fixed frame counts must be non-negative.")
-        if self.keep_sink_frames + self.keep_recent_frames > self.candidate_frames:
-            raise ValueError(
-                "keep_sink_frames + keep_recent_frames must not exceed candidate_frames."
-            )
+        if self.enabled and not self.protect_current_frames:
+            raise ValueError("HSA-SLA requires protect_current_frames=true.")
+        if self.enabled and not self.protect_longlive_sink_frames:
+            raise ValueError("HSA-SLA requires protect_longlive_sink_frames=true.")
+        if self.enabled and self.dense_current_blocks:
+            raise ValueError("HSA-SLA requires dense_current_blocks=false.")
+        if self.enabled and not self.first_chunk_dense:
+            raise ValueError("HSA-SLA requires first_chunk_dense=true.")
+        if self.budget_reference != "full_resident_kv":
+            raise ValueError("HSA-SLA budget_reference must be full_resident_kv.")
+        if self.enabled and not self.full_kv_linear_compensation:
+            raise ValueError("HSA-SLA requires full_kv_linear_compensation=true.")
         if self.feature_map not in {"softmax", "elu", "relu"}:
             raise ValueError("feature_map must be softmax, elu, or relu.")
         if self.query_block_batch <= 0 or self.linear_eps <= 0:
@@ -107,6 +136,7 @@ def build_hsa_sla_block_lut(
     frame_seq: int,
     sparsity: float,
     config: HSASLAAttentionConfig,
+    kv_layout: SparseKVLayout | None = None,
     cache: dict[str, Any] | None = None,
     cache_token: Any = None,
 ) -> torch.Tensor:
@@ -116,10 +146,13 @@ def build_hsa_sla_block_lut(
     history_tokens = key_tokens - query_tokens
     query_count = query_tokens // config.block_q
     key_count = key_tokens // config.block_k
-    key_frames = key_tokens // frame_seq
     history_blocks = history_tokens // config.block_k
-    history_frames = history_tokens // frame_seq
-    device_type, device_index = q.device.type, q.device.index
+    current_frames = query_tokens // frame_seq
+    layout = kv_layout or SparseKVLayout.contiguous(
+        key_tokens // frame_seq, current_frames
+    )
+    if layout.history_frames != history_tokens // frame_seq:
+        raise ValueError("KV layout history does not match HSA-SLA tensors.")
 
     q_blocks_blhd = q.reshape(
         batch, query_count, config.block_q, heads, dim
@@ -134,7 +167,7 @@ def build_hsa_sla_block_lut(
     if cached is None:
         history_k = k[:, :history_tokens]
         history_frame_keys = history_k.reshape(
-            batch, history_frames, frame_seq, heads, dim
+            batch, layout.history_frames, frame_seq, heads, dim
         ).mean(dim=2)
         history_block_keys = history_k.reshape(
             batch, history_blocks, config.block_k, heads, dim
@@ -152,80 +185,64 @@ def build_hsa_sla_block_lut(
         history_frame_keys = cached["history_frame_keys"]
         history_block_keys = cached["history_block_keys"]
 
-    current_k = k[:, history_tokens:]
-    current_frames = current_k.shape[1] // frame_seq
-    current_blocks = current_k.shape[1] // config.block_k
-    current_frame_keys = current_k.reshape(
-        batch, current_frames, frame_seq, heads, dim
-    ).mean(dim=2)
-    current_block_keys = current_k.reshape(
-        batch, current_blocks, config.block_k, heads, dim
+    current_block_keys = k[:, history_tokens:].reshape(
+        batch, key_count - history_blocks, config.block_k, heads, dim
     ).mean(dim=2).permute(0, 2, 1, 3)
-    frame_keys = torch.cat((history_frame_keys, current_frame_keys), dim=1)
     block_keys = torch.cat((history_block_keys, current_block_keys), dim=2)
 
-    # Reuse HSA's fixed sink/near plus dynamic frame selection over resident KV.
-    frame_config = type(
-        "FrameConfig",
-        (),
-        {
-            "keep_frames": config.candidate_frames,
-            "keep_sink": config.keep_sink_frames,
-            "keep_near": config.keep_recent_frames,
-        },
-    )()
     with torch.no_grad():
-        frame_ids = _required_history_frames(
-            q_blocks_blhd.detach(), k.detach(), key_frames, frame_seq,
-            frame_config, frame_keys,
+        selection = select_hsa_history_frames(
+            q_frame_repr=q_blocks_blhd,
+            history_frame_repr=history_frame_keys,
+            layout=layout,
+            keep_near_history_frames=config.keep_near_history_frames,
+            keep_dynamic_history_frames=config.keep_dynamic_history_frames,
+            max_global_sink_frames=config.max_global_sink_frames,
+            max_shot_sink_frames=config.max_shot_sink_frames,
         )
-        overlap = _cached_frame_block_overlap(
-            device_type, device_index, key_frames, frame_seq, config.block_k,
-            key_count,
+        eligible = candidate_block_mask(
+            selected_history_frame_ids=selection.frame_ids,
+            layout=layout,
+            frame_seq=frame_seq,
+            block_k=config.block_k,
+            block_count=key_count,
         )
-        eligible = overlap[frame_ids].any(dim=-2)
 
         # SLA Smooth-K: center representatives before QK block scoring.
         smooth_keys = block_keys - block_keys.mean(dim=2, keepdim=True)
         scores = torch.matmul(q_blocks.detach(), smooth_keys.transpose(-1, -2))
         scores.masked_fill_(~eligible, float("-inf"))
 
-        fixed_mask = _fixed_key_blocks(
-            key_tokens=key_tokens,
-            key_blocks=key_count,
-            frame_seq=frame_seq,
-            block_k=config.block_k,
-            keep_sink_frames=config.keep_sink_frames,
-            keep_recent_frames=config.keep_recent_frames,
-            device=q.device,
-        )
-        if config.dense_current:
-            current_count = query_tokens // config.block_k
-            fixed_mask[key_count - current_count :] = True
-        fixed_ids = torch.nonzero(fixed_mask, as_tuple=False).flatten()
-        selected_count = max(1, math.ceil((1.0 - sparsity) * key_count))
-        selected_count = min(key_count, max(selected_count, fixed_ids.numel()))
-        dynamic_count = selected_count - fixed_ids.numel()
-        minimum_candidate_blocks = min(
+        candidate_capacity = min(
             key_count,
-            math.ceil(min(config.candidate_frames, key_frames) * frame_seq / config.block_k),
+            (
+                (selection.selected_history_count + layout.current_frames) * frame_seq
+                + config.block_k
+                - 1
+            )
+            // config.block_k
         )
-        if selected_count > minimum_candidate_blocks:
-            raise ValueError(
-                f"candidate_frames={config.candidate_frames} cannot cover the CAG "
-                f"budget of {selected_count} blocks; increase candidate_frames or sparsity"
-            )
-        parts = []
-        if fixed_ids.numel():
-            parts.append(
-                fixed_ids.view(1, 1, 1, -1).expand(
-                    batch, heads, query_count, -1
-                )
-            )
-            scores[..., fixed_ids] = float("-inf")
-        if dynamic_count:
-            parts.append(torch.topk(scores, dynamic_count, dim=-1, sorted=False).indices)
-        selected = torch.sort(torch.cat(parts, dim=-1), dim=-1).values
+        selected_count = resolve_global_block_budget(
+            sparsity=sparsity,
+            full_block_count=key_count,
+            candidate_block_count=candidate_capacity,
+        )
+        selected_count = min(candidate_capacity, selected_count)
+        selected = torch.topk(
+            scores, selected_count, dim=-1, sorted=False
+        ).indices
+        selected = torch.sort(selected, dim=-1).values
+    emit_sparse_routing_debug(
+        method="hsa_sla_cag",
+        chunk_id=int(cache_token or 0),
+        layout=layout,
+        frame_seq=frame_seq,
+        block_k=config.block_k,
+        sparsity=sparsity,
+        block_lut=selected,
+        eligible_blocks=eligible,
+        selection=selection,
+    )
     return selected.contiguous()
 
 
@@ -238,6 +255,7 @@ def hsa_sla_cag_attention(
     chunk_id: int,
     sparse_config: Mapping[str, Any] | HSASLAAttentionConfig | None,
     linear_projection: torch.nn.Module,
+    kv_layout: SparseKVLayout | None = None,
     attention_cache: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     config = (
@@ -257,17 +275,17 @@ def hsa_sla_cag_attention(
         raise ValueError("q/k lengths must be divisible by configured blocks.")
 
     history_tokens = k.shape[1] - q.shape[1]
-    history_frames = history_tokens // frame_seq
     sparsity = config.sparsity_list[
         min(chunk_id, len(config.sparsity_list) - 1)
     ] if config.sparsity_list else (0.0 if chunk_id <= 0 else config.sparsity)
-    if history_tokens <= 0 or history_frames < config.min_sparse_history_frames or sparsity <= 0:
+    if history_tokens <= 0 or sparsity <= 0:
         return _dense_attention(q, k, v, config.softmax_scale)
 
     router_cache = None if attention_cache is None else attention_cache.setdefault("router", {})
     linear_cache = None if attention_cache is None else attention_cache.setdefault("linear", {})
     block_lut = build_hsa_sla_block_lut(
         q, k, frame_seq=frame_seq, sparsity=sparsity, config=config,
+        kv_layout=kv_layout,
         cache=router_cache, cache_token=chunk_id,
     )
     sparse_output = _run_sparse_backend(q, k, v, block_lut, config)

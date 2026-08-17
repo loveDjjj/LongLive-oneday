@@ -91,38 +91,42 @@ def _config(method: str, backend: str, latent_frames: int):
                 **common,
                 "sparsity": 0.85,
                 "sparsity_base": 0.95,
-                "keep_frames": 6,
-                "keep_sink": 1,
-                "keep_near": 2,
-                "dense_current": True,
-                "min_sparse_history_frames": 2,
+                "protect_current_frames": True,
+                "protect_longlive_sink_frames": True,
+                "keep_near_history_frames": 4,
+                "keep_dynamic_history_frames": 4,
+                "dense_current_blocks": False,
+                "first_chunk_dense": True,
             }
         )
     if method == "hsa_sla_cag":
         return HSASLAAttentionConfig.from_mapping(
             {
                 **common,
-                "sparsity": 0.90,
-                "sparsity_base": 0.93,
+                "sparsity": 0.85,
+                "sparsity_base": 0.95,
                 "feature_map": "softmax",
-                "candidate_frames": 8,
-                "keep_sink_frames": 1,
-                "keep_recent_frames": 1,
-                "dense_current": False,
-                "min_sparse_history_frames": 2,
+                "protect_current_frames": True,
+                "protect_longlive_sink_frames": True,
+                "keep_near_history_frames": 4,
+                "keep_dynamic_history_frames": 4,
+                "dense_current_blocks": False,
+                "max_global_sink_frames": 2,
+                "max_shot_sink_frames": 2,
+                "first_chunk_dense": True,
                 "linear_cache": True,
             }
         )
     return SLAAttentionConfig.from_mapping(
         {
             **common,
-            "sparsity": 0.90,
-            "sparsity_base": 0.93,
+            "sparsity": 0.85,
+            "sparsity_base": 0.95,
             "feature_map": "softmax",
-            "keep_sink_frames": 1,
-            "keep_recent_frames": 1,
-            "dense_current": False,
-            "min_sparse_history_frames": 1,
+            "hard_keep_sink_frames": 1,
+            "hard_keep_recent_frames": 1,
+            "dense_current_blocks": False,
+            "first_chunk_dense": True,
             "linear_cache": True,
         }
     )

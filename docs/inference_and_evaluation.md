@@ -76,19 +76,19 @@ LongLive2.0 采用 32 个 latent 帧的滚动 KV 窗口，每个 AR chunk 生成
 
 ### 4.1 HSA+CAG
 
-HSA 先在 latent 帧层面筛选历史，默认保留 6 帧，其中包含 1 个 sink 帧、2 个相邻帧和动态重要帧；当前 8 帧保持 dense。之后只对保留帧对应的 blocks 计算注意力。CAG 根据 AR chunk 位置调整目标预算，默认目标/基准稀疏率为 `0.85/0.95`。
+HSA 只在 history 中选择 LongLive protected sink、最近 4 帧和最多 4 个动态重要帧；current8 始终进入 candidate，但 current blocks 不再 dense append。之后候选 history/current blocks 共同参加全局 Top-K，默认目标/基准稀疏率为 `0.85/0.95`。
 
 ### 4.2 SLA+CAG
 
-SLA 不先丢弃 latent 帧，而是对滚动 KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink 与 recent 帧 blocks 强制保留，当前 chunk 默认也参与稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.90/0.93`，与混合方法一致，以保证两种路由的性能和质量对比使用相同预算。
+SLA 不裁剪 latent 帧，而是对完整 resident KV 中所有 128-token blocks 计算 Smooth-K 代表并全局 Top-K。sink/recent hard anchor 强制保留并占用最终 K，current 其余 blocks 参加稀疏。完整 KV 同时进入线性统计分支作为补偿。默认目标/基准稀疏率为 `0.85/0.95`。
 
 ### 4.3 HSA+SLA+CAG
 
-混合方法先由 HSA 将 32 帧缩小为 8 个候选帧，再由 SLA 在候选帧的 blocks 中继续 Top-K，最终只计算选中 blocks 的稀疏 softmax；线性补偿仍覆盖完整 KV。默认目标/基准稀疏率为 `0.90/0.93`。
+混合方法先调用 history-only HSA router，再将 current8 加入 candidate；global sink / shot sink 只让前 2 帧进入候选池。随后由 SLA 在候选 blocks 中执行 Smooth-K Top-K；最终只计算选中 blocks 的稀疏 softmax，线性补偿仍覆盖完整 KV。默认目标/基准稀疏率为 `0.85/0.95`。
 
-SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。混合方法当前通常选中约 20 至 22 个/220 个 KV blocks，即约 90% 有效稀疏率。CAG 会使不同 chunk 的实际值变化，必须以 `selected/total` 日志为准，不能只引用配置中的目标值。
+SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。在 128-frame、`0.85/0.95` CAG schedule 尾部，理论预算约为 26/220 个 KV blocks；最终值还会受 candidate clamp 影响，必须以运行日志为准。
 
-第一块或历史不足时会回退 dense。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
+第一块没有 history 时统一回退 dense。history 不足时保留全部可用 history，并继续进入 block sparse stage。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
 
 ### 4.4 物理稀疏边界
 

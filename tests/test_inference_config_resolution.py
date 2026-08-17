@@ -121,7 +121,11 @@ def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     assert sparse.block_q == 128
     assert sparse.block_k == 128
     assert sparse.feature_map == "softmax"
-    assert sparse.sparsity == 0.90
+    assert sparse.sparsity == 0.85
+    assert sparse.sparsity_base == 0.95
+    assert sparse.first_chunk_dense is True
+    assert sparse.budget_reference == "full_resident_kv"
+    assert sparse.full_kv_linear_compensation is True
     assert metadata["sparsity_method"] == "sla_cag"
     assert metadata["sparsity_backend"] == "mindiesd"
 
@@ -139,9 +143,14 @@ def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
     assert sparse.enabled is True
     assert sparse.method == "hsa_cag"
     assert sparse.backend == "mindiesd"
-    assert sparse.keep_frames == 6
-    assert sparse.keep_sink == 1
-    assert sparse.keep_near == 2
+    assert sparse.keep_near_history_frames == 4
+    assert sparse.keep_dynamic_history_frames == 4
+    assert sparse.protect_current_frames is True
+    assert sparse.protect_longlive_sink_frames is True
+    assert sparse.dense_current_blocks is False
+    assert sparse.first_chunk_dense is True
+    assert sparse.budget_reference == "full_resident_kv"
+    assert "full_kv_linear_compensation" not in sparse
     assert "feature_map" not in sparse
     assert metadata["sparsity_method"] == "hsa_cag"
 
@@ -156,13 +165,19 @@ def test_vbench_hybrid_selects_frame_filtered_sla_profile(tmp_path, monkeypatch)
     sparse = OmegaConf.load(output).model_kwargs.sparse_config
 
     assert sparse.method == "hsa_sla_cag"
-    assert sparse.sparsity == 0.90
-    assert sparse.sparsity_base == 0.93
-    assert sparse.candidate_frames == 8
-    assert sparse.keep_sink_frames == 1
-    assert sparse.keep_recent_frames == 1
+    assert sparse.sparsity == 0.85
+    assert sparse.sparsity_base == 0.95
+    assert sparse.keep_near_history_frames == 4
+    assert sparse.keep_dynamic_history_frames == 4
+    assert sparse.max_global_sink_frames == 2
+    assert sparse.max_shot_sink_frames == 2
+    assert "hard_keep_sink_frames" not in sparse
+    assert "hard_keep_recent_frames" not in sparse
+    assert sparse.first_chunk_dense is True
+    assert sparse.budget_reference == "full_resident_kv"
+    assert sparse.full_kv_linear_compensation is True
     assert sparse.linear_cache is True
-    assert "keep_frames" not in sparse
+    assert "candidate_frames" not in sparse
     assert metadata["sparsity_method"] == "hsa_sla_cag"
 
 

@@ -257,9 +257,9 @@ def apply_and_merge_lora(
     if verbose:
         print(f"[LoRA] Wrapping generator with adapter config: {adapter_cfg}")
     sparse_config = getattr(getattr(config, "model_kwargs", None), "sparse_config", {})
-    sparse_method = sparse_config.get(
-        "method", "hsa_cag" if "keep_frames" in sparse_config else "sla_cag"
-    )
+    sparse_method = sparse_config.get("method")
+    if not sparse_method:
+        raise ValueError("model_kwargs.sparse_config.method is required")
     generator_train_scope = str(getattr(config, "generator_train_scope", "lora"))
     if generator_train_scope == "linear_only":
         load_generator_linear_checkpoint(

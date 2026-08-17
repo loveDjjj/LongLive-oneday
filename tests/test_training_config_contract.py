@@ -63,6 +63,10 @@ class TrainingConfigContractTest(unittest.TestCase):
                     self.assertEqual(validated.max_checkpoints, 5)
                     self.assertEqual(validated.max_iters, 200)
                     self.assertEqual(validated.dfake_gen_update_ratio, 1)
+                if method == "hsa_sla_cag":
+                    sparse = validated.model_kwargs.sparse_config
+                    self.assertEqual(sparse.max_global_sink_frames, 2)
+                    self.assertEqual(sparse.max_shot_sink_frames, 2)
 
     def test_hybrid_linear_only_override_remains_supported(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

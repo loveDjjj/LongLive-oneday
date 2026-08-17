@@ -63,43 +63,58 @@ sparsity:
   profiles:
     hsa_cag:
       backend: mindiesd
+      # 三种方法使用相同 CAG 目标/基准，避免预算差异污染路由对比。
       sparsity: 0.85
       sparsity_base: 0.95
       block_q: 128
       block_k: 128
-      keep_frames: 6
-      keep_sink: 1
-      keep_near: 2
-      dense_current: true
-      min_sparse_history_frames: 2
+      # 第一层只选择 history；current8 与 LongLive sink frame 始终进入候选池。
+      protect_current_frames: true
+      protect_longlive_sink_frames: true
+      keep_near_history_frames: 4
+      keep_dynamic_history_frames: 4
+      # current frame 内部 blocks 仍参加最终全局 CAG Top-K。
+      dense_current_blocks: false
+      first_chunk_dense: true
+      budget_reference: full_resident_kv
       query_block_batch: 1
     hsa_sla_cag:
       backend: mindiesd
-      sparsity: 0.90
-      sparsity_base: 0.93
+      sparsity: 0.85
+      sparsity_base: 0.95
       block_q: 128
       block_k: 128
       feature_map: softmax
-      candidate_frames: 8
-      keep_sink_frames: 1
-      keep_recent_frames: 1
-      dense_current: false
-      min_sparse_history_frames: 2
+      protect_current_frames: true
+      protect_longlive_sink_frames: true
+      keep_near_history_frames: 4
+      keep_dynamic_history_frames: 4
+      dense_current_blocks: false
+      # HSA+SLA 只让 global sink / shot sink 各前 2 帧进入候选池。
+      max_global_sink_frames: 2
+      max_shot_sink_frames: 2
+      first_chunk_dense: true
+      budget_reference: full_resident_kv
+      # 完整 KV 线性补偿与稀疏 softmax 分支并行存在。
+      full_kv_linear_compensation: true
       query_block_batch: 1
       linear_cache: true
       linear_eps: 1.0e-5
     sla_cag:
       backend: mindiesd
-      # 与混合方法保持相同 CAG 预算，用于公平比较全局 SLA 与帧候选 SLA。
-      sparsity: 0.90
-      sparsity_base: 0.93
+      # 与 HSA/混合方法保持相同 CAG 预算，用于公平比较 block selector。
+      sparsity: 0.85
+      sparsity_base: 0.95
       block_q: 128
       block_k: 128
       feature_map: softmax
-      keep_sink_frames: 1
-      keep_recent_frames: 1
-      dense_current: false
-      min_sparse_history_frames: 1
+      hard_keep_sink_frames: 1
+      hard_keep_recent_frames: 1
+      dense_current_blocks: false
+      first_chunk_dense: true
+      budget_reference: full_resident_kv
+      # 完整 KV 线性补偿与稀疏 softmax 分支并行存在。
+      full_kv_linear_compensation: true
       query_block_batch: 1
       linear_cache: true
       linear_eps: 1.0e-5

@@ -24,18 +24,25 @@ model_kwargs:
     enabled: true
     method: sla_cag
     backend: ascend_triton
-    # 与 HSA+SLA+CAG 使用相同预算，保证路由方法对比不混入稀疏率差异。
-    # sparsity 是全程目标平均稀疏率；sparsity_base 是 CAG 尾部调度基准。
-    sparsity: 0.90
-    sparsity_base: 0.93
+    # 三种方法统一使用 85% 目标平均稀疏率与 95% CAG 尾部调度基准。
+    sparsity: 0.85
+    sparsity_base: 0.95
     # Ulysses 交换后每个 8 帧 chunk 有 7040 token，可被 128-token block 整除。
     block_q: 128
     block_k: 128
     feature_map: softmax
-    keep_sink_frames: 1
-    keep_recent_frames: 1
-    dense_current: false
-    min_sparse_history_frames: 1
+    # block-stage safety anchor：强制保留 1 个最早帧的 blocks，并占用全局 CAG 预算。
+    hard_keep_sink_frames: 1
+    # block-stage safety anchor：强制保留 1 个最新帧的 blocks，并占用全局 CAG 预算。
+    hard_keep_recent_frames: 1
+    # 当前 8 帧的其余 blocks 与 history blocks 一起参加全局 Smooth-K Top-K。
+    dense_current_blocks: false
+    # 首个 AR chunk 没有 history，必须执行 dense attention。
+    first_chunk_dense: true
+    # SLA 不裁剪 frame，最终 K 始终以完整 resident KV block 数为分母。
+    budget_reference: full_resident_kv
+    # 线性补偿分支始终读取完整 resident KV 统计量，不受稀疏 LUT 限制。
+    full_kv_linear_compensation: true
     linear_cache: true
     linear_eps: 1.0e-5
     # portable 后端按该值合并 Query Block；Triton 后端直接消费完整 LUT。
