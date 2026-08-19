@@ -16,7 +16,7 @@ from tqdm import tqdm
 from pipeline.causal_diffusion_inference_sp import CausalDiffusionInferencePipelineSP
 from utils.config import normalize_config, section_get
 from utils.dataset import PromptDataset, prompt_collate_fn
-from utils.device import distributed_backend, is_npu, set_device
+from utils.device import distributed_backend, empty_cache, is_npu, set_device
 from utils.inference_utils import (
     load_generator_checkpoint,
     load_generator_linear_checkpoint,
@@ -519,6 +519,13 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=not is_main_process):
             f"rtf={real_time_factor:.3f} peak_memory_gb={peak_memory_text} "
             f"vae_peak_memory_gb={vae_peak_memory_text} {metric_text}"
         )
+    pipeline.clear_cache()
+    generated = None
+    sampled_noise = None
+    latents = None
+    current_video = None
+    video = None
+    empty_cache()
 
     if config.inference_iter != -1 and i >= config.inference_iter:
         break

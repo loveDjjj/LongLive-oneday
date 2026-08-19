@@ -14,6 +14,7 @@ python -m pytest -q \
   tests/test_training_config_contract.py
 
 python -m compileall -q wan_5b pipeline utils scripts tests
+python -m compileall -q inference_sp.py
 git diff --check
 ```
 
@@ -36,15 +37,11 @@ python scripts/resolve_inference_config.py msprof \
   --output /tmp/longlive-hsa-full-32s.yaml
 
 torchrun --standalone --nproc_per_node=4 \
-  tests/npu/benchmark_sparse_attention.py \
-  --method hsa_cag \
-  --backend mindiesd \
-  --latent-frames 192 \
-  --warmup 1 \
-  --iterations 3
+  inference_sp.py \
+  --config /tmp/longlive-hsa-full-32s.yaml
 ```
 
-预期：resolved 配置包含 `hsa_history_mode: full`；debug 日志出现 `[hsa-frame-route] mode=full`，并且在超过 32 帧后允许 `contains_pre_window_frame=true`，例如 current frame 已到 96 附近时可以选择 frame 17。
+预期：resolved 配置包含 `hsa_history_mode: full`；debug 日志出现 `[hsa-frame-route] mode=full`，并且在超过 32 帧后允许 `contains_pre_window_frame=true`，例如 current frame 已到 96 附近时可以选择 frame 17。多 prompt benchmark 中每条视频结束后会执行 `pipeline.clear_cache()` 和 `empty_cache()`，下一条 prompt 的 T5 text encoder 不应再被上一条视频的 full-history KV cache 顶爆。
 
 ## 3. 结果回填
 
@@ -56,5 +53,6 @@ device=
 hsa_history_mode=
 是否出现 pre-window selected frame=
 resolved_config_path=
+多 prompt 是否通过=
 异常与日志路径=
 ```
