@@ -102,6 +102,18 @@ def _sparse_model_config(sparsity) -> dict | None:
                 f"choose one of {sorted(allowed)}"
             )
         options["backend"] = backend_override
+    history_mode_override = os.environ.get("LONGLIVE_HSA_HISTORY_MODE", "").strip()
+    if history_mode_override:
+        if method != "hsa_cag":
+            raise ValueError(
+                "LONGLIVE_HSA_HISTORY_MODE only applies to sparse method hsa_cag"
+            )
+        if history_mode_override not in {"rolling", "full"}:
+            raise ValueError(
+                "unsupported HSA history mode="
+                f"{history_mode_override!r}; choose rolling or full"
+            )
+        options["hsa_history_mode"] = history_mode_override
     return {"enabled": True, "method": method, **options}
 
 

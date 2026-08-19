@@ -148,11 +148,36 @@ def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
     assert sparse.protect_current_frames is True
     assert sparse.protect_longlive_sink_frames is True
     assert sparse.dense_current_blocks is False
+    assert sparse.hsa_history_mode == "rolling"
     assert sparse.first_chunk_dense is True
     assert sparse.budget_reference == "full_resident_kv"
     assert "full_kv_linear_compensation" not in sparse
     assert "feature_map" not in sparse
     assert metadata["sparsity_method"] == "hsa_cag"
+
+
+def test_vbench_hsa_history_mode_override_selects_full(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "hsa_cag")
+    monkeypatch.setenv("LONGLIVE_HSA_HISTORY_MODE", "full")
+    output = tmp_path / "hsa_full.yaml"
+
+    resolve_vbench(
+        _args(VBENCH_CONFIG, "longlive2_standard_5pct", output, seed=0)
+    )
+
+    sparse = OmegaConf.load(output).model_kwargs.sparse_config
+    assert sparse.method == "hsa_cag"
+    assert sparse.hsa_history_mode == "full"
+
+
+def test_vbench_rejects_hsa_history_mode_for_non_hsa(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    monkeypatch.setenv("LONGLIVE_HSA_HISTORY_MODE", "full")
+
+    with pytest.raises(ValueError, match="only applies"):
+        resolve_vbench(
+            _args(VBENCH_CONFIG, "longlive2_standard_5pct", tmp_path / "bad.yaml", seed=0)
+        )
 
 
 def test_vbench_hybrid_selects_frame_filtered_sla_profile(tmp_path, monkeypatch):

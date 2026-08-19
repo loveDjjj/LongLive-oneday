@@ -272,6 +272,11 @@ def validate_sparse_training_config(config):
             int(sparse.get("keep_dynamic_history_frames", -1)) == 4,
             "HSA keep_dynamic_history_frames must be 4",
         )
+        if sparse_method == "hsa_cag":
+            require(
+                str(sparse.get("hsa_history_mode", "rolling")) in {"rolling", "full"},
+                "HSA hsa_history_mode must be rolling or full",
+            )
     if sparse_method in {"sla_cag", "hsa_sla_cag"}:
         if sparse_method == "sla_cag":
             require(

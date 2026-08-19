@@ -11,6 +11,7 @@ from wan_5b.modules.sparse_attention import (
     parse_sparse_config,
     sparse_attention,
     sparse_method,
+    with_cag_schedule,
 )
 from wan_5b.modules.sparse_routing import (
     SparseKVLayout,
@@ -34,6 +35,7 @@ def _config(**overrides):
         "keep_near_history_frames": 1,
         "keep_dynamic_history_frames": 1,
         "dense_current_blocks": False,
+        "hsa_history_mode": "rolling",
         "first_chunk_dense": True,
     }
     values.update(overrides)
@@ -74,6 +76,26 @@ def test_cag_longlive_128_frame_schedule():
     assert len(schedule) == 16
     for index, value in expected.items():
         assert schedule[index] == pytest.approx(value, abs=1.0e-6)
+
+
+def test_full_history_cag_schedule_uses_full_resident_lengths():
+    base = _config(sparsity=0.85, sparsity_base=0.95)
+    rolling = with_cag_schedule(
+        base,
+        num_output_frames=64,
+        num_frame_per_block=8,
+        local_attn_size=32,
+    )
+    full = with_cag_schedule(
+        {**base, "hsa_history_mode": "full"},
+        num_output_frames=64,
+        num_frame_per_block=8,
+        local_attn_size=32,
+    )
+
+    assert full["local_attn_size"] == 32
+    assert full["sparsity_list"] == calculate_chunk_sparsities(64, 8, -1, full)
+    assert full["sparsity_list"] != rolling["sparsity_list"]
 
 
 def test_hsa_first_chunk_is_exact_dense_attention():
@@ -230,6 +252,33 @@ def test_multishot_protected_frames_are_never_truncated():
     )
     assert selection.selected_history_count == 24
     assert set(selection.frame_ids.flatten().tolist()) == set(range(24))
+
+
+def test_full_history_router_can_select_before_rolling_window():
+    q = torch.tensor([[[[1.0, 0.0]]]])
+    history = torch.zeros(1, 40, 1, 2)
+    history[:, 17, :, 0] = 10.0
+    history[:, 5, :, 0] = 5.0
+    layout = SparseKVLayout(
+        resident_frames=48,
+        history_frames=40,
+        current_frames=8,
+        global_sink_frames=(0, 1),
+        shot_sink_frames=(8, 9),
+    )
+
+    selection = select_hsa_history_frames(
+        q_frame_repr=q,
+        history_frame_repr=history,
+        layout=layout,
+        keep_near_history_frames=4,
+        keep_dynamic_history_frames=4,
+    )
+
+    frames = set(selection.frame_ids.flatten().tolist())
+    assert {0, 1, 8, 9}.issubset(frames)
+    assert {36, 37, 38, 39}.issubset(frames)
+    assert 17 in frames
 
 
 def test_history_selection_is_invariant_to_head_sharding():

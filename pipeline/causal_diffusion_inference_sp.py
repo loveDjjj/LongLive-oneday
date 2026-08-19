@@ -206,7 +206,7 @@ class CausalDiffusionInferencePipelineSP(CausalDiffusionInferencePipeline):
             f"sp_world={get_sp_world_size() if is_sp_enabled() else 1}, dp_rank={dp_rank}"
         )
 
-    def _initialize_kv_cache(self, batch_size, dtype, device):
+    def _initialize_kv_cache(self, batch_size, dtype, device, num_output_frames=None):
         """Initialize head-split KV caches for Ulysses SP."""
         kv_cache_pos = []
         kv_cache_neg = []
@@ -223,6 +223,13 @@ class CausalDiffusionInferencePipelineSP(CausalDiffusionInferencePipeline):
             kv_cache_size = self.local_attn_size * self.frame_seq_length
         else:
             kv_cache_size = 3 * self.num_frame_per_block * self.frame_seq_length
+        sparse_config = getattr(getattr(self.args, "model_kwargs", {}), "sparse_config", {})
+        hsa_full_history = (
+            bool(sparse_config)
+            and sparse_config.get("method") == "hsa_cag"
+            and sparse_config.get("hsa_history_mode", "rolling") == "full"
+        )
+        full_kv_cache_size = int(num_output_frames or 0) * self.frame_seq_length
         block_token_size = self.num_frame_per_block * self.frame_seq_length
         max_blocks = kv_cache_size // block_token_size
 
@@ -250,6 +257,24 @@ class CausalDiffusionInferencePipelineSP(CausalDiffusionInferencePipeline):
                 "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
                 "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
             }
+            if hsa_full_history:
+                entry.update(
+                    {
+                        "full_k": torch.zeros(
+                            [batch_size, full_kv_cache_size, cache_heads, head_dim],
+                            dtype=dtype,
+                            device=device,
+                        ),
+                        "full_v": torch.zeros(
+                            [batch_size, full_kv_cache_size, cache_heads, head_dim],
+                            dtype=dtype,
+                            device=device,
+                        ),
+                        "full_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                        "full_pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
+                        "full_pinned_len": torch.tensor([0], dtype=torch.long, device=device),
+                    }
+                )
             kv_cache_pos.append({key: value.clone() if torch.is_tensor(value) else value for key, value in entry.items()})
             kv_cache_neg.append({key: value.clone() if torch.is_tensor(value) else value for key, value in entry.items()})
 

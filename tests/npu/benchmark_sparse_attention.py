@@ -96,6 +96,7 @@ def _config(method: str, backend: str, latent_frames: int):
                 "keep_near_history_frames": 4,
                 "keep_dynamic_history_frames": 4,
                 "dense_current_blocks": False,
+                "hsa_history_mode": "rolling",
                 "first_chunk_dense": True,
             }
         )

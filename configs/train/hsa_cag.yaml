@@ -40,6 +40,8 @@ model_kwargs:
     keep_dynamic_history_frames: 4
     # false 表示 current blocks 与 history blocks 共同参加最终全局 CAG Top-K。
     dense_current_blocks: false
+    # 训练默认保持 LongLive2.0 32 帧 rolling KV；full-history HSA 先用于推理算法正确性验证。
+    hsa_history_mode: rolling
     # 首个 AR chunk 没有 history，必须执行 dense attention。
     first_chunk_dense: true
     # CAG 的 K 始终由完整 resident KV block 数计算，frame router 只缩小候选池。

@@ -102,11 +102,16 @@ def with_cag_schedule(
     method = sparse_method(output)
     if method != "dense":
         output["method"] = method
+    schedule_local_attn_size = (
+        -1
+        if method == "hsa_cag" and output.get("hsa_history_mode", "rolling") == "full"
+        else local_attn_size
+    )
     output["num_output_frames"] = num_output_frames
     output["num_frame_per_block"] = num_frame_per_block
     output["local_attn_size"] = local_attn_size
     output["sparsity_list"] = calculate_chunk_sparsities(
-        num_output_frames, num_frame_per_block, local_attn_size, output
+        num_output_frames, num_frame_per_block, schedule_local_attn_size, output
     )
     return output
 
@@ -122,13 +127,14 @@ def sparse_attention(
     linear_projection,
     kv_layout: SparseKVLayout | None = None,
     attention_cache=None,
+    debug_context=None,
 ):
     method = sparse_method(sparse_config)
     if method == "hsa_cag":
         return hsa_cag_attention(
             q, k, v, frame_seq=frame_seq, chunk_id=chunk_id,
             sparse_config=sparse_config, kv_layout=kv_layout,
-            attention_cache=attention_cache,
+            attention_cache=attention_cache, debug_context=debug_context,
         )
     if method == "sla_cag":
         return sla_cag_attention(

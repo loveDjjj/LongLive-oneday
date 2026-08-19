@@ -13,6 +13,7 @@ import torch
 
 
 _DEBUG_EMITTED: set[tuple[str, int]] = set()
+_FRAME_DEBUG_EMITTED: set[tuple[str, int, int]] = set()
 
 
 @dataclass(frozen=True)
@@ -294,9 +295,12 @@ def emit_sparse_routing_debug(
     block_lut: torch.Tensor,
     eligible_blocks: torch.Tensor,
     selection: HSAFrameSelection | None = None,
+    debug_context: dict | None = None,
 ) -> None:
     """Print one representative route per method/chunk when debugging is enabled."""
-    if os.environ.get("LONGLIVE_SPARSE_ROUTING_DEBUG", "0") != "1":
+    route_debug = os.environ.get("LONGLIVE_SPARSE_ROUTING_DEBUG", "0") == "1"
+    frame_debug = os.environ.get("LONGLIVE_HSA_FRAME_DEBUG", "0") == "1"
+    if not route_debug and not frame_debug:
         return
     try:
         import torch.distributed as dist
@@ -306,9 +310,17 @@ def emit_sparse_routing_debug(
     except (ImportError, RuntimeError):
         pass
     key = (method, int(chunk_id))
-    if key in _DEBUG_EMITTED:
-        return
-    _DEBUG_EMITTED.add(key)
+    if route_debug:
+        if key in _DEBUG_EMITTED:
+            emit_hsa_frame_debug(
+                method=method,
+                chunk_id=chunk_id,
+                layout=layout,
+                selection=selection,
+                debug_context=debug_context,
+            )
+            return
+        _DEBUG_EMITTED.add(key)
 
     route = block_lut[0, 0, 0]
     eligible = eligible_blocks[0, 0, 0]
@@ -341,31 +353,103 @@ def emit_sparse_routing_debug(
     current_hit_ratio = selected_current / max(current_blocks, 1)
     near = selection.near_history_frames if selection is not None else ()
     dynamic = selection.dynamic_history_count if selection is not None else 0
-    print(
-        "[sparse-route] "
-        f"attention_method={method} chunk_id={chunk_id} "
-        f"resident_frames={layout.resident_frames} history_frames={layout.history_frames} "
-        f"current_frames={layout.current_frames} "
-        f"protected_global_sink_frames={layout.global_sink_frames} "
-        f"protected_shot_sink_frames={layout.shot_sink_frames} "
-        f"protected_current_frames={layout.current_frame_ids} "
-        f"near_history_frames={near} dynamic_history_frames={dynamic} "
-        f"candidate_history_frames={candidate_history_frames} "
-        f"candidate_total_frames={candidate_total_frames} "
-        f"full_kv_tokens={layout.resident_frames * frame_seq} "
-        f"candidate_kv_tokens={min(candidate_blocks * block_k, layout.resident_frames * frame_seq)} "
-        f"full_kv_blocks={eligible.shape[-1]} candidate_blocks={candidate_blocks} "
-        f"cag_sparsity={sparsity:.6f} cag_final_k={final_k} "
-        f"selected_history_blocks={selected_history} "
-        f"selected_current_blocks={selected_current} "
-        f"effective_global_block_sparsity={effective_sparsity:.6f} "
-        f"current_block_hit_ratio={current_hit_ratio:.6f}"
+    if route_debug:
+        print(
+            "[sparse-route] "
+            f"attention_method={method} chunk_id={chunk_id} "
+            f"resident_frames={layout.resident_frames} history_frames={layout.history_frames} "
+            f"current_frames={layout.current_frames} "
+            f"protected_global_sink_frames={layout.global_sink_frames} "
+            f"protected_shot_sink_frames={layout.shot_sink_frames} "
+            f"protected_current_frames={layout.current_frame_ids} "
+            f"near_history_frames={near} dynamic_history_frames={dynamic} "
+            f"candidate_history_frames={candidate_history_frames} "
+            f"candidate_total_frames={candidate_total_frames} "
+            f"full_kv_tokens={layout.resident_frames * frame_seq} "
+            f"candidate_kv_tokens={min(candidate_blocks * block_k, layout.resident_frames * frame_seq)} "
+            f"full_kv_blocks={eligible.shape[-1]} candidate_blocks={candidate_blocks} "
+            f"cag_sparsity={sparsity:.6f} cag_final_k={final_k} "
+            f"selected_history_blocks={selected_history} "
+            f"selected_current_blocks={selected_current} "
+            f"effective_global_block_sparsity={effective_sparsity:.6f} "
+            f"current_block_hit_ratio={current_hit_ratio:.6f}"
+        )
+    emit_hsa_frame_debug(
+        method=method,
+        chunk_id=chunk_id,
+        layout=layout,
+        selection=selection,
+        debug_context=debug_context,
     )
+
+
+def emit_hsa_frame_debug(
+    *,
+    method: str,
+    chunk_id: int,
+    layout: SparseKVLayout,
+    selection: HSAFrameSelection | None,
+    debug_context: dict | None = None,
+) -> None:
+    """Sample HSA frame selections for correctness audits."""
+    if method != "hsa_cag" or selection is None:
+        return
+    if os.environ.get("LONGLIVE_HSA_FRAME_DEBUG", "0") != "1":
+        return
+    try:
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except (ImportError, RuntimeError):
+        pass
+    context = debug_context or {}
+    mode = str(context.get("hsa_history_mode", "rolling"))
+    layer = int(context.get("layer", -1))
+    key = (mode, layer, int(chunk_id))
+    if key in _FRAME_DEBUG_EMITTED:
+        return
+    _FRAME_DEBUG_EMITTED.add(key)
+
+    max_rows = max(1, int(os.environ.get("LONGLIVE_HSA_FRAME_DEBUG_MAX_ROWS", "16")))
+    selected = selection.frame_ids.detach()
+    protected = set(selection.protected_history_frames)
+    near = set(selection.near_history_frames)
+    current_start = layout.history_frames
+    current_end = layout.resident_frames - 1
+    rolling_window_start = max(0, current_start - int(context.get("rolling_window_frames", 32)))
+    rows = 0
+    for head in range(selected.shape[1]):
+        for query_block in range(selected.shape[2]):
+            frames = selected[0, head, query_block].tolist()
+            dynamic = [
+                int(frame_id)
+                for frame_id in frames
+                if int(frame_id) not in protected and int(frame_id) not in near
+            ]
+            contains_pre_window = any(int(frame_id) < rolling_window_start for frame_id in frames)
+            print(
+                "[hsa-frame-route] "
+                f"mode={mode} layer={layer} chunk_id={chunk_id} "
+                f"current_frames={current_start}-{current_end} "
+                f"head={head} query_block={query_block} "
+                f"history_frames=0-{max(layout.history_frames - 1, 0)} "
+                f"protected_frames={','.join(map(str, selection.protected_history_frames))} "
+                f"near_frames={','.join(map(str, selection.near_history_frames))} "
+                f"dynamic_selected_frames={','.join(map(str, dynamic))} "
+                f"selected_history_frames={','.join(map(str, frames))} "
+                f"contains_pre_window_frame={str(contains_pre_window).lower()}",
+                flush=True,
+            )
+            rows += 1
+            if rows >= max_rows:
+                return
 
 
 def reset_sparse_routing_debug() -> None:
     """Allow the next video to emit one route record per method/chunk again."""
     _DEBUG_EMITTED.clear()
+    _FRAME_DEBUG_EMITTED.clear()
 
 
 __all__ = [

@@ -56,6 +56,11 @@ class TrainingConfigContractTest(unittest.TestCase):
                 self.assertEqual(validated.generator_train_scope, expected_scope)
                 if method in {"sla_cag", "hsa_sla_cag"}:
                     self.assertEqual(validated.lr_linear, 2.0e-5)
+                if method == "hsa_cag":
+                    self.assertEqual(
+                        validated.model_kwargs.sparse_config.hsa_history_mode,
+                        "rolling",
+                    )
 
                 if method in {"sla_cag", "hsa_sla_cag"}:
                     self.assertEqual(validated.gradient_accumulation_steps, 4)

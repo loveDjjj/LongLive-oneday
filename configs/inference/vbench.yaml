@@ -94,6 +94,8 @@ sparsity:
       keep_near_history_frames: 4
       keep_dynamic_history_frames: 4
       dense_current_blocks: false
+      # HSA 历史 KV 来源：rolling 使用 LongLive 32 帧 resident KV；full 保留全部已完成历史帧供论文式 frame retrieval。
+      hsa_history_mode: rolling
       first_chunk_dense: true
       budget_reference: full_resident_kv
       query_block_batch: 1

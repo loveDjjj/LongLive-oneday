@@ -266,7 +266,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             self._initialize_kv_cache(
                 batch_size=batch_size,
                 dtype=noise.dtype,
-                device=noise.device
+                device=noise.device,
+                num_output_frames=num_output_frames,
             )
             self._initialize_crossattn_cache(
                 batch_size=batch_size,
@@ -287,6 +288,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     [0], dtype=torch.long, device=noise.device)
                 self.kv_cache_pos[block_index]["pinned_start"].fill_(-1)
                 self.kv_cache_pos[block_index]["pinned_len"].zero_()
+                if "full_end_index" in self.kv_cache_pos[block_index]:
+                    self.kv_cache_pos[block_index]["full_end_index"].zero_()
+                    self.kv_cache_pos[block_index]["full_pinned_start"].fill_(-1)
+                    self.kv_cache_pos[block_index]["full_pinned_len"].zero_()
                 if use_cfg:
                     self.kv_cache_neg[block_index]["global_end_index"] = torch.tensor(
                         [0], dtype=torch.long, device=noise.device)
@@ -294,6 +299,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                         [0], dtype=torch.long, device=noise.device)
                     self.kv_cache_neg[block_index]["pinned_start"].fill_(-1)
                     self.kv_cache_neg[block_index]["pinned_len"].zero_()
+                    if "full_end_index" in self.kv_cache_neg[block_index]:
+                        self.kv_cache_neg[block_index]["full_end_index"].zero_()
+                        self.kv_cache_neg[block_index]["full_pinned_start"].fill_(-1)
+                        self.kv_cache_neg[block_index]["full_pinned_len"].zero_()
 
         # Step 2: Cache context feature
         current_start_frame = start_frame_index
@@ -719,9 +728,17 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             # Step 3.3b: pin the current chunk for multi-shot sink on scene cut.
             if is_scene_cut:
                 print(f"[inference] Scene cut at chunk {chunk_index}, pinning chunk as shot-sink")
-                self._pin_current_chunk(self.kv_cache_pos, current_num_frames)
+                self._pin_current_chunk(
+                    self.kv_cache_pos,
+                    current_num_frames,
+                    current_start_frame * self.frame_seq_length,
+                )
                 if use_cfg:
-                    self._pin_current_chunk(self.kv_cache_neg, current_num_frames)
+                    self._pin_current_chunk(
+                        self.kv_cache_neg,
+                        current_num_frames,
+                        current_start_frame * self.frame_seq_length,
+                    )
 
             if streaming_decode:
                 if async_vae:
@@ -864,7 +881,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             video = (video * 0.5 + 0.5).clamp(0, 1)
             return video
 
-    def _initialize_kv_cache(self, batch_size, dtype, device):
+    def _initialize_kv_cache(self, batch_size, dtype, device, num_output_frames=None):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
@@ -882,6 +899,13 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         else:
             # Use the default KV cache size
             kv_cache_size = 3 * self.num_frame_per_block * self.frame_seq_length
+        sparse_config = getattr(getattr(self.args, "model_kwargs", {}), "sparse_config", {})
+        hsa_full_history = (
+            bool(sparse_config)
+            and sparse_config.get("method") == "hsa_cag"
+            and sparse_config.get("hsa_history_mode", "rolling") == "full"
+        )
+        full_kv_cache_size = int(num_output_frames or 0) * self.frame_seq_length
 
         block_token_size = self.num_frame_per_block * self.frame_seq_length
         max_blocks = kv_cache_size // block_token_size
@@ -900,6 +924,24 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 "pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
                 "pinned_len": torch.tensor([0], dtype=torch.long, device=device),
             }
+            if hsa_full_history:
+                cache.update(
+                    {
+                        "full_k": torch.zeros(
+                            [batch_size, full_kv_cache_size, num_heads, head_dim],
+                            dtype=dtype,
+                            device=device,
+                        ),
+                        "full_v": torch.zeros(
+                            [batch_size, full_kv_cache_size, num_heads, head_dim],
+                            dtype=dtype,
+                            device=device,
+                        ),
+                        "full_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                        "full_pinned_start": torch.tensor([-1], dtype=torch.long, device=device),
+                        "full_pinned_len": torch.tensor([0], dtype=torch.long, device=device),
+                    }
+                )
             kv_cache_pos.append(cache)
             kv_cache_neg.append({key: value.clone() if torch.is_tensor(value) else value for key, value in cache.items()})
 
@@ -1065,7 +1107,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             block_cache["k"][:, dst_slice] = block_cache["k"][:, src_slice].clone()
             block_cache["v"][:, dst_slice] = block_cache["v"][:, src_slice].clone()
 
-    def _pin_current_chunk(self, kv_cache, current_num_frames):
+    def _pin_current_chunk(self, kv_cache, current_num_frames, current_start_tokens=None):
         """Mark the current chunk's buffer position as pinned for multi-shot sink.
 
         The pinned region REPLACES the original sink on the next rolling event.
@@ -1082,6 +1124,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         for block_cache in kv_cache:
             block_cache["pinned_start"].fill_(chunk_start)
             block_cache["pinned_len"].fill_(pin_len)
+            if current_start_tokens is not None and "full_pinned_start" in block_cache:
+                block_cache["full_pinned_start"].fill_(int(current_start_tokens))
+                block_cache["full_pinned_len"].fill_(pin_len)
 
     def _zero_kv_data(self, kv_cache, current_start_tokens):
         """Reset KV cache for clean recache, preserving global sink."""
@@ -1094,3 +1139,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             block_cache["global_end_index"].fill_(current_start_tokens)
             block_cache["pinned_start"].fill_(-1)
             block_cache["pinned_len"].zero_()
+            if "full_end_index" in block_cache:
+                block_cache["full_end_index"].zero_()
+                block_cache["full_pinned_start"].fill_(-1)
+                block_cache["full_pinned_len"].zero_()

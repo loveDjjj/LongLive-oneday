@@ -103,6 +103,7 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
         self.global_sink_size = 0
+        self.layer_index = -1
         from wan_5b.modules.sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
         self._sparse_config = parse_sparse_config(self.sparse_config)
@@ -138,6 +139,12 @@ class UlyssesCausalWanSelfAttention(nn.Module):
         from wan_5b.modules.sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
         self._sparse_config = parse_sparse_config(self.sparse_config)
+
+    def _hsa_full_history_enabled(self) -> bool:
+        return (
+            bool(getattr(self._sparse_config, "enabled", False))
+            and getattr(self._sparse_config, "hsa_history_mode", "rolling") == "full"
+        )
 
     def forward(self, x, seq_lens, grid_sizes, freqs, kv_cache=None,
                 current_start=0, cache_start=None, t_scale=1.0,
@@ -242,6 +249,13 @@ class UlyssesCausalWanSelfAttention(nn.Module):
                     sparse_config=self._sparse_config,
                     linear_projection=self.sla_linear,
                     kv_layout=kv_layout,
+                    debug_context={
+                        "layer": self.layer_index,
+                        "hsa_history_mode": getattr(
+                            self._sparse_config, "hsa_history_mode", "rolling"
+                        ),
+                        "rolling_window_frames": self.local_attn_size,
+                    },
                     attention_cache=(
                         None if torch.is_grad_enabled()
                         else kv_cache.setdefault("sparse_attention_cache", {})
@@ -349,6 +363,21 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             kv_cache["global_end_index"].fill_(current_end)
             kv_cache["local_end_index"].fill_(local_end_new)
 
+        if "full_k" in kv_cache and "full_v" in kv_cache:
+            full_end = min(int(current_end), int(kv_cache["full_k"].shape[1]))
+            full_start = max(0, full_end - s_new)
+            write_len = full_end - full_start
+            if write_len > 0 and not is_gradient_recompute:
+                with torch.no_grad():
+                    kv_cache["full_k"][:, full_start:full_end].copy_(
+                        k_new[:, -write_len:]
+                    )
+                    kv_cache["full_v"][:, full_start:full_end].copy_(
+                        v_new[:, -write_len:]
+                    )
+            cached_full_end = int(kv_cache["full_end_index"].item())
+            kv_cache["full_end_index"].fill_(max(cached_full_end, full_end))
+
         window_start = max(0, local_end_new - self.max_attention_size)
         prepend_sink = effective_sink > 0 and window_start > 0
         prepend_pinned = has_pinned and pinned_start >= effective_sink and pinned_start < window_start
@@ -443,6 +472,52 @@ class UlyssesCausalWanSelfAttention(nn.Module):
             global_sink_token_ranges=tuple(global_ranges),
             shot_sink_token_ranges=tuple(shot_ranges),
         )
+        if self._hsa_full_history_enabled():
+            if "full_k" not in kv_cache or "full_v" not in kv_cache:
+                raise RuntimeError("HSA full-history mode requires full_k/full_v cache.")
+            full_end_index = int(kv_cache["full_end_index"].item())
+            full_history_tokens = min(
+                int(current_start),
+                full_end_index,
+                int(kv_cache["full_k"].shape[1]),
+            )
+            k_full = torch.cat(
+                [kv_cache["full_k"][:, :full_history_tokens], k_new],
+                dim=1,
+            )
+            v_full = torch.cat(
+                [kv_cache["full_v"][:, :full_history_tokens], v_new],
+                dim=1,
+            )
+            global_ranges = []
+            shot_ranges = []
+            global_end = min(global_sink_tokens, full_history_tokens)
+            if global_end > 0:
+                global_ranges.append((0, global_end))
+            full_pinned_start_t = kv_cache.get("full_pinned_start")
+            full_pinned_len_t = kv_cache.get("full_pinned_len")
+            full_pinned_start = (
+                int(full_pinned_start_t.item())
+                if full_pinned_start_t is not None
+                else -1
+            )
+            full_pinned_len = (
+                int(full_pinned_len_t.item())
+                if full_pinned_len_t is not None
+                else 0
+            )
+            if full_pinned_start >= 0 and full_pinned_len > 0:
+                shot_start = min(full_pinned_start, full_history_tokens)
+                shot_end = min(full_pinned_start + full_pinned_len, full_history_tokens)
+                if shot_start < shot_end:
+                    shot_ranges.append((shot_start, shot_end))
+            kv_layout = build_sparse_kv_layout(
+                total_tokens=k_full.shape[1],
+                current_tokens=s_new,
+                frame_seq=frame_seqlen,
+                global_sink_token_ranges=tuple(global_ranges),
+                shot_sink_token_ranges=tuple(shot_ranges),
+            )
         return k_full, v_full, kv_layout
 
 
@@ -613,6 +688,8 @@ class UlyssesSPCausalWanModel(ModelMixin, ConfigMixin):
             )
             for _ in range(num_layers)
         ])
+        for layer_index, block in enumerate(self.blocks):
+            block.self_attn.layer_index = layer_index
         self.head = UlyssesCausalHead(dim, out_dim, patch_size, eps)
 
         d = dim // num_heads

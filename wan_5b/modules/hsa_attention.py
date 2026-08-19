@@ -32,6 +32,7 @@ class HSAAttentionConfig:
     keep_near_history_frames: int = 4
     keep_dynamic_history_frames: int = 4
     dense_current_blocks: bool = False
+    hsa_history_mode: str = "rolling"
     first_chunk_dense: bool = True
     budget_reference: str = "full_resident_kv"
     query_block_batch: int = 1
@@ -97,6 +98,8 @@ class HSAAttentionConfig:
             raise ValueError("HSA requires protect_longlive_sink_frames=true.")
         if self.enabled and self.dense_current_blocks:
             raise ValueError("HSA requires dense_current_blocks=false.")
+        if self.hsa_history_mode not in {"rolling", "full"}:
+            raise ValueError("HSA hsa_history_mode must be rolling or full.")
         if self.enabled and not self.first_chunk_dense:
             raise ValueError("HSA requires first_chunk_dense=true.")
         if self.budget_reference != "full_resident_kv":
@@ -119,6 +122,7 @@ def build_hsa_block_lut(
     sparsity: float,
     kv_layout: SparseKVLayout | None = None,
     attention_cache: dict[str, Any] | None = None,
+    debug_context: Mapping[str, Any] | None = None,
 ) -> torch.Tensor:
     history_tokens = k.shape[1] - q.shape[1]
     batch, _, heads, dim = q.shape
@@ -222,6 +226,7 @@ def build_hsa_block_lut(
         block_lut=selected,
         eligible_blocks=eligible,
         selection=selection,
+        debug_context=debug_context,
     )
     return selected.contiguous()
 
@@ -236,6 +241,7 @@ def hsa_cag_attention(
     sparse_config: Mapping[str, Any] | HSAAttentionConfig | None,
     kv_layout: SparseKVLayout | None = None,
     attention_cache: dict[str, Any] | None = None,
+    debug_context: Mapping[str, Any] | None = None,
 ) -> torch.Tensor:
     config = (
         sparse_config
@@ -271,6 +277,7 @@ def hsa_cag_attention(
         sparsity=sparsity,
         kv_layout=kv_layout,
         attention_cache=attention_cache,
+        debug_context=debug_context,
     )
     return _run_sparse_backend(q, k, v, block_lut, config)
 

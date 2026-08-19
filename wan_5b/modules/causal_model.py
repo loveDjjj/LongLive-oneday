@@ -399,6 +399,7 @@ class CausalWanSelfAttention(nn.Module):
         self.local_attn_size = local_attn_size if local_attn_size != -1 else 24
         self.sink_size = sink_size
         self.global_sink_size = 0
+        self.layer_index = -1
         from .sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
         self._sparse_config = parse_sparse_config(self.sparse_config)
@@ -428,6 +429,12 @@ class CausalWanSelfAttention(nn.Module):
         from .sparse_attention import parse_sparse_config
         self.sparse_config = dict(sparse_config or {})
         self._sparse_config = parse_sparse_config(self.sparse_config)
+
+    def _hsa_full_history_enabled(self) -> bool:
+        return (
+            bool(getattr(self._sparse_config, "enabled", False))
+            and getattr(self._sparse_config, "hsa_history_mode", "rolling") == "full"
+        )
 
     def forward(
         self,
@@ -821,6 +828,56 @@ class CausalWanSelfAttention(nn.Module):
                 global_sink_token_ranges=tuple(global_ranges),
                 shot_sink_token_ranges=tuple(shot_ranges),
             )
+            if self._hsa_full_history_enabled():
+                if use_relative_rope:
+                    raise NotImplementedError(
+                        "HSA full-history mode is not implemented with relative RoPE."
+                    )
+                if "full_k" not in kv_cache or "full_v" not in kv_cache:
+                    raise RuntimeError("HSA full-history mode requires full_k/full_v cache.")
+                full_end_index = int(kv_cache["full_end_index"].item())
+                full_history_tokens = min(
+                    int(current_start),
+                    full_end_index,
+                    int(kv_cache["full_k"].shape[1]),
+                )
+                window_k = torch.cat(
+                    [kv_cache["full_k"][:, :full_history_tokens], key_to_cache],
+                    dim=1,
+                )
+                window_v = torch.cat(
+                    [kv_cache["full_v"][:, :full_history_tokens], v],
+                    dim=1,
+                )
+                global_ranges = []
+                shot_ranges = []
+                global_end = min(global_sink_tokens, full_history_tokens)
+                if global_end > 0:
+                    global_ranges.append((0, global_end))
+                full_pinned_start_t = kv_cache.get("full_pinned_start")
+                full_pinned_len_t = kv_cache.get("full_pinned_len")
+                full_pinned_start = (
+                    int(full_pinned_start_t.item())
+                    if full_pinned_start_t is not None
+                    else -1
+                )
+                full_pinned_len = (
+                    int(full_pinned_len_t.item())
+                    if full_pinned_len_t is not None
+                    else 0
+                )
+                if full_pinned_start >= 0 and full_pinned_len > 0:
+                    shot_start = min(full_pinned_start, full_history_tokens)
+                    shot_end = min(full_pinned_start + full_pinned_len, full_history_tokens)
+                    if shot_start < shot_end:
+                        shot_ranges.append((shot_start, shot_end))
+                kv_layout = build_sparse_kv_layout(
+                    total_tokens=window_k.shape[1],
+                    current_tokens=num_new_tokens,
+                    frame_seq=frame_seqlen,
+                    global_sink_token_ranges=tuple(global_ranges),
+                    shot_sink_token_ranges=tuple(shot_ranges),
+                )
 
             if use_relative_rope:
                 if prepend_sink:
@@ -885,6 +942,13 @@ class CausalWanSelfAttention(nn.Module):
                         sparse_config=self._sparse_config,
                         linear_projection=self.sla_linear,
                         kv_layout=kv_layout,
+                        debug_context={
+                            "layer": self.layer_index,
+                            "hsa_history_mode": getattr(
+                                self._sparse_config, "hsa_history_mode", "rolling"
+                            ),
+                            "rolling_window_frames": self.local_attn_size,
+                        },
                         attention_cache=(
                             None if torch.is_grad_enabled()
                             else kv_cache.setdefault("sparse_attention_cache", {})
@@ -903,6 +967,13 @@ class CausalWanSelfAttention(nn.Module):
                         sparse_config=self._sparse_config,
                         linear_projection=self.sla_linear,
                         kv_layout=kv_layout,
+                        debug_context={
+                            "layer": self.layer_index,
+                            "hsa_history_mode": getattr(
+                                self._sparse_config, "hsa_history_mode", "rolling"
+                            ),
+                            "rolling_window_frames": self.local_attn_size,
+                        },
                         attention_cache=(
                             None if torch.is_grad_enabled()
                             else kv_cache.setdefault("sparse_attention_cache", {})
@@ -1215,6 +1286,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                                   defer_sla_linear_init)
             for _ in range(num_layers)
         ])
+        for layer_index, block in enumerate(self.blocks):
+            block.self_attn.layer_index = layer_index
 
         # head
         self.head = CausalHead(dim, out_dim, patch_size, eps)
@@ -1602,6 +1675,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     new_v = update_info["new_v"]
                     cache["k"][:, local_start_index:local_end_index] = new_k
                     cache["v"][:, local_start_index:local_end_index] = new_v
+
+                if "full_k" in cache and "full_v" in cache:
+                    new_k = update_info["new_k"]
+                    new_v = update_info["new_v"]
+                    full_end = min(int(update_info["current_end"]), cache["full_k"].shape[1])
+                    full_start = max(0, full_end - new_k.shape[1])
+                    write_len = full_end - full_start
+                    if write_len > 0:
+                        cache["full_k"][:, full_start:full_end] = new_k[:, -write_len:]
+                        cache["full_v"][:, full_start:full_end] = new_v[:, -write_len:]
+                        cache["full_end_index"].fill_(full_end)
             
             # Update cache indices.
             kv_cache[block_index]["global_end_index"].fill_(current_end)
