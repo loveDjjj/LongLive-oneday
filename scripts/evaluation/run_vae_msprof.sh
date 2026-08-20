@@ -13,8 +13,8 @@ fi
 
 LATENT_PATH="$1"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/a800_share/r50063443/conda_envs/longlive}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/path/to/conda_envs/longlive}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 VAE_CHUNK_FRAMES="${VAE_CHUNK_FRAMES:-8}"
 VAE_PROFILE_LATENT_FRAMES="${VAE_PROFILE_LATENT_FRAMES:-16}"
 MSPROF_AI_CORE="${MSPROF_AI_CORE:-true}"

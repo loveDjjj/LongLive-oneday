@@ -4,8 +4,8 @@ models:
   longlive2:
     entrypoint: inference_sp.py
     model_name: Wan2.2-TI2V-5B
-    model_root: /mnt/a800_share/r50063443/Wan2.2-TI2V-5B
-    generator_checkpoint: /mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+    model_root: /path/to/Wan2.2-TI2V-5B
+    generator_checkpoint: /path/to/longlive2_merged_generator.pt
     timestep_shift: 5.0
     num_frame_per_block: 8
     local_attn_size: 32
@@ -17,7 +17,7 @@ models:
   wan22:
     entrypoint: inference_wan22_sp.py
     model_name: Wan2.2-TI2V-5B
-    model_root: /mnt/a800_share/r50063443/Wan2.2-TI2V-5B
+    model_root: /path/to/Wan2.2-TI2V-5B
     timestep_shift: 5.0
     sampling_steps: 50
     sample_solver: unipc

@@ -5,10 +5,10 @@
 本文分析 LongLive2.0-5B 基础权重在昇腾 NPU 上采用 `dense`、`hsa_cag`、`sla_cag` 和 `hsa_sla_cag` 四种注意力路径时的无 profiler 推理性能。报告只使用同一基础 checkpoint：
 
 ```text
-/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+/path/to/longlive2_merged_generator.pt
 ```
 
-该路径来自本次历史 run 的原始记录，仅用于保证实验可追溯；当前服务器默认权重路径已迁移到 `/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt`，本文不改写历史字段。
+原始 run 使用的是部署机上的 LongLive2.0 合并 Generator；本文仅记录文件名和用途，不固化个人服务器绝对路径。
 
 数据来自 2026-08-12 的四组 benchmark suite，覆盖 SP1/SP4、5/32/64 秒和 `dit_only`/`async_vae`。每个 case 均包含 3 次有效测量；本文以 p50 作为正式延迟指标，以 mean、p95 和异步流水线分解作为辅助证据。
 

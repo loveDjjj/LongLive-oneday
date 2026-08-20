@@ -14,10 +14,10 @@ hsa_sla_cag
 所有 case 使用同一基础 checkpoint：
 
 ```text
-/mnt/share/weight/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+/path/to/longlive2_merged_generator.pt
 ```
 
-该路径来自本次历史 run 的原始记录，仅用于保证实验可追溯；当前服务器默认权重路径已迁移到 `/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt`，本文不改写历史字段。
+原始 run 使用的是部署机上的 LongLive2.0 合并 Generator；本文仅记录文件名和用途，不固化个人服务器绝对路径。
 
 第二阶段使用完成 200 step `lora_plus_linear` 训练并导出的 SLA+CAG 与 HSA+SLA+CAG 两份权重，分别运行 `dense`、`sla_cag` 与 `hsa_sla_cag`，形成训练权重 × 推理路由的完整 `2×3` 消融。该设计用于区分 Generator 主干 LoRA 后训练、运行时稀疏路由及二者交互造成的变化。
 

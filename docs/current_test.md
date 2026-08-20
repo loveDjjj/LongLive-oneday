@@ -1,47 +1,60 @@
 # 当前测试清单
 
-本轮验证 `hsa_cag` 新增 `hsa_history_mode: rolling | full`，其中 `full` 为 HSA 提供完整已完成历史 KV，同时保留 `protect_longlive_sink_frames`、`keep_near_history_frames` 和 current8 候选语义。服务器 NPU 项目当前均为**待服务器验证**，长期稳定命令见[环境安装与测试](setup_and_validation.md)。
+本轮验证仓库不再固化个人服务器绝对路径，配置和启动脚本改用 `/path/to/...` 占位默认值，并继续支持通过环境变量覆盖真实部署路径。服务器 NPU 项目当前为**待服务器验证**；长期稳定命令见[环境安装与测试](setup_and_validation.md)。
 
 ## 1. 主机回归测试
 
 ```bash
-cd /mnt/a800_share/r50063443/LongLive-oneday
-conda activate /mnt/a800_share/r50063443/conda_envs/longlive
+cd /path/to/LongLive-oneday
+conda activate /path/to/conda_envs/longlive
+
+rg -n '/mnt/a800[_]share/r50063[0-9][0-9]3|/mnt/share/weight/LongLive/checkpoints/longlive2[_]5b|LongLive/checkpoints/longlive2[_]5b' . || true
 
 python -m pytest -q \
-  tests/test_hsa_cag.py \
   tests/test_inference_config_resolution.py \
-  tests/test_training_config_contract.py
+  tests/test_training_config_contract.py \
+  tests/test_evaluation_matrix.py
 
-python -m compileall -q wan_5b pipeline utils scripts tests
-python -m compileall -q inference_sp.py
+python - <<'PY'
+from omegaconf import OmegaConf
+
+for path in (
+    "configs/train/hsa_cag.yaml",
+    "configs/train/sla_cag.yaml",
+    "configs/train/hsa_sla_cag.yaml",
+    "configs/inference/msprof.yaml",
+    "configs/inference/vbench.yaml",
+):
+    OmegaConf.load(path)
+    print(path, "ok")
+PY
+
+python -m compileall -q \
+  train.py inference_sp.py pipeline trainer utils wan_5b scripts tests
 git diff --check
 ```
 
-预期：测试全部通过；`hsa_cag` 默认 resolved 配置为 `hsa_history_mode=rolling`，设置 `LONGLIVE_HSA_HISTORY_MODE=full` 后 resolved 配置切换为 `full`；HSA frame router 在 40 帧 history 的单测中可以选中 rolling 32 帧窗口之前的历史帧。
+预期：`rg` 不输出旧个人服务器路径；配置解析、训练配置契约和矩阵展开测试全部通过；YAML 均可解析；编译检查与空白检查通过。
 
 ## 2. 服务器待验证
 
+本轮只清理路径默认值，不改变训练、推理和稀疏算法行为。若在服务器运行训练或评测入口，需先设置真实部署路径：
+
 ```bash
-cd /mnt/a800_share/r50063443/LongLive-oneday
-conda activate /mnt/a800_share/r50063443/conda_envs/longlive
+cd /path/to/LongLive-oneday
+conda activate /path/to/conda_envs/longlive
 
-export LONGLIVE_SPARSE_METHOD=hsa_cag
-export LONGLIVE_HSA_HISTORY_MODE=full
-export LONGLIVE_HSA_FRAME_DEBUG=1
-export LONGLIVE_HSA_FRAME_DEBUG_MAX_ROWS=16
-
-python scripts/resolve_inference_config.py msprof \
-  --config configs/inference/msprof.yaml \
-  --preset 32s \
-  --output /tmp/longlive-hsa-full-32s.yaml
-
-torchrun --standalone --nproc_per_node=4 \
-  inference_sp.py \
-  --config /tmp/longlive-hsa-full-32s.yaml
+export GENERATION_ENV=/path/to/conda_envs/longlive
+export AISBENCH_ENV=/path/to/conda_envs/aisbench_npu
+export VBENCH_CACHE_DIR=/path/to/vbench_models
+export CANN_ENV_SCRIPT=/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+export LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B
+export LONGLIVE_GENERATOR_CKPT=/path/to/longlive2_merged_generator.pt
+export MODEL_ROOT="${LONGLIVE_MODEL_ROOT}"
+export GENERATOR_CKPT="${LONGLIVE_GENERATOR_CKPT}"
 ```
 
-预期：resolved 配置包含 `hsa_history_mode: full`；debug 日志出现 `[hsa-frame-route] mode=full`，并且在超过 32 帧后允许 `contains_pre_window_frame=true`，例如 current frame 已到 96 附近时可以选择 frame 17。多 prompt benchmark 中每条视频结束后会执行 `pipeline.clear_cache()` 和 `empty_cache()`，下一条 prompt 的 T5 text encoder 不应再被上一条视频的 full-history KV cache 顶爆。
+预期：使用真实路径覆盖后，`scripts/training/run_sparse_cag.sh`、`scripts/evaluation/run_benchmark.sh`、`scripts/evaluation/run_msprof.sh` 和 `scripts/evaluation/run_vbench.sh` 能解析到实际模型、环境和 checkpoint 路径。NPU 训练/推理仍为待服务器验证。
 
 ## 3. 结果回填
 
@@ -50,9 +63,9 @@ torchrun --standalone --nproc_per_node=4 \
 ```text
 test_id=
 device=
-hsa_history_mode=
-是否出现 pre-window selected frame=
+真实路径覆盖变量=
+入口脚本=
 resolved_config_path=
-多 prompt 是否通过=
+是否解析到实际 checkpoint=
 异常与日志路径=
 ```

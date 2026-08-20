@@ -22,12 +22,12 @@ triton-ascend：3.2.0（训练算子）
 
 ```text
 /path/to/LongLive-oneday
-/mnt/a800_share/r50063443/conda_envs/longlive
-/mnt/a800_share/r50063443/conda_envs/aisbench_npu
-/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-/mnt/a800_share/r50063443/vbench_models
-/mnt/a800_share/r50063443/Wan2.2-TI2V-5B
-/mnt/a800_share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
+/path/to/conda_envs/longlive
+/path/to/conda_envs/aisbench_npu
+/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+/path/to/vbench_models
+/path/to/Wan2.2-TI2V-5B
+/path/to/longlive2_merged_generator.pt
 ```
 
 Wan2.2 模型目录至少应包含：
@@ -41,8 +41,8 @@ Wan2.2_VAE.pth
 ## 2. 激活并检查环境
 
 ```bash
-conda activate /mnt/a800_share/r50063443/conda_envs/longlive
-source /mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+conda activate /path/to/conda_envs/longlive
+source /path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
 cd /path/to/LongLive-oneday
 npu-smi info
 ```

@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/a800_share/r50063443/conda_envs/longlive}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/a800_share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/path/to/conda_envs/longlive}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
