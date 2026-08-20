@@ -5,11 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+# ---------- 可覆盖参数 ----------
 TASK="${TASK:-benchmark}"
 METHODS="${METHODS:-dense,hsa_cag,sla_cag,hsa_sla_cag}"
 DURATIONS="${DURATIONS:-5s,32s,64s}"
 MODES="${MODES:-dit_only,sync_vae,async_vae}"
-SP_SIZES="${SP_SIZES:-1,4}"
+LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-1,4}"
+LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 PERF_DEVICES="${PERF_DEVICES:-0,1,2,3,4}"
 SUITE_ID="${SUITE_ID:-sparse_matrix_$(date +%Y%m%d_%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -30,12 +32,12 @@ fi
 IFS=',' read -r -a methods <<<"${METHODS}"
 IFS=',' read -r -a durations <<<"${DURATIONS}"
 IFS=',' read -r -a modes <<<"${MODES}"
-IFS=',' read -r -a sp_sizes <<<"${SP_SIZES}"
+IFS=',' read -r -a sp_sizes <<<"${LONGLIVE_SP_SIZE}"
 IFS=',' read -r -a devices <<<"${PERF_DEVICES}"
 required_device_count=0
 for sp_size in "${sp_sizes[@]}"; do
   if [[ ! "${sp_size}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "[error] SP_SIZES must contain positive integers, got ${sp_size}" >&2
+    echo "[error] LONGLIVE_SP_SIZE must contain positive integers, got ${sp_size}" >&2
     exit 2
   fi
   case_required="${sp_size}"

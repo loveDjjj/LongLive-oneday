@@ -34,6 +34,7 @@ class HSAAttentionConfig:
     dense_current_blocks: bool = False
     hsa_history_mode: str = "rolling"
     first_chunk_dense: bool = True
+    dense_prefix_chunks: int = 1
     budget_reference: str = "full_resident_kv"
     query_block_batch: int = 1
     softmax_scale: float | None = None
@@ -102,6 +103,8 @@ class HSAAttentionConfig:
             raise ValueError("HSA hsa_history_mode must be rolling or full.")
         if self.enabled and not self.first_chunk_dense:
             raise ValueError("HSA requires first_chunk_dense=true.")
+        if self.dense_prefix_chunks < 1:
+            raise ValueError("HSA dense_prefix_chunks must be at least 1.")
         if self.budget_reference != "full_resident_kv":
             raise ValueError("HSA budget_reference must be full_resident_kv.")
         if self.query_block_batch <= 0:
@@ -264,7 +267,9 @@ def hsa_cag_attention(
         return _dense_attention(q, k, v, config.softmax_scale)
     sparsity = config.sparsity_list[
         min(chunk_id, len(config.sparsity_list) - 1)
-    ] if config.sparsity_list else (0.0 if chunk_id <= 0 else config.sparsity)
+    ] if config.sparsity_list else (
+        0.0 if chunk_id < config.dense_prefix_chunks else config.sparsity
+    )
     if sparsity <= 0:
         return _dense_attention(q, k, v, config.softmax_scale)
 

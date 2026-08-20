@@ -11,6 +11,7 @@ if [[ "$#" -gt 1 ]]; then
 fi
 shared_checkpoint="${1:-${LONGLIVE_GENERATOR_CKPT:-}}"
 
+# ---------- 可覆盖参数 ----------
 METHODS="${METHODS:-dense,hsa_cag,sla_cag,hsa_sla_cag}"
 VBENCH_PRESETS="${VBENCH_PRESETS:-longlive2_standard_20pct}"
 SUITE_ID="${SUITE_ID:-vbench_sparse_matrix_$(date +%Y%m%d_%H%M%S)}"

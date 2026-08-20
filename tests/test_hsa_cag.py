@@ -78,6 +78,16 @@ def test_cag_longlive_128_frame_schedule():
         assert schedule[index] == pytest.approx(value, abs=1.0e-6)
 
 
+def test_dense_prefix_chunks_applies_to_shared_cag_schedule():
+    schedule = calculate_chunk_sparsities(
+        32, 8, 32, _config(sparsity=0.85, sparsity_base=0.95, dense_prefix_chunks=2)
+    )
+
+    assert len(schedule) == 4
+    assert schedule[:2] == [0.0, 0.0]
+    assert schedule[2] > 0.0
+
+
 def test_full_history_cag_schedule_uses_full_resident_lengths():
     base = _config(sparsity=0.85, sparsity_base=0.95)
     rolling = with_cag_schedule(

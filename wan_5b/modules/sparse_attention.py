@@ -71,11 +71,21 @@ def calculate_chunk_sparsities(
     config = parse_sparse_config(sparse_config)
     if not config.enabled or num_output_frames <= 0:
         return []
+    if num_frame_per_block <= 0:
+        raise ValueError("num_frame_per_block must be positive.")
+    dense_prefix_chunks = int(getattr(config, "dense_prefix_chunks", 1))
+    if dense_prefix_chunks < 1:
+        raise ValueError("dense_prefix_chunks must be at least 1.")
+    num_chunks = math.ceil(num_output_frames / num_frame_per_block)
     chunk_frames = list(
-        range(2 * num_frame_per_block, num_output_frames + 1, num_frame_per_block)
+        range(
+            (dense_prefix_chunks + 1) * num_frame_per_block,
+            num_output_frames + 1,
+            num_frame_per_block,
+        )
     )
     if not chunk_frames:
-        return [0.0]
+        return [0.0] * num_chunks
     kv_lengths = [
         count if local_attn_size == -1 else min(count, local_attn_size)
         for count in chunk_frames
@@ -85,7 +95,7 @@ def calculate_chunk_sparsities(
     base = sum((1.0 - config.sparsity_base) * length for length in kv_lengths)
     weighted = sum(alpha * length for alpha, length in zip(alphas, kv_lengths))
     beta = 0.0 if weighted == 0 else (target - base) / weighted
-    return [0.0] + [
+    return [0.0] * dense_prefix_chunks + [
         min(0.999, max(0.0, config.sparsity_base - alpha * beta))
         for alpha in alphas
     ]

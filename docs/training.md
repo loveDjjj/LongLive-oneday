@@ -33,7 +33,7 @@ LongLive2.0 最多保留 32 个 latent 帧的滚动 KV。每帧在 patch embeddi
 
 - HSA 只在 history 中选择 protected、near 4 帧和 dynamic 4 帧；current 8 帧始终进入候选 frame pool。
 - current blocks 不再 dense append，而是和候选 history blocks 一起参加全局 CAG Top-K。
-- CAG 根据 AR rollout 位置改变稀疏预算；仅首个没有 history 的 AR chunk 回退 dense，history 不足时使用全部可用 history 后继续进入 block sparse stage。
+- CAG 根据 AR rollout 位置改变稀疏预算；默认 `dense_prefix_chunks=1`，仅首个没有 history 的 AR chunk 回退 dense。需要让前 N 个 chunk 保持 dense 时，可通过 YAML 或 `LONGLIVE_DENSE_PREFIX_CHUNKS` 覆盖；该计数按整段 rollout chunk 编号计算，不在 multi-shot 边界自动重置。history 不足时使用全部可用 history 后继续进入 block sparse stage。
 - 训练和推理统一使用 128-token block，适配 MindIE-SD RainFusion 和 Ascend Triton 的共同执行契约。
 
 ### 2.2 SLA+CAG
@@ -87,11 +87,11 @@ data/train/vidprom_filtered_extended/
 
 ```text
 world_size = NNODES x NPROC_PER_NODE
-DP = world_size / SP_SIZE
+DP = world_size / LONGLIVE_SP_SIZE
 有效 batch = DP x batch_size x GRADIENT_ACCUMULATION_STEPS
 ```
 
-当前 `batch_size=1`。模型有 24 个 attention head，每个 chunk 有 8 个 latent 帧，因此合法的 `SP_SIZE` 为 `1/2/4/8`。SLA+CAG 和 HSA+SLA+CAG 的 16 卡正式配置均使用 SP8 x DP2、梯度累积 4，有效 batch 为 8，并执行 200 次 optimizer update。
+当前 `batch_size=1`。模型有 24 个 attention head，每个 chunk 有 8 个 latent 帧，因此合法的 `LONGLIVE_SP_SIZE` 为 `1/2/4/8`。SLA+CAG 和 HSA+SLA+CAG 的 16 卡正式配置均使用 SP8 x DP2、梯度累积 4，有效 batch 为 8，并执行 200 次 optimizer update。
 
 一个 step 表示一次 optimizer 更新，不是一条提示词或一个时间块。增加 SP 主要改变单样本分片和通信，增加 DP 才直接提高样本吞吐。跨节点 SP 会增加 HCCL 开销，推荐让每个 SP 组位于单一节点内。
 
@@ -131,13 +131,14 @@ configs/train/hsa_sla_cag.yaml
 | `NPROC_PER_NODE` | 每节点 worker 数 | 16 |
 | `NNODES` / `NODE_RANK` | 节点数 / 当前节点编号 | 1 / 0 |
 | `MASTER_ADDR` | 多节点 rendezvous 所在的 rank 0 地址；单节点忽略 | `127.0.0.1` |
-| `SP_SIZE` | Ulysses SP 大小；SLA/混合方法入口默认 8 | 4 |
+| `LONGLIVE_SP_SIZE` | Ulysses SP 大小；SLA/混合方法入口默认 8；旧 `SP_SIZE` 仅作兼容别名 | 4 |
 | `GRADIENT_ACCUMULATION_STEPS` | 梯度累积次数；SLA/混合方法入口默认 4 | 16 |
 | `MAX_ITERS` | 训练结束目标 step；SLA/混合方法入口默认 200 | 2000 |
 | `SAVE_INTERVAL` | checkpoint 间隔；SLA/混合方法入口默认 20 | 10 |
 | `VIS_INTERVAL` | 训练内验证间隔，0 关闭 | 100 |
 | `MAX_CHECKPOINTS` | 最多保留 checkpoint 数；SLA/混合方法入口默认 5 | 20 |
 | `SPARSE_BACKEND` | 训练稀疏后端 | `ascend_triton` |
+| `LONGLIVE_DENSE_PREFIX_CHUNKS` | 训练前缀 dense 的 AR chunk 数 | 1 |
 | `GENERATOR_TRAIN_SCOPE` | Generator 范围；通常由具体入口设置 | 配置文件 |
 | `GENERATOR_LR` / `LINEAR_LR` | 主干 LoRA / 原始补偿层学习率 | 配置文件 |
 | `TRAIN_RUN_NAME` | 运行目录与自动恢复标识 | 时间戳名称 |
@@ -151,7 +152,7 @@ configs/train/hsa_sla_cag.yaml
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+NPROC_PER_NODE=12 LONGLIVE_SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
 TRAIN_RUN_NAME=hsa_sla_cag_12card_smoke \
 bash scripts/training/run_hsa_sla_cag.sh
@@ -161,7 +162,7 @@ bash scripts/training/run_hsa_sla_cag.sh
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+NPROC_PER_NODE=12 LONGLIVE_SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
 TRAIN_RUN_NAME=hsa_sla_cag_linear_only_12card_smoke \
 bash scripts/training/run_hsa_sla_cag_linear_only.sh
@@ -171,7 +172,7 @@ bash scripts/training/run_hsa_sla_cag_linear_only.sh
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-NPROC_PER_NODE=16 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
+NPROC_PER_NODE=16 LONGLIVE_SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
 MAX_ITERS=200 SAVE_INTERVAL=20 MAX_CHECKPOINTS=5 VIS_INTERVAL=100 \
 TRAIN_RUN_NAME=hsa_sla_cag_16card_200step \
 bash scripts/training/run_hsa_sla_cag.sh
@@ -181,7 +182,7 @@ bash scripts/training/run_hsa_sla_cag.sh
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-NPROC_PER_NODE=16 SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
+NPROC_PER_NODE=16 LONGLIVE_SP_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 \
 MAX_ITERS=200 SAVE_INTERVAL=20 MAX_CHECKPOINTS=5 VIS_INTERVAL=100 \
 TRAIN_RUN_NAME=sla_cag_16card_200step \
 bash scripts/training/run_sla_cag.sh
@@ -200,7 +201,7 @@ bash scripts/training/run_sla_cag.sh
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
 NNODES=2 NODE_RANK=0 NPROC_PER_NODE=12 \
 MASTER_ADDR=10.0.0.10 \
-SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=8 MAX_ITERS=200 \
+LONGLIVE_SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=8 MAX_ITERS=200 \
 TRAIN_RUN_NAME=hsa_sla_cag_24card_200step \
 bash scripts/training/run_hsa_sla_cag.sh
 ```

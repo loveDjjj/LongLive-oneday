@@ -114,6 +114,12 @@ def _sparse_model_config(sparsity) -> dict | None:
                 f"{history_mode_override!r}; choose rolling or full"
             )
         options["hsa_history_mode"] = history_mode_override
+    dense_prefix_override = os.environ.get("LONGLIVE_DENSE_PREFIX_CHUNKS", "").strip()
+    if dense_prefix_override:
+        dense_prefix_chunks = int(dense_prefix_override)
+        if dense_prefix_chunks < 1:
+            raise ValueError("LONGLIVE_DENSE_PREFIX_CHUNKS must be at least 1")
+        options["dense_prefix_chunks"] = dense_prefix_chunks
     return {"enabled": True, "method": method, **options}
 
 
@@ -329,7 +335,7 @@ def resolve_vbench(args) -> dict:
     dataset = config.datasets[category][subset]
     pixel_frames = int(preset.get("pixel_frames", defaults.pixel_frames))
     fps = int(preset.get("fps", defaults.fps))
-    sp_size = int(preset.get("sp_size", defaults.sp_size))
+    sp_size = _runtime_sp_size(int(preset.get("sp_size", defaults.sp_size)))
     dp_size = int(preset.get("dp_size", defaults.dp_size))
     seeds = list(preset.get("seeds", defaults.seeds))
     nproc = sp_size * dp_size
@@ -351,6 +357,13 @@ def resolve_vbench(args) -> dict:
     sparse_config = _sparse_model_config(config.sparsity)
 
     if engine_name == "longlive2":
+        if 24 % sp_size != 0:
+            raise ValueError(f"sp_size={sp_size} must divide model_num_heads=24")
+        frames_per_block = int(engine.num_frame_per_block)
+        if frames_per_block % sp_size != 0:
+            raise ValueError(
+                f"sp_size={sp_size} must divide num_frame_per_block={frames_per_block}"
+            )
         if (pixel_frames - 1) % 4 != 0:
             raise ValueError("LongLive pixel_frames must satisfy (pixel_frames - 1) % 4 == 0")
         latent_frames = (pixel_frames - 1) // 4 + 1

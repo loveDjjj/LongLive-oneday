@@ -193,7 +193,7 @@ python tests/npu/benchmark_sparse_attention.py \
 bash scripts/data/prepare_training_data.sh
 
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11 \
-NPROC_PER_NODE=12 SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
+NPROC_PER_NODE=12 LONGLIVE_SP_SIZE=4 GRADIENT_ACCUMULATION_STEPS=1 \
 MAX_ITERS=1 SAVE_INTERVAL=1 MAX_CHECKPOINTS=1 VIS_INTERVAL=0 \
 TRAIN_RUN_NAME=hsa_sla_cag_12card_smoke \
 bash scripts/training/run_hsa_sla_cag.sh
@@ -234,9 +234,9 @@ unset ASCEND_LAUNCH_BLOCKING
 
 ```text
 可见 NPU 数量 == NPROC_PER_NODE
-WORLD_SIZE % SP_SIZE == 0
-24 个 attention head % SP_SIZE == 0
-每个 chunk 的 8 个 latent 帧 % SP_SIZE == 0
+WORLD_SIZE % LONGLIVE_SP_SIZE == 0
+24 个 attention head % LONGLIVE_SP_SIZE == 0
+每个 chunk 的 8 个 latent 帧 % LONGLIVE_SP_SIZE == 0
 ```
 
-当前支持 `SP_SIZE=1/2/4/8`。多节点必须共享代码、模型、数据和运行目录，并使用一致的 `MASTER_ADDR` 与 `TRAIN_RUN_NAME`。先启动 rank 0，由系统动态分配 rendezvous 端口并写入共享 run 目录；其他节点自动读取，不设置 `MASTER_PORT`。
+当前支持 `LONGLIVE_SP_SIZE=1/2/4/8`。多节点必须共享代码、模型、数据和运行目录，并使用一致的 `MASTER_ADDR` 与 `TRAIN_RUN_NAME`。先启动 rank 0，由系统动态分配 rendezvous 端口并写入共享 run 目录；其他节点自动读取，不设置 `MASTER_PORT`。

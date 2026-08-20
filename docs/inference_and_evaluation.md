@@ -31,7 +31,7 @@
 | `summarize_vbench.py` | 从 AISBench 产物提取 16 个官方维度及官方聚合分数。 |
 | `summarize_suite.py` | 汇总性能、msprof 或 VBench 矩阵为 CSV/JSON，并按相同 SP/DP 匹配 dense 基线。 |
 
-不要为固定方法、固定时长或固定数据子集增加一次性包装脚本。使用矩阵入口的 `METHODS`、`DURATIONS`、`MODES`、`SP_SIZES` 和 `VBENCH_PRESETS` 缩小范围，避免入口功能重复。
+不要为固定方法、固定时长或固定数据子集增加一次性包装脚本。使用矩阵入口的 `METHODS`、`DURATIONS`、`MODES`、`LONGLIVE_SP_SIZE` 和 `VBENCH_PRESETS` 缩小范围，避免入口功能重复。
 
 ## 2. 支持矩阵
 
@@ -88,7 +88,7 @@ SLA 不裁剪 latent 帧，而是对完整 resident KV 中所有 128-token block
 
 SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。在 128-frame、`0.85/0.95` CAG schedule 尾部，理论预算约为 26/220 个 KV blocks；最终值还会受 candidate clamp 影响，必须以运行日志为准。
 
-第一块没有 history 时统一回退 dense。history 不足时保留全部可用 history，并继续进入 block sparse stage。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
+默认 `dense_prefix_chunks=1`，即第一块没有 history 时统一回退 dense。可通过 YAML 或 `LONGLIVE_DENSE_PREFIX_CHUNKS` 指定前 N 个 AR chunk 走 dense；该计数按整段视频 chunk 编号计算，不会在 multi-shot 边界自动重置。history 不足时保留全部可用 history，并继续进入 block sparse stage。相同 chunk 的多个去噪 step 可复用历史 K summaries 和线性统计，但 query、当前 K、Top-K 和最终 LUT 仍需逐层逐步更新。
 
 ### 4.4 物理稀疏边界
 
@@ -122,7 +122,7 @@ done
 
 ## 6. 性能模式
 
-统一支持三种模式，并支持通过 `LONGLIVE_SP_SIZE` 或性能矩阵的 `SP_SIZES` 在 SP1 与 SP4 间切换：
+统一支持三种模式，单项入口和矩阵入口都通过 `LONGLIVE_SP_SIZE` 切换 SP1/SP4；矩阵入口可传逗号列表，例如 `LONGLIVE_SP_SIZE=1,4`。
 
 | 模式 | NPU 数 | 行为 | 用途 |
 | --- | ---: | --- | --- |
@@ -169,14 +169,14 @@ bash scripts/evaluation/run_benchmark.sh 32s
 默认矩阵包含 4 种方法、3 个时长、SP1/SP4 和 3 种模式，共 72 个 case：
 
 ```bash
-DRY_RUN=1 SP_SIZES=1,4 PERF_DEVICES=0,1,2,3,15 \
+DRY_RUN=1 LONGLIVE_SP_SIZE=1,4 PERF_DEVICES=0,1,2,3,15 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
 
 确认展开正确后运行：
 
 ```bash
-SP_SIZES=1,4 PERF_DEVICES=0,1,2,3,15 TASK=benchmark \
+LONGLIVE_SP_SIZE=1,4 PERF_DEVICES=0,1,2,3,15 TASK=benchmark \
 SUITE_ID=sparse-release-01 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```
@@ -184,7 +184,7 @@ bash scripts/evaluation/run_performance_matrix.sh
 可缩小范围：
 
 ```bash
-METHODS=dense,hsa_cag DURATIONS=32s MODES=dit_only,async_vae SP_SIZES=4 \
+METHODS=dense,hsa_cag DURATIONS=32s MODES=dit_only,async_vae LONGLIVE_SP_SIZE=4 \
 PERF_DEVICES=0,1,2,3,15 TASK=benchmark SUITE_ID=hsa-retest-01 \
 bash scripts/evaluation/run_performance_matrix.sh
 ```

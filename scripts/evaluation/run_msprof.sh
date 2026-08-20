@@ -12,9 +12,12 @@ export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longliv
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
+# ---------- 可覆盖参数 ----------
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
 PRESET="${1:-32s}"
 MSPROF_MODE="${MSPROF_MODE:-async_vae}"
+LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-}"
+LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 
 if [[ ! "${MSPROF_MODE}" =~ ^(dit_only|sync_vae|async_vae)$ ]]; then
   echo "[error] MSPROF_MODE must be dit_only, sync_vae, or async_vae" >&2

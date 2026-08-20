@@ -40,6 +40,7 @@ class HSASLAAttentionConfig:
     max_global_sink_frames: int = 2
     max_shot_sink_frames: int = 2
     first_chunk_dense: bool = True
+    dense_prefix_chunks: int = 1
     budget_reference: str = "full_resident_kv"
     full_kv_linear_compensation: bool = True
     query_block_batch: int = 1
@@ -115,6 +116,8 @@ class HSASLAAttentionConfig:
             raise ValueError("HSA-SLA requires dense_current_blocks=false.")
         if self.enabled and not self.first_chunk_dense:
             raise ValueError("HSA-SLA requires first_chunk_dense=true.")
+        if self.dense_prefix_chunks < 1:
+            raise ValueError("HSA-SLA dense_prefix_chunks must be at least 1.")
         if self.budget_reference != "full_resident_kv":
             raise ValueError("HSA-SLA budget_reference must be full_resident_kv.")
         if self.enabled and not self.full_kv_linear_compensation:
@@ -277,7 +280,9 @@ def hsa_sla_cag_attention(
     history_tokens = k.shape[1] - q.shape[1]
     sparsity = config.sparsity_list[
         min(chunk_id, len(config.sparsity_list) - 1)
-    ] if config.sparsity_list else (0.0 if chunk_id <= 0 else config.sparsity)
+    ] if config.sparsity_list else (
+        0.0 if chunk_id < config.dense_prefix_chunks else config.sparsity
+    )
     if history_tokens <= 0 or sparsity <= 0:
         return _dense_attention(q, k, v, config.softmax_scale)
 

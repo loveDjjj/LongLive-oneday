@@ -14,8 +14,11 @@ export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/r50063443/vbench_models}
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
+# ---------- 可覆盖参数 ----------
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/vbench.yaml}"
 PRESET="${1:-longlive2_standard_20pct}"
+LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-}"
+LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 
 for required_path in "${CONFIG_PATH}" "${CANN_ENV_SCRIPT}"; do
   if [[ ! -f "${required_path}" ]]; then

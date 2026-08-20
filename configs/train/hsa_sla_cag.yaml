@@ -47,6 +47,8 @@ model_kwargs:
     max_shot_sink_frames: 2
     # 首个 AR chunk 没有 history，必须执行 dense attention。
     first_chunk_dense: true
+    # 前缀 dense 的 AR chunk 数，按整段训练 rollout chunk 编号计算；multi-shot 边界不自动重置。
+    dense_prefix_chunks: 1
     # 最终 K 以完整 resident KV blocks 为分母，HSA 只限制 eligible candidate pool。
     budget_reference: full_resident_kv
     # 线性补偿分支始终读取完整 resident KV 统计量，不受 frame/block router 限制。

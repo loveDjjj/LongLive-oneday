@@ -6,7 +6,8 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8
 export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
-export SP_SIZE="${SP_SIZE:-4}"
+export LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-${SP_SIZE:-4}}"
+export SP_SIZE="${LONGLIVE_SP_SIZE}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export SHARDING_STRATEGY="${SHARDING_STRATEGY:-}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
@@ -18,6 +19,7 @@ export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-20}"
 export SPARSE_METHOD="${SPARSE_METHOD:-sla_cag}"
 export SPARSE_BACKEND="${SPARSE_BACKEND:-${SLA_BACKEND:-ascend_triton}}"
 export SPARSE_QUERY_BLOCK_BATCH="${SPARSE_QUERY_BLOCK_BATCH:-${SLA_QUERY_BLOCK_BATCH:-1}}"
+export LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-1}"
 export GENERATOR_TRAIN_SCOPE="${GENERATOR_TRAIN_SCOPE:-}"
 export GENERATOR_LR="${GENERATOR_LR:-}"
 export LINEAR_LR="${LINEAR_LR:-}"
@@ -76,11 +78,11 @@ if [[ ! "${VALIDATE_LINEAR_CHECKPOINT}" =~ ^[01]$ ]]; then
 fi
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
 if (( WORLD_SIZE % SP_SIZE != 0 )); then
-    echo "[error] WORLD_SIZE=${WORLD_SIZE} must be divisible by SP_SIZE=${SP_SIZE}" >&2
+    echo "[error] WORLD_SIZE=${WORLD_SIZE} must be divisible by LONGLIVE_SP_SIZE=${SP_SIZE}" >&2
     exit 2
 fi
 if (( 24 % SP_SIZE != 0 || 8 % SP_SIZE != 0 )); then
-    echo "[error] SP_SIZE=${SP_SIZE} must divide both 24 attention heads and 8 latent frames per block" >&2
+    echo "[error] LONGLIVE_SP_SIZE=${SP_SIZE} must divide both 24 attention heads and 8 latent frames per block" >&2
     exit 2
 fi
 DP_SIZE=$((WORLD_SIZE / SP_SIZE))
@@ -166,6 +168,10 @@ query_block_batch = int(os.environ["SPARSE_QUERY_BLOCK_BATCH"])
 if query_block_batch <= 0:
     raise ValueError("SPARSE_QUERY_BLOCK_BATCH must be positive")
 config.model_kwargs.sparse_config.query_block_batch = query_block_batch
+dense_prefix_chunks = int(os.environ["LONGLIVE_DENSE_PREFIX_CHUNKS"])
+if dense_prefix_chunks < 1:
+    raise ValueError("LONGLIVE_DENSE_PREFIX_CHUNKS must be at least 1")
+config.model_kwargs.sparse_config.dense_prefix_chunks = dense_prefix_chunks
 OmegaConf.save(config, output)
 PY
     touch "${CONFIG_READY}"

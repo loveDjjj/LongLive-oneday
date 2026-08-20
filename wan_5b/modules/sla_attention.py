@@ -51,6 +51,7 @@ class SLAAttentionConfig:
     hard_keep_recent_frames: int = 1
     dense_current_blocks: bool = False
     first_chunk_dense: bool = True
+    dense_prefix_chunks: int = 1
     budget_reference: str = "full_resident_kv"
     full_kv_linear_compensation: bool = True
     query_block_batch: int = 1
@@ -124,6 +125,8 @@ class SLAAttentionConfig:
             raise ValueError("SLA requires dense_current_blocks=false.")
         if self.enabled and not self.first_chunk_dense:
             raise ValueError("SLA requires first_chunk_dense=true.")
+        if self.dense_prefix_chunks < 1:
+            raise ValueError("SLA dense_prefix_chunks must be at least 1.")
         if self.budget_reference != "full_resident_kv":
             raise ValueError("SLA budget_reference must be full_resident_kv.")
         if self.enabled and not self.full_kv_linear_compensation:
@@ -157,11 +160,17 @@ def calculate_chunk_sparsities(
     if num_frame_per_block <= 0:
         raise ValueError("num_frame_per_block must be positive.")
 
+    dense_prefix_chunks = int(getattr(config, "dense_prefix_chunks", 1))
+    num_chunks = math.ceil(num_output_frames / num_frame_per_block)
     chunk_frame_counts = list(
-        range(2 * num_frame_per_block, num_output_frames + 1, num_frame_per_block)
+        range(
+            (dense_prefix_chunks + 1) * num_frame_per_block,
+            num_output_frames + 1,
+            num_frame_per_block,
+        )
     )
     if not chunk_frame_counts:
-        return [0.0]
+        return [0.0] * num_chunks
     kv_lengths = [
         count if local_attn_size == -1 else min(count, local_attn_size)
         for count in chunk_frame_counts
@@ -172,11 +181,13 @@ def calculate_chunk_sparsities(
     weighted_flops = sum(alpha * length for alpha, length in zip(alphas, kv_lengths))
     beta = 0.0 if weighted_flops == 0 else (target_flops - base_flops) / weighted_flops
     tail = [config.sparsity_base - alpha * beta for alpha in alphas]
-    return [0.0] + [min(0.999, max(0.0, value)) for value in tail]
+    return [0.0] * dense_prefix_chunks + [
+        min(0.999, max(0.0, value)) for value in tail
+    ]
 
 
 def resolve_chunk_sparsity(config: SLAAttentionConfig, chunk_id: int) -> float:
-    if chunk_id <= 0:
+    if chunk_id < config.dense_prefix_chunks:
         return 0.0
     if config.sparsity_list:
         return config.sparsity_list[min(chunk_id, len(config.sparsity_list) - 1)]

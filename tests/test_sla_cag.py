@@ -65,6 +65,18 @@ def test_cag_starts_dense_and_preserves_average_budget():
     assert abs(kept - target) < 1.0e-6
 
 
+def test_dense_prefix_chunks_extends_dense_schedule_prefix():
+    config = _config(sparsity=0.75, sparsity_base=0.9, dense_prefix_chunks=2)
+    schedule = calculate_chunk_sparsities(32, 8, 32, config)
+
+    assert len(schedule) == 4
+    assert schedule[:2] == [0.0, 0.0]
+    kv_lengths = [24, 32]
+    kept = sum((1.0 - value) * length for value, length in zip(schedule[2:], kv_lengths))
+    target = sum((1.0 - config.sparsity) * length for length in kv_lengths)
+    assert abs(kept - target) < 1.0e-6
+
+
 def test_topk_alias_maps_to_sparsity():
     config = SLAAttentionConfig.from_mapping({"topk": 0.05})
     assert config.sparsity == 0.95
@@ -84,6 +96,26 @@ def test_first_chunk_is_exact_dense_attention():
     )
     reference = torch.nn.functional.scaled_dot_product_attention(
         q.transpose(1, 2), q.transpose(1, 2), q.transpose(1, 2)
+    ).transpose(1, 2)
+    torch.testing.assert_close(output, reference)
+
+
+def test_dense_prefix_second_chunk_is_exact_dense_without_schedule():
+    torch.manual_seed(2)
+    q = torch.randn(1, 4, 2, 4)
+    history = torch.randn(1, 4, 2, 4)
+    k = torch.cat((history, q), dim=1)
+    output = sla_cag_attention(
+        q,
+        k,
+        k,
+        frame_seq=2,
+        chunk_id=1,
+        sparse_config=_config(dense_prefix_chunks=2),
+        linear_projection=_projection(4, identity=True),
+    )
+    reference = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2), k.transpose(1, 2), k.transpose(1, 2)
     ).transpose(1, 2)
     torch.testing.assert_close(output, reference)
 

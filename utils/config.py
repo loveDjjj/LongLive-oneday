@@ -254,6 +254,10 @@ def validate_sparse_training_config(config):
     require(block_q == 128 and block_k == 128, "all maintained sparse methods require 128-token blocks")
     require(bool(sparse.get("first_chunk_dense", False)), "sparse first_chunk_dense must be true")
     require(
+        int(sparse.get("dense_prefix_chunks", 0)) >= 1,
+        "sparse dense_prefix_chunks must be at least 1",
+    )
+    require(
         sparse.get("budget_reference") == "full_resident_kv",
         "sparse budget_reference must be full_resident_kv",
     )

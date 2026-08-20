@@ -11,12 +11,15 @@ export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longliv
 export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
+# ---------- 可覆盖参数 ----------
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"
 PRESET="${1:-32s}"
 BENCHMARK_REPEATS="${BENCHMARK_REPEATS:-3}"
 BENCHMARK_WARMUP="${BENCHMARK_WARMUP:-1}"
 BENCHMARK_LATENTS_ONLY="${BENCHMARK_LATENTS_ONLY:-0}"
 BENCHMARK_MODE="${BENCHMARK_MODE:-async_vae}"
+LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-}"
+LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 
 if [[ ! "${BENCHMARK_REPEATS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "[error] BENCHMARK_REPEATS must be a positive integer" >&2

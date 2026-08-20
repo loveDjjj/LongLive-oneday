@@ -106,6 +106,21 @@ def test_benchmark_sp_override_controls_worker_and_vae_devices(
     )
 
 
+def test_vbench_sp_override_uses_longlive_sp_size(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SP_SIZE", "1")
+    output = tmp_path / "vbench-sp1.yaml"
+
+    metadata = resolve_vbench(
+        _args(VBENCH_CONFIG, "longlive2_standard_5pct", output, seed=0)
+    )
+    resolved = OmegaConf.load(output)
+
+    assert metadata["sp_size"] == 1
+    assert metadata["nproc_per_node"] == 8
+    assert metadata["required_devices"] == 8
+    assert resolved.sp_size == 1
+
+
 def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
     monkeypatch.delenv("LONGLIVE_SLA_BACKEND", raising=False)
@@ -124,10 +139,22 @@ def test_vbench_sla_uses_required_fused_backend(tmp_path, monkeypatch):
     assert sparse.sparsity == 0.85
     assert sparse.sparsity_base == 0.95
     assert sparse.first_chunk_dense is True
+    assert sparse.dense_prefix_chunks == 1
     assert sparse.budget_reference == "full_resident_kv"
     assert sparse.full_kv_linear_compensation is True
     assert metadata["sparsity_method"] == "sla_cag"
     assert metadata["sparsity_backend"] == "mindiesd"
+
+
+def test_dense_prefix_chunks_env_override_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    monkeypatch.setenv("LONGLIVE_DENSE_PREFIX_CHUNKS", "2")
+    output = tmp_path / "sla-prefix.yaml"
+
+    resolve_benchmark(_args(MSPROF_CONFIG, "5s", output))
+
+    sparse = OmegaConf.load(output).model_kwargs.sparse_config
+    assert sparse.dense_prefix_chunks == 2
 
 
 def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
@@ -150,6 +177,7 @@ def test_vbench_hsa_selects_hsa_profile(tmp_path, monkeypatch):
     assert sparse.dense_current_blocks is False
     assert sparse.hsa_history_mode == "rolling"
     assert sparse.first_chunk_dense is True
+    assert sparse.dense_prefix_chunks == 1
     assert sparse.budget_reference == "full_resident_kv"
     assert "full_kv_linear_compensation" not in sparse
     assert "feature_map" not in sparse
@@ -199,6 +227,7 @@ def test_vbench_hybrid_selects_frame_filtered_sla_profile(tmp_path, monkeypatch)
     assert "hard_keep_sink_frames" not in sparse
     assert "hard_keep_recent_frames" not in sparse
     assert sparse.first_chunk_dense is True
+    assert sparse.dense_prefix_chunks == 1
     assert sparse.budget_reference == "full_resident_kv"
     assert sparse.full_kv_linear_compensation is True
     assert sparse.linear_cache is True

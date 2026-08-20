@@ -39,6 +39,8 @@ model_kwargs:
     dense_current_blocks: false
     # 首个 AR chunk 没有 history，必须执行 dense attention。
     first_chunk_dense: true
+    # 前缀 dense 的 AR chunk 数，按整段训练 rollout chunk 编号计算；multi-shot 边界不自动重置。
+    dense_prefix_chunks: 1
     # SLA 不裁剪 frame，最终 K 始终以完整 resident KV block 数为分母。
     budget_reference: full_resident_kv
     # 线性补偿分支始终读取完整 resident KV 统计量，不受稀疏 LUT 限制。

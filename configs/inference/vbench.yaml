@@ -97,6 +97,8 @@ sparsity:
       # HSA 历史 KV 来源：rolling 使用 LongLive 32 帧 resident KV；full 保留全部已完成历史帧供论文式 frame retrieval。
       hsa_history_mode: rolling
       first_chunk_dense: true
+      # 前缀 dense 的 AR chunk 数，按整段视频 chunk 编号计算；multi-shot 边界不自动重置。
+      dense_prefix_chunks: 1
       budget_reference: full_resident_kv
       query_block_batch: 1
     hsa_sla_cag:
@@ -115,6 +117,8 @@ sparsity:
       max_global_sink_frames: 2
       max_shot_sink_frames: 2
       first_chunk_dense: true
+      # 前缀 dense 的 AR chunk 数，按整段视频 chunk 编号计算；multi-shot 边界不自动重置。
+      dense_prefix_chunks: 1
       budget_reference: full_resident_kv
       # 完整 KV 线性补偿与稀疏 softmax 分支并行存在。
       full_kv_linear_compensation: true
@@ -133,6 +137,8 @@ sparsity:
       hard_keep_recent_frames: 1
       dense_current_blocks: false
       first_chunk_dense: true
+      # 前缀 dense 的 AR chunk 数，按整段视频 chunk 编号计算；multi-shot 边界不自动重置。
+      dense_prefix_chunks: 1
       budget_reference: full_resident_kv
       # 完整 KV 线性补偿与稀疏 softmax 分支并行存在。
       full_kv_linear_compensation: true
