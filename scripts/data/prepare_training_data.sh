@@ -67,7 +67,7 @@ if [[ ! -f "${source_file}" && "${ALLOW_DOWNLOAD}" != "1" ]]; then
   echo "[error] local training prompts were not found and network download is disabled" >&2
   echo "[hint] place the prepared file at ${output_file}" >&2
   echo "[hint] or place vidprom_filtered_extended.txt under ${DATA_DIR}" >&2
-  echo "[hint] set SOURCE_FILE=/path/to/vidprom_filtered_extended.txt for another local path" >&2
+  echo "[hint] set SOURCE_FILE=/mnt/share/r50063443/LongLive/data/vidprom_filtered_extended.txt for another local path" >&2
   echo "[hint] set ALLOW_DOWNLOAD=1 only on a host that can access Hugging Face" >&2
   exit 2
 fi

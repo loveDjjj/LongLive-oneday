@@ -21,13 +21,13 @@ triton-ascend：3.2.0（训练算子）
 服务器默认路径：
 
 ```text
-/path/to/LongLive-oneday
-/path/to/conda_envs/longlive
-/path/to/conda_envs/aisbench_npu
-/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-/path/to/vbench_models
-/path/to/Wan2.2-TI2V-5B
-/path/to/longlive2_merged_generator.pt
+/mnt/share/r50063443/LongLive-oneday
+/mnt/share/r50063443/conda_envs/longlive
+/mnt/share/r50063443/conda_envs/aisbench_npu
+/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+/mnt/share/r50063443/vbench_models
+/mnt/share/r50063443/Wan2.2-TI2V-5B
+/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 ```
 
 Wan2.2 模型目录至少应包含：
@@ -41,9 +41,9 @@ Wan2.2_VAE.pth
 ## 2. 激活并检查环境
 
 ```bash
-conda activate /path/to/conda_envs/longlive
-source /path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-cd /path/to/LongLive-oneday
+conda activate /mnt/share/r50063443/conda_envs/longlive
+source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+cd /mnt/share/r50063443/LongLive-oneday
 npu-smi info
 ```
 
@@ -117,10 +117,10 @@ DRY_RUN=1 PERF_DEVICES=0,1,2,3,4 \
 bash scripts/evaluation/run_performance_matrix.sh
 
 DRY_RUN=1 VBENCH_PRESETS=longlive2_standard_20pct \
-DENSE_GENERATOR_CKPT=/path/to/dense.pt \
-HSA_CAG_GENERATOR_CKPT=/path/to/hsa.pt \
-SLA_CAG_GENERATOR_CKPT=/path/to/sla.pt \
-HSA_SLA_CAG_GENERATOR_CKPT=/path/to/hybrid.pt \
+DENSE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/dense.pt \
+HSA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/hsa.pt \
+SLA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/sla.pt \
+HSA_SLA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/hybrid.pt \
 bash scripts/evaluation/run_vbench_matrix.sh
 ```
 

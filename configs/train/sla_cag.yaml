@@ -15,7 +15,7 @@ infra:
 
 model_kwargs:
   model_name: Wan2.2-TI2V-5B
-  model_root: /path/to/Wan2.2-TI2V-5B
+  model_root: /mnt/share/r50063443/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   # 每个时间块包含 8 个 latent frame，32 帧训练轨迹共分为 4 个块。
   num_frame_per_block: 8
@@ -54,7 +54,7 @@ model_kwargs:
 # DMD 的真实分数教师保持稠密注意力且不更新参数。
 real_model_kwargs:
   model_name: Wan2.2-TI2V-5B
-  model_root: /path/to/Wan2.2-TI2V-5B
+  model_root: /mnt/share/r50063443/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   num_frame_per_block: 8
   local_attn_size: 32
@@ -62,14 +62,14 @@ real_model_kwargs:
 # Fake Score 判别器保持稠密注意力，通过 LoRA 学习当前生成分布。
 fake_model_kwargs:
   model_name: Wan2.2-TI2V-5B
-  model_root: /path/to/Wan2.2-TI2V-5B
+  model_root: /mnt/share/r50063443/Wan2.2-TI2V-5B
   timestep_shift: 5.0
   num_frame_per_block: 8
   local_attn_size: 32
 
 checkpoints:
   # 基础生成器权重；恢复训练时优先读取运行目录中最新的 train_state.pt。
-  generator_ckpt: /path/to/longlive2_merged_generator.pt
+  generator_ckpt: /mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
   lora_ckpt: null
 
 algorithm:

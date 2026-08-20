@@ -8,8 +8,8 @@ cd "${REPO_ROOT}"
 
 # 部署参数。SP、DP 和专用 VAE 设备由 YAML 管理。
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4}"
-export GENERATION_ENV="${GENERATION_ENV:-/path/to/conda_envs/longlive}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
+export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
 unset MASTER_PORT
 
 CONFIG_PATH="${CONFIG_PATH:-configs/inference/msprof.yaml}"

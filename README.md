@@ -26,9 +26,9 @@
 安装环境并执行分层验收：
 
 ```bash
-conda activate /path/to/conda_envs/longlive
-source /path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-cd /path/to/LongLive-oneday
+conda activate /mnt/share/r50063443/conda_envs/longlive
+source /mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+cd /mnt/share/r50063443/LongLive-oneday
 PYTHONPATH=. pytest -q
 ```
 

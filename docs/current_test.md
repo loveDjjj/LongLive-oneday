@@ -1,14 +1,14 @@
 # 当前测试清单
 
-本轮验证仓库不再固化个人服务器绝对路径，配置和启动脚本改用 `/path/to/...` 占位默认值，并继续支持通过环境变量覆盖真实部署路径。服务器 NPU 项目当前为**待服务器验证**；长期稳定命令见[环境安装与测试](setup_and_validation.md)。
+本轮验证仓库默认部署路径迁移到 `/mnt/share/r50063443`，配置和启动脚本不再保留占位默认值，并继续支持通过环境变量覆盖真实部署路径。服务器 NPU 项目当前为**待服务器验证**；长期稳定命令见[环境安装与测试](setup_and_validation.md)。
 
 ## 1. 主机回归测试
 
 ```bash
-cd /path/to/LongLive-oneday
-conda activate /path/to/conda_envs/longlive
+cd /mnt/share/r50063443/LongLive-oneday
+conda activate /mnt/share/r50063443/conda_envs/longlive
 
-rg -n '/mnt/a800[_]share/r50063[0-9][0-9]3|/mnt/share/weight/LongLive/checkpoints/longlive2[_]5b|LongLive/checkpoints/longlive2[_]5b' . || true
+rg -n '/path[/]to/(LongLive-oneday|conda_envs|cann-8[.]5|vbench_models|Wan2[.]2-TI2V-5B|longlive2_merged_generator[.]pt)|/mnt/a800[_]share/r50063[0-9][0-9]3|/mnt/share/weight/LongLive/checkpoints/longlive2[_]5b' . || true
 
 python -m pytest -q \
   tests/test_inference_config_resolution.py \
@@ -34,22 +34,22 @@ python -m compileall -q \
 git diff --check
 ```
 
-预期：`rg` 不输出旧个人服务器路径；配置解析、训练配置契约和矩阵展开测试全部通过；YAML 均可解析；编译检查与空白检查通过。
+预期：`rg` 不输出旧个人服务器路径或占位默认部署路径；配置解析、训练配置契约和矩阵展开测试全部通过；YAML 均可解析；编译检查与空白检查通过。
 
 ## 2. 服务器待验证
 
-本轮只清理路径默认值，不改变训练、推理和稀疏算法行为。若在服务器运行训练或评测入口，需先设置真实部署路径：
+本轮只修改路径默认值，不改变训练、推理和稀疏算法行为。服务器默认部署路径如下；如需临时切换，仍可用同名环境变量覆盖：
 
 ```bash
-cd /path/to/LongLive-oneday
-conda activate /path/to/conda_envs/longlive
+cd /mnt/share/r50063443/LongLive-oneday
+conda activate /mnt/share/r50063443/conda_envs/longlive
 
-export GENERATION_ENV=/path/to/conda_envs/longlive
-export AISBENCH_ENV=/path/to/conda_envs/aisbench_npu
-export VBENCH_CACHE_DIR=/path/to/vbench_models
-export CANN_ENV_SCRIPT=/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-export LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B
-export LONGLIVE_GENERATOR_CKPT=/path/to/longlive2_merged_generator.pt
+export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
+export AISBENCH_ENV=/mnt/share/r50063443/conda_envs/aisbench_npu
+export VBENCH_CACHE_DIR=/mnt/share/r50063443/vbench_models
+export CANN_ENV_SCRIPT=/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+export LONGLIVE_MODEL_ROOT=/mnt/share/r50063443/Wan2.2-TI2V-5B
+export LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 export MODEL_ROOT="${LONGLIVE_MODEL_ROOT}"
 export GENERATOR_CKPT="${LONGLIVE_GENERATOR_CKPT}"
 ```

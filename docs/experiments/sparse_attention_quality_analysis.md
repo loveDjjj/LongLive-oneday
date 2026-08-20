@@ -14,7 +14,7 @@ hsa_sla_cag
 所有 case 使用同一基础 checkpoint：
 
 ```text
-/path/to/longlive2_merged_generator.pt
+/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 ```
 
 原始 run 使用的是部署机上的 LongLive2.0 合并 Generator；本文仅记录文件名和用途，不固化个人服务器绝对路径。

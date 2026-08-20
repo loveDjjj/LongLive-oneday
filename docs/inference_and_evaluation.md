@@ -58,12 +58,12 @@ configs/inference/vbench.yaml
 常用路径覆盖：
 
 ```bash
-export GENERATION_ENV=/path/to/conda_envs/longlive
-export AISBENCH_ENV=/path/to/conda_envs/aisbench_npu
-export VBENCH_CACHE_DIR=/path/to/vbench_models
-export CANN_ENV_SCRIPT=/path/to/cann-8.5/Ascend/cann-8.5.0/set_env.sh
-export LONGLIVE_MODEL_ROOT=/path/to/Wan2.2-TI2V-5B
-export LONGLIVE_GENERATOR_CKPT=/path/to/longlive2_merged_generator.pt
+export GENERATION_ENV=/mnt/share/r50063443/conda_envs/longlive
+export AISBENCH_ENV=/mnt/share/r50063443/conda_envs/aisbench_npu
+export VBENCH_CACHE_DIR=/mnt/share/r50063443/vbench_models
+export CANN_ENV_SCRIPT=/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh
+export LONGLIVE_MODEL_ROOT=/mnt/share/r50063443/Wan2.2-TI2V-5B
+export LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt
 ```
 
 评测其他合并权重时，再将 `LONGLIVE_GENERATOR_CKPT` 覆盖为对应 checkpoint 路径。
@@ -138,13 +138,13 @@ done
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
-LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
 LONGLIVE_SPARSE_METHOD=dense BENCHMARK_MODE=dit_only \
 RUN_ID=dense-dit-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
 
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
-LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
 LONGLIVE_SPARSE_METHOD=sla_cag BENCHMARK_MODE=dit_only \
 RUN_ID=sla-dit-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
@@ -156,7 +156,7 @@ bash scripts/evaluation/run_benchmark.sh 32s
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,15 \
-LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
 LONGLIVE_SPARSE_METHOD=sla_cag BENCHMARK_MODE=async_vae \
 RUN_ID=sla-async-32s \
 bash scripts/evaluation/run_benchmark.sh 32s
@@ -255,7 +255,7 @@ bash scripts/evaluation/run_performance_matrix.sh
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
-LONGLIVE_GENERATOR_CKPT=/path/to/merged_generator.pt \
+LONGLIVE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt \
 LONGLIVE_SPARSE_METHOD=hsa_sla_cag \
 RUN_ID=hybrid-20pct \
 bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
@@ -265,10 +265,10 @@ bash scripts/evaluation/run_vbench.sh longlive2_standard_20pct
 
 ```bash
 VBENCH_PRESETS=longlive2_standard_20pct \
-DENSE_GENERATOR_CKPT=/path/to/dense.pt \
-HSA_CAG_GENERATOR_CKPT=/path/to/hsa.pt \
-SLA_CAG_GENERATOR_CKPT=/path/to/sla.pt \
-HSA_SLA_CAG_GENERATOR_CKPT=/path/to/hybrid.pt \
+DENSE_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/dense.pt \
+HSA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/hsa.pt \
+SLA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/sla.pt \
+HSA_SLA_CAG_GENERATOR_CKPT=/mnt/share/r50063443/LongLive/checkpoints/hybrid.pt \
 SUITE_ID=vbench-release-01 \
 bash scripts/evaluation/run_vbench_matrix.sh
 ```
