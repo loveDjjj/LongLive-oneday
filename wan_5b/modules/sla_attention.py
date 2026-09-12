@@ -28,7 +28,7 @@ from .sparse_routing import (
 
 
 _ASCEND_BLHD_INFERENCE = os.environ.get("LONGLIVE_SLA_BLHD_INFERENCE", "1") == "1"
-_ASCEND_VALIDATE_LUT = os.environ.get("LONGLIVE_SLA_VALIDATE_LUT", "0") == "1"
+_VALIDATE_SPARSE_LUT = os.environ.get("LONGLIVE_SLA_VALIDATE_LUT", "0") == "1"
 
 
 def _device_key(device: torch.device) -> tuple[str, int | None]:
@@ -107,10 +107,10 @@ class SLAAttentionConfig:
 
     def validate(self) -> None:
         if self.backend not in {
-            "portable", "ascend_triton", "mindiesd", "mindiesd_bsa", "auto"
+            "portable", "ascend_triton", "mindiesd", "mindiesd_bsa", "cuda_flex", "auto"
         }:
             raise ValueError(
-                "backend must be portable, ascend_triton, mindiesd, mindiesd_bsa, or auto; "
+                "backend must be portable, ascend_triton, mindiesd, mindiesd_bsa, cuda_flex, or auto; "
                 f"got {self.backend}."
             )
         for name in ("sparsity", "sparsity_base"):
@@ -137,10 +137,10 @@ class SLAAttentionConfig:
             raise ValueError("query_block_batch must be positive.")
         if self.linear_eps <= 0:
             raise ValueError("linear_eps must be positive.")
-        if self.enabled and self.backend in {"mindiesd", "mindiesd_bsa"} and (
+        if self.enabled and self.backend in {"mindiesd", "mindiesd_bsa", "cuda_flex"} and (
             self.block_q != 128 or self.block_k != 128
         ):
-            raise ValueError("MindIE-SD sparse execution requires 128-token blocks.")
+            raise ValueError("MindIE-SD/cuda_flex sparse execution requires 128-token blocks.")
 
 
 def calculate_chunk_sparsities(
@@ -256,10 +256,13 @@ def _portable_sparse_attention(
             batch, heads, end - start, block_q, dim
         )
         merged = batch * heads * (end - start)
+        # CUDA fused SDPA expects [batch, heads, query, dim]. A singleton head
+        # retains the merged per-head/per-query-block routing without a 3D
+        # input forcing the math fallback on supported CUDA PyTorch versions.
         out = F.scaled_dot_product_attention(
-            q_group.reshape(merged, block_q, dim),
-            selected_k.reshape(merged, selected_k.shape[-2], dim),
-            selected_v.reshape(merged, selected_v.shape[-2], dim),
+            q_group.reshape(merged, 1, block_q, dim),
+            selected_k.reshape(merged, 1, selected_k.shape[-2], dim),
+            selected_v.reshape(merged, 1, selected_v.shape[-2], dim),
             scale=scale,
         )
         outputs.append(out.reshape(batch, heads, (end - start) * block_q, dim))
@@ -275,6 +278,14 @@ def _run_sparse_backend(
     config: SLAAttentionConfig,
 ) -> torch.Tensor:
     backend = config.backend
+    if backend == "cuda_flex":
+        from .sla_attention_cuda import cuda_flex_sparse_attention
+
+        return cuda_flex_sparse_attention(
+            q, k, v, block_lut,
+            block_q=config.block_q, block_k=config.block_k,
+            scale=config.softmax_scale, validate_lut=_VALIDATE_SPARSE_LUT,
+        )
     if backend in {"auto", "mindiesd", "mindiesd_bsa"}:
         from .sla_attention_mindiesd import (
             mindiesd_bsa_available,
@@ -347,7 +358,7 @@ def _run_sparse_backend(
                     block_q=config.block_q,
                     block_k=config.block_k,
                     scale=config.softmax_scale,
-                    validate_lut=_ASCEND_VALIDATE_LUT,
+                    validate_lut=_VALIDATE_SPARSE_LUT,
                 )
             return ascend_triton_sparse_attention(
                 q.permute(0, 2, 1, 3).contiguous(),
@@ -357,7 +368,7 @@ def _run_sparse_backend(
                 block_q=config.block_q,
                 block_k=config.block_k,
                 scale=config.softmax_scale,
-                validate_lut=_ASCEND_VALIDATE_LUT,
+                validate_lut=_VALIDATE_SPARSE_LUT,
             ).permute(0, 2, 1, 3).contiguous()
         if backend == "ascend_triton":
             reason = (

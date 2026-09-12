@@ -12,7 +12,7 @@ from utils.dataset import (
     prompt_collate_fn,
 )
 from utils.config import section_get, wan_default_config
-from utils.distributed import fsdp_wrap, launch_distributed_job
+from utils.distributed import fsdp_wrap, launch_distributed_job, promote_trainable_parameters
 from utils.misc import (
     set_seed,
     merge_dict_list
@@ -175,6 +175,7 @@ class Trainer:
         self.generator_train_scope = str(
             getattr(config, "generator_train_scope", "lora")
         )
+        separate_trainable_parameters = getattr(config, "model_load_dtype", None) == "bfloat16"
         if self.generator_train_scope not in {"lora", "linear_only", "lora_plus_linear"}:
             raise ValueError(
                 "training.generator_train_scope must be lora, linear_only, or lora_plus_linear"
@@ -280,6 +281,12 @@ class Trainer:
                 if self.is_main_process:
                     print("LoRA applied to generator only")
 
+            if separate_trainable_parameters:
+                # Promote before restoring adapters so FP32 checkpoint values are
+                # never rounded through BF16, including the raw SLA projection.
+                promote_trainable_parameters(self.model.generator)
+                promote_trainable_parameters(self.model.fake_score)
+
             # 3. Load LoRA weights before FSDP wrapping (if a checkpoint is available).
             # Priority: auto_resume -> legacy lora_ckpt -> initialized adapters.
             lora_checkpoint_path = None
@@ -380,7 +387,8 @@ class Trainer:
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
+            wrap_strategy=config.generator_fsdp_wrap_strategy,
+            separate_trainable_parameters=separate_trainable_parameters,
         )
 
         self.model.real_score = fsdp_wrap(
@@ -394,7 +402,8 @@ class Trainer:
             self.model.fake_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            wrap_strategy=config.fake_score_fsdp_wrap_strategy,
+            separate_trainable_parameters=separate_trainable_parameters,
         )
 
         self.model.text_encoder = fsdp_wrap(

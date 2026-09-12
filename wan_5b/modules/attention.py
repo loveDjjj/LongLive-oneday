@@ -15,7 +15,12 @@ try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
 except ModuleNotFoundError:
-    FLASH_ATTN_3_AVAILABLE = False
+    try:
+        # Current Hopper releases package the interface under flash_attn_3.
+        from flash_attn_3 import flash_attn_interface
+        FLASH_ATTN_3_AVAILABLE = True
+    except ModuleNotFoundError:
+        FLASH_ATTN_3_AVAILABLE = False
 
 try:
     import flash_attn
@@ -272,7 +277,21 @@ def attention(
     dtype=torch.bfloat16,
     fa_version=None,
 ):
-    if q.device.type == "cuda" and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE):
+    # An installed but disabled FA3 must not enter the FA2-only fallback inside
+    # flash_attention(). CUDA without an enabled extension can use torch SDPA.
+    flash_available = (
+        FLASH_ATTN_2_AVAILABLE
+        or (
+            FLASH_ATTN_3_AVAILABLE
+            and (fa_version == 3 or (fa_version is None and _USE_FA3))
+        )
+        or (
+            FLASH_ATTN_4_AVAILABLE and _USE_FA4
+            and fa_version in {None, 4}
+        )
+        or (TE_DPA_AVAILABLE and _USE_TE_ATTN)
+    )
+    if q.device.type == "cuda" and flash_available:
         return flash_attention(
             q=q,
             k=k,
@@ -298,9 +317,12 @@ def attention(
         q = q.transpose(1, 2).to(dtype)
         k = k.transpose(1, 2).to(dtype)
         v = v.transpose(1, 2).to(dtype)
+        if q_scale is not None:
+            q = q * q_scale
 
         out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+            q, k, v, attn_mask=attn_mask, is_causal=causal,
+            dropout_p=dropout_p, scale=softmax_scale)
 
         out = out.transpose(1, 2).contiguous()
         return out

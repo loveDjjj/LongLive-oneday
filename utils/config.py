@@ -185,6 +185,39 @@ def normalize_config(config):
     return config
 
 
+def validate_training_resume_contract(previous, current):
+    """Reject incompatible reuse of a run before its resolved config is replaced."""
+    def contract(config):
+        model = config.get("model_kwargs", {})
+        sparse = model.get("sparse_config", {})
+        return {
+            "device_type": section_get(config, "infra", "device_type", "npu"),
+            "model_load_dtype": section_get(config, "infra", "model_load_dtype", "float32"),
+            "sparse_method": sparse.get("method"),
+            "sparse_backend": sparse.get("backend"),
+            "sequence_parallel_size": section_get(config, "infra", "sequence_parallel_size"),
+            "generator_train_scope": section_get(config, "training", "generator_train_scope", "lora"),
+            "local_attn_size": (
+                model.get("local_attn_size"),
+                sparse.get("local_attn_size"),
+                section_get(config, "inference", "local_attn_size"),
+            ),
+            "image_or_video_shape": list(section_get(config, "data", "image_or_video_shape", [])),
+            "generator_ckpt": section_get(config, "checkpoints", "generator_ckpt"),
+        }
+
+    old_contract, new_contract = contract(previous), contract(current)
+    changed = [
+        f"{key}: {old_contract[key]!r} -> {value!r}"
+        for key, value in new_contract.items() if old_contract[key] != value
+    ]
+    if changed:
+        raise ValueError(
+            "Cannot resume training with a different run contract; "
+            "use a new TRAIN_RUN_NAME:\n  - " + "\n  - ".join(changed)
+        )
+
+
 def validate_sparse_training_config(config):
     """Validate the maintained HSA/SLA sparse-training workflow."""
     errors = []
@@ -222,8 +255,26 @@ def validate_sparse_training_config(config):
         "sparse method must be hsa_cag, sla_cag, or hsa_sla_cag",
     )
     require(
-        sparse.get("backend") in {"ascend_triton", "portable"},
-        "sparse backend must be ascend_triton or portable",
+        sparse.get("backend") in {"ascend_triton", "portable", "cuda_flex"},
+        "sparse backend must be ascend_triton, portable, or cuda_flex",
+    )
+    device_type = config.get("device_type")
+    require(device_type in {None, "npu", "cuda"}, "infra.device_type must be npu or cuda")
+    require(
+        not (device_type == "cuda" and sparse.get("backend") == "ascend_triton"),
+        "CUDA training cannot use ascend_triton; use portable or cuda_flex",
+    )
+    require(
+        not (device_type == "npu" and sparse.get("backend") == "cuda_flex"),
+        "NPU training cannot use cuda_flex",
+    )
+    require(
+        config.get("model_load_dtype") in {None, "float32", "bfloat16"},
+        "infra.model_load_dtype must be float32 or bfloat16",
+    )
+    require(
+        config.get("model_load_dtype") != "bfloat16" or bool(config.get("mixed_precision", False)),
+        "bfloat16 model loading requires infra.mixed_precision=true",
     )
     sp_size = int(config.get("sequence_parallel_size", 0))
     # Patch embedding maps 44x80 latents to 22x40=880 tokens per frame.

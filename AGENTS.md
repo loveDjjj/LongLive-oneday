@@ -5,6 +5,7 @@
 ## 1. 项目边界
 
 - 当前主线是 LongLive2.0-5B 在昇腾 NPU 上的 BF16 训练、推理和评测。
+- CUDA/H100 复用同一套入口，以 `LLV2_DEVICE=cuda` 显式选择；NPU 默认行为不变。CUDA 默认使用 `portable` 参考后端，`cuda_flex` 必须显式启用并完成真实 GPU 前向、Q/K/V 反向及多卡准入，不能把主机测试或 NPU 结果当作 H100 验证。
 - 维护的方法为 `dense`、`hsa_cag`、`sla_cag` 和 `hsa_sla_cag`。
 - 训练稀疏后端为 `ascend_triton`；推理稀疏后端默认为 MindIE-SD RainFusion。未经真实 NPU 验证，不得把实验后端改为默认值。
 - LongLive2.0 的滚动 KV 窗口为 32 个 latent 帧。改变窗口长度属于模型行为变更，必须重新训练和评测，不能作为普通推理参数优化。

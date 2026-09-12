@@ -1,0 +1,28 @@
+# CUDA / 昇腾共用的模型、训练和数据依赖；加速器软件栈由对应环境单独安装。
+diffusers==0.31.0
+transformers>=4.49.0,<5
+tokenizers>=0.20.3
+accelerate>=1.1.1
+tqdm
+imageio
+imageio-ffmpeg
+omegaconf
+einops
+av==13.1.0
+ftfy
+regex
+sentencepiece
+easydict
+# 项目兼容层会关闭不适用于 Ulysses SP 的 Hugging Face TP 加载分支。
+peft==0.19.1
+opencv-python>=4.9.0.80
+pydantic==2.10.6
+huggingface_hub[cli]
+
+# 训练和数据流程；默认纯文本提示词推理不需要全部安装。
+datasets
+wandb
+lmdb
+matplotlib
+scikit-image
+pycocotools

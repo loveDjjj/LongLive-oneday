@@ -14,6 +14,40 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _accelerator() -> str:
+    value = os.environ.get("LLV2_DEVICE", "npu").strip().lower()
+    if value == "ascend":
+        value = "npu"
+    if value not in {"npu", "cuda"}:
+        raise ValueError("evaluation requires LLV2_DEVICE=npu or cuda")
+    return value
+
+
+def _device_metadata() -> dict:
+    accelerator = _accelerator()
+    visible_variable = "CUDA_VISIBLE_DEVICES" if accelerator == "cuda" else "ASCEND_RT_VISIBLE_DEVICES"
+    return {
+        "accelerator": accelerator,
+        "visible_devices_variable": visible_variable,
+        "visible_devices": os.environ.get(visible_variable, ""),
+    }
+
+
+def _runtime_default(section, key: str, cuda_default):
+    # CUDA 的四卡部署默认值与昇腾预设分开；环境变量优先覆盖两者。
+    if _accelerator() == "cuda":
+        return section.get("cuda", {}).get(key, cuda_default)
+    return section[key]
+
+
+def _runtime_dp_size(value: int) -> int:
+    override = os.environ.get("LONGLIVE_DP_SIZE", "").strip()
+    value = int(override) if override else int(value)
+    if value <= 0:
+        raise ValueError("LONGLIVE_DP_SIZE/runtime.dp_size must be positive")
+    return value
+
+
 def _load(path: Path):
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -65,6 +99,25 @@ def _save(config: dict, output: Path | None) -> None:
     OmegaConf.save(OmegaConf.create(config), output)
 
 
+def validate_performance_resume(manifest_path: Path, expected: dict) -> None:
+    """只有设备、后端与用例身份可核对时才允许跳过已有性能结果。"""
+    fields = (
+        "accelerator", "visible_devices", "sparsity_backend", "sparsity_method",
+        "task", "preset", "vae_mode", "sp_size", "dp_size",
+        "generator_checkpoint", "latent_frames", "pixel_frames",
+    )
+    if not manifest_path.is_file():
+        raise ValueError("cannot audit resume without manifest.json; use a new SUITE_ID")
+    previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    missing = [key for key in fields if key not in previous]
+    changed = [key for key in fields if key in previous and previous[key] != expected[key]]
+    if missing or changed or not previous.get("visible_devices"):
+        raise ValueError(
+            f"cannot reuse performance result: missing={missing}, changed={changed}; "
+            "preserve the existing result and use a new SUITE_ID"
+        )
+
+
 def _sparse_model_config(sparsity) -> dict | None:
     method_override = os.environ.get("LONGLIVE_SPARSE_METHOD", "").strip()
     if method_override == "dense":
@@ -90,11 +143,16 @@ def _sparse_model_config(sparsity) -> dict | None:
             else "LONGLIVE_SLA_BACKEND"
         )
         backend_override = os.environ.get(legacy_name, "").strip()
+    if not backend_override and _accelerator() == "cuda":
+        configured_backend = options.get("backend")
+        backend_override = configured_backend if configured_backend in {"portable", "cuda_flex"} else "portable"
     if backend_override:
         allowed = (
-            {"mindiesd", "ascend_triton"}
-            if method in {"hsa_cag", "hsa_sla_cag"}
-            else {"mindiesd", "mindiesd_bsa", "ascend_triton"}
+            {"portable", "cuda_flex"}
+            if _accelerator() == "cuda"
+            else ({"mindiesd", "ascend_triton", "portable"}
+                  if method in {"hsa_cag", "hsa_sla_cag"}
+                  else {"mindiesd", "mindiesd_bsa", "ascend_triton", "portable"})
         )
         if backend_override not in allowed:
             raise ValueError(
@@ -146,6 +204,8 @@ def _sparse_backend(sparsity) -> str:
         return override
     profiles = getattr(sparsity, "profiles", None)
     options = profiles[method] if profiles is not None else sparsity.options
+    if _accelerator() == "cuda" and str(options.backend) not in {"portable", "cuda_flex"}:
+        return "portable"
     return str(options.backend)
 
 
@@ -173,8 +233,8 @@ def resolve_msprof(args) -> dict:
     generation = config.generation
     measurement = config.measurement
     frames = int(preset.latent_frames)
-    sp_size = _runtime_sp_size(runtime.sp_size)
-    dp_size = int(runtime.dp_size)
+    sp_size = _runtime_sp_size(_runtime_default(runtime, "sp_size", 4))
+    dp_size = _runtime_dp_size(_runtime_default(runtime, "dp_size", 1))
     model_num_heads = int(runtime.model_num_heads)
     frames_per_block = int(config.model.num_frame_per_block)
     if model_num_heads % sp_size != 0:
@@ -187,7 +247,7 @@ def resolve_msprof(args) -> dict:
         )
     nproc = sp_size * dp_size
     vae_mode_override = getattr(args, "vae_mode", None)
-    requested_mode = str(vae_mode_override or runtime.vae_mode)
+    requested_mode = str(vae_mode_override or _runtime_default(runtime, "vae_mode", "sync"))
     mode_aliases = {
         "dit_only": "disabled",
         "sync_vae": "sync",
@@ -206,9 +266,10 @@ def resolve_msprof(args) -> dict:
         else num_prompts_override
     )
     available_prompts = _prompt_count(str(measurement.prompts))
-    if not 1 <= num_prompts <= available_prompts:
+    if num_prompts < 1 or num_prompts * dp_size > available_prompts:
         raise ValueError(
-            f"measurement.num_prompts={num_prompts} but {measurement.prompts} "
+            f"measurement.num_prompts={num_prompts} per DP replica requires "
+            f"{num_prompts * dp_size} prompts, but {measurement.prompts} "
             f"contains {available_prompts} prompts"
         )
     warmup_override = getattr(args, "warmup_per_rank", None)
@@ -229,7 +290,7 @@ def resolve_msprof(args) -> dict:
         if save_latents_only
         else ("async_vae" if vae_mode == "async_dedicated" else "sync_vae")
     )
-    vae_device = f"npu:{nproc}" if async_vae else None
+    vae_device = f"{_accelerator()}:{nproc}" if async_vae else None
     output_folder = args.output_folder or "videos/msprof"
     model = config.model
     model_kwargs = {
@@ -243,6 +304,7 @@ def resolve_msprof(args) -> dict:
     if sparse_config is not None:
         model_kwargs["sparse_config"] = sparse_config
     resolved = {
+        **_device_metadata(),
         "model_kwargs": model_kwargs,
         "sp_size": sp_size,
         "dp_size": dp_size,
@@ -292,6 +354,7 @@ def resolve_msprof(args) -> dict:
     sparse_backend = _sparse_backend(config.sparsity)
     generator_checkpoint = _generator_checkpoint(str(model.generator_checkpoint))
     metadata = {
+        **_device_metadata(),
         "task": "msprof",
         "engine": "longlive2",
         "preset": args.preset,
@@ -304,6 +367,8 @@ def resolve_msprof(args) -> dict:
         "vae_mode": effective_vae_mode,
         "required_devices": nproc + int(async_vae),
         "num_prompts": num_prompts,
+        "num_prompts_per_replica": num_prompts,
+        "total_prompts": num_prompts * dp_size,
         "warmup_per_rank": warmup,
         "sparsity_method": sparse_method,
         "sparsity_backend": sparse_backend,
@@ -335,8 +400,8 @@ def resolve_vbench(args) -> dict:
     dataset = config.datasets[category][subset]
     pixel_frames = int(preset.get("pixel_frames", defaults.pixel_frames))
     fps = int(preset.get("fps", defaults.fps))
-    sp_size = _runtime_sp_size(int(preset.get("sp_size", defaults.sp_size)))
-    dp_size = int(preset.get("dp_size", defaults.dp_size))
+    sp_size = _runtime_sp_size(int(preset.get("sp_size", _runtime_default(defaults, "sp_size", 4))))
+    dp_size = _runtime_dp_size(int(preset.get("dp_size", _runtime_default(defaults, "dp_size", 1))))
     seeds = list(preset.get("seeds", defaults.seeds))
     nproc = sp_size * dp_size
 
@@ -450,6 +515,7 @@ def resolve_vbench(args) -> dict:
     else:
         raise ValueError(f"unsupported VBench engine={engine_name!r}")
 
+    resolved.update(_device_metadata())
     _save(resolved, args.output)
     sparse_method = _sparse_method(config.sparsity)
     sparse_backend = _sparse_backend(config.sparsity)
@@ -459,6 +525,7 @@ def resolve_vbench(args) -> dict:
         else None
     )
     metadata = {
+        **_device_metadata(),
         "task": "vbench",
         "preset": args.preset,
         "engine": engine_name,
@@ -496,6 +563,7 @@ def parse_args():
     parser.add_argument("--num-prompts", type=int)
     parser.add_argument("--warmup-per-rank", type=int)
     parser.add_argument("--save-latents-only", action="store_true")
+    parser.add_argument("--validate-resume", type=Path, help="Validate an existing performance manifest before reuse")
     parser.add_argument(
         "--vae-mode",
         choices=("dit_only", "sync_vae", "async_vae", "sync", "async_dedicated"),
@@ -508,9 +576,15 @@ def main() -> None:
     if args.kind == "benchmark":
         metadata = resolve_benchmark(args)
     elif args.kind == "msprof":
+        if _accelerator() == "cuda":
+            raise ValueError("msprof requires Ascend NPU; resolve a benchmark config for CUDA")
         metadata = resolve_msprof(args)
     else:
         metadata = resolve_vbench(args)
+    if args.validate_resume is not None:
+        if args.kind == "vbench":
+            raise ValueError("VBench resume is validated by run_vbench.sh")
+        validate_performance_resume(args.validate_resume, metadata)
     print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
 
 

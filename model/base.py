@@ -48,6 +48,7 @@ class BaseModel(nn.Module):
         )
         score_is_causal = True
         sequence_parallel_size = int(getattr(args, "sequence_parallel_size", 1))
+        load_dtype = getattr(args, "model_load_dtype", None)
 
         model_name, model_root = resolve_model_location(args.model_kwargs)
         if "5B" not in model_name:
@@ -58,16 +59,22 @@ class BaseModel(nn.Module):
         # Generator
         generator_kwargs = dict(getattr(args, "model_kwargs", {}))
         generator_kwargs["use_ulysses_sp"] = sequence_parallel_size > 1
+        if load_dtype is not None:
+            generator_kwargs["load_dtype"] = load_dtype
         self.generator = WanDiffusionWrapper(**generator_kwargs, is_causal=True)
         self.generator.model.requires_grad_(True)
 
         # Real Score
-        real_kwargs = args.real_model_kwargs
+        real_kwargs = dict(args.real_model_kwargs)
+        if load_dtype is not None:
+            real_kwargs["load_dtype"] = load_dtype
         self.real_score = WanDiffusionWrapper(**real_kwargs, is_causal=score_is_causal)
         self.real_score.model.requires_grad_(False)
 
         # Fake Score
-        fake_kwargs = args.fake_model_kwargs
+        fake_kwargs = dict(args.fake_model_kwargs)
+        if load_dtype is not None:
+            fake_kwargs["load_dtype"] = load_dtype
         self.fake_score = WanDiffusionWrapper(**fake_kwargs, is_causal=score_is_causal)
         self.fake_score.model.requires_grad_(True)
 
@@ -75,6 +82,7 @@ class BaseModel(nn.Module):
         self.text_encoder = WanTextEncoder(
             model_name=model_name,
             model_root=model_root,
+            load_dtype=load_dtype,
         )
         self.text_encoder.requires_grad_(False)
 

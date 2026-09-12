@@ -7,11 +7,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 # 部署参数。模型结构、数据、帧数和随机种子由 YAML 管理。
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
-export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/r50063443/vbench_models}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+# shellcheck source=scripts/evaluation/runtime.sh
+source "${SCRIPT_DIR}/runtime.sh"
+evaluation_runtime_init "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+DRY_RUN="${DRY_RUN:-0}"
+RESUME_RUN="${RESUME_RUN:-0}"
+if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+  export AISBENCH_ENV="${VBENCH_ENV:-${AISBENCH_ENV:-${GENERATION_ENV}}}"
+  export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/vbench}"
+else
+  export AISBENCH_ENV="${AISBENCH_ENV:-/mnt/share/r50063443/conda_envs/aisbench_npu}"
+  export VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-/mnt/share/r50063443/vbench_models}"
+fi
 unset MASTER_PORT
 
 # ---------- 可覆盖参数 ----------
@@ -20,28 +27,34 @@ PRESET="${1:-longlive2_standard_20pct}"
 LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-}"
 LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 
-for required_path in "${CONFIG_PATH}" "${CANN_ENV_SCRIPT}"; do
-  if [[ ! -f "${required_path}" ]]; then
-    echo "[error] required file not found: ${required_path}" >&2
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "[error] required file not found: ${CONFIG_PATH}" >&2
+  exit 1
+fi
+if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
+  echo "[error] DRY_RUN must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${RESUME_RUN}" != "0" && "${RESUME_RUN}" != "1" ]]; then
+  echo "[error] RESUME_RUN must be 0 or 1" >&2
+  exit 2
+fi
+evaluation_prepare_runtime
+if [[ "${DRY_RUN}" != "1" ]]; then
+  if [[ ! -x "${AISBENCH_ENV}/bin/python" ]]; then
+    echo "[error] VBench environment is incomplete: ${AISBENCH_ENV}" >&2
     exit 1
   fi
-done
-if [[ ! -x "${GENERATION_ENV}/bin/python" || ! -x "${GENERATION_ENV}/bin/torchrun" ]]; then
-  echo "[error] incomplete generation environment: ${GENERATION_ENV}" >&2
-  exit 1
+  if [[ "${LLV2_DEVICE}" == "npu" && ! -x "${AISBENCH_ENV}/bin/ais_bench" ]]; then
+    echo "[error] AISBench environment is incomplete: ${AISBENCH_ENV}" >&2
+    exit 1
+  fi
+  if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+    env PATH="${AISBENCH_ENV}/bin:${PATH}" \
+      LD_LIBRARY_PATH="${AISBENCH_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+      "${AISBENCH_ENV}/bin/python" third_party/aisbench_adapter/eval_cuda_vbench.py --check-environment
+  fi
 fi
-if [[ ! -x "${AISBENCH_ENV}/bin/ais_bench" ]]; then
-  echo "[error] AISBench environment is incomplete: ${AISBENCH_ENV}" >&2
-  exit 1
-fi
-
-set +u
-# shellcheck disable=SC1090
-source "${CANN_ENV_SCRIPT}"
-set -u
-export CONDA_PREFIX="${GENERATION_ENV}"
-export PATH="${GENERATION_ENV}/bin:${PATH}"
-export LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 metadata_tmp="$(mktemp "${TMPDIR:-/tmp}/longlive_vbench.XXXXXX.json")"
 child_pid=""
@@ -75,11 +88,22 @@ full_info="$(json_field full_info)"
 seeds="$("${GENERATION_ENV}/bin/python" -c \
   'import json,sys; print(" ".join(map(str,json.load(open(sys.argv[1]))["seeds"])))' "${metadata_tmp}")"
 
-visible_count="$(awk -F, '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
+visible_count="$(awk -F, '{print NF}' <<<"${VISIBLE_DEVICES}")"
 if [[ "${visible_count}" -lt "${required_devices}" ]]; then
-  echo "[error] preset ${PRESET} requires ${required_devices} worker NPUs, " \
-       "got ${ASCEND_RT_VISIBLE_DEVICES}" >&2
+  echo "[error] preset ${PRESET} requires ${required_devices} ${LLV2_DEVICE} worker devices, " \
+       "got ${VISIBLE_DEVICES}" >&2
   exit 1
+fi
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+  preview_dir="$(mktemp -d "${TMPDIR:-/tmp}/longlive_vbench_preview.XXXXXX")"
+  cp "${metadata_tmp}" "${preview_dir}/manifest.json"
+  "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py vbench \
+    --config "${CONFIG_PATH}" --preset "${PRESET}" \
+    --output "${preview_dir}/resolved.yaml" --output-folder "${preview_dir}/videos" >/dev/null
+  echo "[dry-run] accelerator=${LLV2_DEVICE} devices=${VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} backend=${sparsity_backend}"
+  echo "[dry-run] preview=${preview_dir} nproc=${nproc}"
+  exit 0
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
@@ -92,8 +116,25 @@ run_dir="runs/vbench/${run_id}"
 log_dir="logs/vbench/${run_id}"
 raw_root="${run_dir}/videos/raw"
 prepared_dir="${run_dir}/videos/prepared"
+if [[ -e "${run_dir}" || -e "${log_dir}" ]]; then
+  if [[ "${RESUME_RUN}" != "1" ]]; then
+    echo "[error] VBench RUN_ID already exists; inspect it and set RESUME_RUN=1 to resume: ${run_id}" >&2
+    exit 1
+  fi
+  "${GENERATION_ENV}/bin/python" - "${run_dir}/manifest.json" "${metadata_tmp}" <<'PY'
+import json
+import sys
+
+previous, current = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+if previous != current:
+    changed = sorted(key for key in previous.keys() | current.keys() if previous.get(key) != current.get(key))
+    raise ValueError(f"VBench resume configuration differs: {changed}; use a new RUN_ID")
+PY
+fi
 mkdir -p "${raw_root}" "${prepared_dir}" "${log_dir}"
-cp "${metadata_tmp}" "${run_dir}/manifest.json"
+if [[ ! -f "${run_dir}/manifest.json" ]]; then
+  cp "${metadata_tmp}" "${run_dir}/manifest.json"
+fi
 
 count_videos() {
   local directory="$1"
@@ -144,7 +185,7 @@ count_completed_dimensions() {
 }
 
 echo "[run] task=vbench preset=${PRESET} run_id=${run_id}"
-echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} prompts=${prompt_count}"
+echo "[run] accelerator=${LLV2_DEVICE} devices=${VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} prompts=${prompt_count}"
 echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 read -r -a seed_array <<<"${seeds}"
 generation_started_at="$(date +%s)"
@@ -168,7 +209,7 @@ for sample_index in "${!seed_array[@]}"; do
       --config "${CONFIG_PATH}" --preset "${PRESET}" --seed "${seed}" \
       --output "${resolved_config}" --output-folder "${seed_dir}" >/dev/null
     echo "[generate] seed=${seed} ($((sample_index + 1))/${#seed_array[@]}) rendezvous=standalone"
-    LLV2_DEVICE=npu "${GENERATION_ENV}/bin/torchrun" \
+    "${GENERATION_ENV}/bin/torchrun" \
       --standalone \
       --nnodes=1 \
       --nproc_per_node="${nproc}" \
@@ -229,6 +270,9 @@ echo "[evaluate] videos=${prepared_dir}"
 aisbench_log="${log_dir}/aisbench.log"
 eval_session="$(date +%Y%m%d_%H%M%S)"
 aisbench_work_dir="${run_dir}/aisbench/${eval_session}"
+if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+  aisbench_work_dir="${run_dir}/official_vbench/${eval_session}"
+fi
 vbench_dimension_count=16
 mkdir -p "${aisbench_work_dir}"
 evaluation_started_at="$(date +%s)"
@@ -240,8 +284,7 @@ env \
   LONGLIVE_VBENCH_FULL_INFO="${REPO_ROOT}/${full_info}" \
   VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR}" \
   AISBENCH_MAX_WORKERS="${nproc}" \
-  ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" \
-  CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT}" \
+  "${VISIBLE_DEVICES_VARIABLE}=${VISIBLE_DEVICES}" \
   AISBENCH_WORK_DIR="${REPO_ROOT}/${aisbench_work_dir}" \
   bash third_party/aisbench_adapter/run_vbench_eval.sh \
   >"${aisbench_log}" 2>&1 &

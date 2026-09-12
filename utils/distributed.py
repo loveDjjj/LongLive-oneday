@@ -23,13 +23,32 @@ def fsdp_state_dict(model):
     return checkpoint
 
 
-def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_strategy="size", min_num_params=int(5e7), transformer_module=None, cpu_offload=False):
+def promote_trainable_parameters(module):
+    """Keep optimizer/master parameters in FP32 after loading a BF16 backbone."""
+    for parameter in module.parameters():
+        if parameter.requires_grad and parameter.is_floating_point():
+            parameter.data = parameter.data.float()
+
+
+def mixed_storage_wrap_policy(module, recurse, nonwrapped_numel, *, base_policy, fp32_modules):
+    """Isolate FP32 adapters before flattening their BF16 parent parameters."""
+    # The usual size policy would stop before reaching small LoRA projections.
+    if recurse:
+        return True
+    return module in fp32_modules or base_policy(
+        module=module, recurse=False, nonwrapped_numel=nonwrapped_numel
+    )
+
+
+def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_strategy="size", min_num_params=int(5e7), transformer_module=None, cpu_offload=False, separate_trainable_parameters=False):
     if mixed_precision:
         mixed_precision_policy = MixedPrecision(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             buffer_dtype=torch.float32,
-            cast_forward_inputs=False
+            # PEFT casts inputs to the FP32 master dtype before entering each
+            # adapter. Its FSDP wrapper must recast them to the BF16 compute dtype.
+            cast_forward_inputs=separate_trainable_parameters
         )
     else:
         mixed_precision_policy = None
@@ -46,6 +65,23 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         )
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")
+
+    if separate_trainable_parameters:
+        fp32_modules = set()
+        for child in module.modules():
+            parameters = list(child.parameters(recurse=False))
+            if parameters and all(
+                parameter.requires_grad and parameter.dtype == torch.float32
+                for parameter in parameters
+            ):
+                if list(child.children()):
+                    raise ValueError("FP32 trainable parameters must belong to leaf modules for mixed-storage FSDP")
+                fp32_modules.add(child)
+        auto_wrap_policy = partial(
+            mixed_storage_wrap_policy,
+            base_policy=auto_wrap_policy,
+            fp32_modules=fp32_modules,
+        )
 
     if distributed_backend() == "nccl":
         os.environ["NCCL_CROSS_NIC"] = "1"
@@ -92,9 +128,9 @@ def launch_distributed_job(backend: str | None = None):
     # multi-GB full optimizer state) do not trip the NCCL watchdog on other
     # ranks while they wait at the post-save barrier.
     backend = distributed_backend() if backend is None else backend
+    set_device(local_rank)
     dist.init_process_group(rank=rank, world_size=world_size, backend=backend,
                             init_method=init_method, timeout=timedelta(minutes=60))
-    set_device(local_rank)
 
 
 class EMA_FSDP:

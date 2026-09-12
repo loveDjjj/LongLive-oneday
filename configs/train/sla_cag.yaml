@@ -1,5 +1,6 @@
 # LongLive2.0-5B 在昇腾上的 SLA+CAG 稀疏后训练配置。
 # 当前训练只读取提示词，不读取真实视频；生成器使用稀疏注意力，教师和判别器保持稠密注意力。
+# 此处保留 NPU 默认。LLV2_DEVICE=cuda 时启动器解析为4卡SP4、累积8、portable后端与BF16底座加载；可训练参数保留FP32。
 
 infra:
   # SP 组内多卡共同计算一个视频样本；有效数据并行数为 world_size / sequence_parallel_size。

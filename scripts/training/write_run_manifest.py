@@ -41,6 +41,25 @@ def _package_versions() -> dict[str, str | None]:
     return versions
 
 
+def _accelerator_metadata() -> dict:
+    device_type = os.environ.get("LLV2_DEVICE", "npu")
+    metadata = {"device_type": device_type}
+    try:
+        import torch
+
+        runtime = getattr(torch, device_type, None)
+        if runtime is not None and runtime.is_available():
+            metadata["devices"] = [
+                {"index": index, "name": runtime.get_device_name(index)}
+                for index in range(runtime.device_count())
+            ]
+        if device_type == "cuda":
+            metadata["cuda_version"] = torch.version.cuda
+    except Exception as exc:
+        metadata["inspection_error"] = str(exc)
+    return metadata
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -65,6 +84,7 @@ def main() -> None:
         "platform": platform.platform(),
         "python": platform.python_version(),
         "packages": _package_versions(),
+        "accelerator": _accelerator_metadata(),
         "git": {"commit": git_commit, "dirty": bool(git_status)},
         "distributed": {
             "world_size": args.world_size,
@@ -82,6 +102,10 @@ def main() -> None:
             key: os.environ.get(key)
             for key in (
                 "ASCEND_RT_VISIBLE_DEVICES",
+                "CUDA_VISIBLE_DEVICES",
+                "LLV2_DEVICE",
+                "LLV2_DISTRIBUTED_BACKEND",
+                "MODEL_LOAD_DTYPE",
                 "MASTER_ADDR",
                 "MASTER_PORT",
                 "SPARSE_METHOD",

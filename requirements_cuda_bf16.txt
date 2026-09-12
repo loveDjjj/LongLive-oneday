@@ -1,0 +1,14 @@
+# H100 BF16 候选环境，实际 CUDA 数值、反向和显存仍需服务器验证。
+# 先按 docs/setup_and_validation.md 安装 cu128 wheel，避免得到 CPU 版 PyTorch。
+# 保留版本约束，防止安装评测依赖时静默更换 PyTorch / torchvision。
+torch==2.9.0
+torchvision==0.24.0
+-r requirements_common.txt
+
+# GPU Triton 随 CUDA PyTorch 安装，不安装 triton-ascend、torch_npu 或 MindIE-SD。
+# dense 可使用 PyTorch SDPA；FlashAttention-2 是可选加速依赖，不自动触发编译。
+# CUDA VBench 另安装官方 VBench 源码，见环境文档。
+packaging
+ninja
+psutil
+pytest

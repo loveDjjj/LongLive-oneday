@@ -5,6 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# CUDA 使用官方 VBench API；昇腾继续使用既有 AISBench/CANN 链路。
+if [[ "${LLV2_DEVICE:-npu}" == "cuda" ]]; then
+  unset MASTER_ADDR MASTER_PORT RANK LOCAL_RANK WORLD_SIZE
+  cd "${REPO_ROOT}"
+  exec python "${SCRIPT_DIR}/eval_cuda_vbench.py"
+fi
+
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export LONGLIVE_VBENCH_DATA_PATH="${LONGLIVE_VBENCH_DATA_PATH:-${REPO_ROOT}/videos/benchmarks/vbench_mini_5s_vbench}"
 export LONGLIVE_VBENCH_FULL_INFO="${LONGLIVE_VBENCH_FULL_INFO:-${REPO_ROOT}/data/benchmarks/vbench_standard/5pct/full_info.json}"

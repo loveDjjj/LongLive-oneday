@@ -7,30 +7,4 @@
 # 推荐官方镜像组合 CANN 8.5.1 + torch/torch_npu 2.9.0。MindIE-SD 需从昇腾源
 # 单独安装，不要使用要求 CANN 9.0.1 的 dev 分支。
 
-diffusers==0.31.0
-transformers>=4.49.0,<5
-tokenizers>=0.20.3
-accelerate>=1.1.1
-tqdm
-imageio
-imageio-ffmpeg
-omegaconf
-einops
-av==13.1.0
-ftfy
-regex
-sentencepiece
-easydict
-# 固定已验证版本；项目兼容层会关闭不适用于 Ulysses SP 的 Hugging Face TP 加载分支。
-peft==0.19.1
-opencv-python>=4.9.0.80
-pydantic==2.10.6
-huggingface_hub[cli]
-
-# 以下依赖用于训练和数据流程，默认纯文本提示词推理不需要全部安装。
-datasets
-wandb
-lmdb
-matplotlib
-scikit-image
-pycocotools
+-r requirements_common.txt

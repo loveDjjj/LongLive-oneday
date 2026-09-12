@@ -1,6 +1,8 @@
-# LongLive2.0 昇腾推理与评测指南
+# LongLive2.0 推理与评测指南
 
 本文是当前推理、性能和质量评测的统一说明。环境与算子测试见[环境安装与测试](setup_and_validation.md)，checkpoint 训练和导出见[训练指南](training.md)。
+
+既有示例默认面向昇腾；同一入口新增 CUDA/H100 支持，见第 13 节。真实 H100 运行仍**待服务器验证**。
 
 ## 1. 脚本层级
 
@@ -95,7 +97,8 @@ SP4、32 秒尾部 shape 为 `Q=7040=55x128`、`KV=28160=220x128`。在 128-fram
 当前稀疏 softmax 不是“先算完整 QK，再用 mask 清零”的逻辑稀疏：
 
 - MindIE-SD RainFusion 接收紧凑的 `select_idx` 和每行 `select_num_idx`，算子接口只声明选中 KV blocks。
-- Ascend Triton 前向和反向都只在 `SELECTED_BLOCKS` 循环中按 LUT 加载 K/V，不构造完整 QK 矩阵。
+- Ascend Triton 前向与 dQ 按 LUT 加载选中 KV；dK/dV 当前遍历 KV/Q tiles 后应用选择条件，不能按前向稀疏率推断反向计算节省。
+- CUDA `portable` gather 选中 KV；`cuda_flex` 从 block LUT 构造前向与转置反向索引。新 GPU 后端的数值、反向和实际访存仍需目标设备审计，不能仅凭 mask 推断已验证的物理稀疏。
 - NPU smoke 会扰动所有未选 K/V blocks；稀疏输出必须保持不变，而 dense 输出必须变化。
 
 但 SLA 与混合方法的完整 attention 模块并非只访问选中 KV：路由阶段需要读取 K 的 block/frame 代表，线性补偿分支有意使用完整 KV 统计量。准确表述应为“稀疏 softmax 主分支只计算选中 blocks，路由和线性补偿仍覆盖完整 KV”。HSA+CAG 没有线性补偿，但仍需计算帧/block 路由摘要。
@@ -126,7 +129,7 @@ done
 
 | 模式 | NPU 数 | 行为 | 用途 |
 | --- | ---: | --- | --- |
-| `dit_only` | SP 数 | 不加载 VAE，只保存 latent | 判断稀疏是否加速 DiT |
+| `dit_only` | SP 数 | VAE 留在 CPU，不执行解码，只保存 latent | 判断稀疏是否加速 DiT |
 | `sync_vae` | SP 数 | SP leader 同步解码完整视频 | 观察串行 VAE 代价 |
 | `async_vae` | SP 数 + 1 | SP worker + 1 张专用 VAE 卡 | 测量真实异步关键路径 |
 
@@ -285,3 +288,15 @@ bash scripts/evaluation/run_vbench_matrix.sh
 4. 同步和异步 VAE 模式分别报告，不用 DiT 收益替代端到端收益。
 5. 64 秒结果不出现缓存增长、OOM、队列阻塞或稀疏率异常。
 6. msprof 结论与无 profiler 的墙钟结果一致，不使用 profile 延迟计算发布加速比。
+
+## 13. CUDA / H100 入口
+
+`LLV2_DEVICE=cuda` 启用 CUDA 环境，默认 `CUDA_VISIBLE_DEVICES=0,1,2,3`；CUDA 入口不读取 CANN、不使用 HCCL，`GENERATION_ENV` 默认当前激活环境。模型路径仍由 `LONGLIVE_MODEL_ROOT` 与 `LONGLIVE_GENERATOR_CKPT` 覆盖。CUDA benchmark/VBench 默认 SP4×DP1；使用 `LONGLIVE_SP_SIZE=2`、`LONGLIVE_DP_SIZE=2` 可在四卡生成两个独立样本，需另测吞吐。
+
+CUDA 单项 benchmark 默认同步 VAE，性能矩阵默认 `dit_only,sync_vae`，四方法×三时长×SP4 共24个 case。`SP4 + async_vae` 仍需第5张专用卡；不能用 SP3 代替，因为8帧 chunk不能被3整除。需要专用 CUDA VAE 时，配置解析器按逻辑设备编号生成 `cuda:<worker数>`，并检查可见卡数。矩阵使用 `PERF_DEVICES`，默认沿用当前 `CUDA_VISIBLE_DEVICES`。
+
+稀疏方法仍由 `LONGLIVE_SPARSE_METHOD` 选择；CUDA 默认解析为 `portable`，通过 `LONGLIVE_SPARSE_BACKEND=cuda_flex` 显式选择新GPU后端。配置中的昇腾默认 profile 在 CUDA 下映射为参考后端，YAML 中明确的 CUDA 后端和环境变量覆盖均会保留。`LONGLIVE_DENSE_PREFIX_CHUNKS` 与所有路由、滚动窗口约束不变。
+
+`DRY_RUN=1` 可用于单项 benchmark/VBench：不加载模型，在唯一临时目录保存 resolved 和 manifest，并打印设备、布局、后端与产物路径。运行目录记录加速器和可见设备集合；suite dense 配对也按这些字段区分，禁止 CUDA/NPU 混比。性能矩阵复用旧case前核对设备、后端、checkpoint、SP/DP、模式与帧数；不一致或旧manifest缺少审计字段时必须改用新 `SUITE_ID`。VBench 同名 run 复用必须显式 `RESUME_RUN=1` 且通过 manifest 一致性检查，矩阵由 `RESUME_SUITE=1` 传递恢复意图。
+
+CUDA VBench 生成后，`VBENCH_ENV` 指向独立官方评估环境，`VBENCH_SOURCE_DIR` 指向官方源码，`VBENCH_CACHE_DIR` 指向官方模型缓存。评估通过官方API逐维运行在 `cuda:0`，原始逐视频结果和官方源码 Git SHA 与16维及官方聚合一起保存。源环境安装见[环境安装与测试](setup_and_validation.md)，本轮测试命令见[当前测试清单](current_test.md)。CUDA 对 NPU `msprof` 入口会明确报错；发布延迟使用无 profiler benchmark，不能沿用 NPU profiler 结果。

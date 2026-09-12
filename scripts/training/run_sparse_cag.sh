@@ -2,13 +2,42 @@
 set -euo pipefail
 
 # ---------- 可覆盖的分布式与运行参数 ----------
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
+export LLV2_DEVICE="${LLV2_DEVICE:-npu}"
+export DRY_RUN="${DRY_RUN:-0}"
+if [[ ! "${DRY_RUN}" =~ ^[01]$ ]]; then
+    echo "[error] DRY_RUN must be 0 or 1" >&2
+    exit 2
+fi
+case "${LLV2_DEVICE}" in
+    cuda)
+        export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+        TRAIN_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+        TRAIN_DEVICE_VARIABLE=CUDA_VISIBLE_DEVICES
+        export NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+        export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-8}"
+        export SPARSE_BACKEND="${SPARSE_BACKEND:-${SLA_BACKEND:-portable}}"
+        # 冻结底座按 BF16 加载以降低初始化内存；可训练参数仍使用 FP32 原始权重。
+        export MODEL_LOAD_DTYPE="${MODEL_LOAD_DTYPE:-bfloat16}"
+        export LLV2_DISTRIBUTED_BACKEND="${LLV2_DISTRIBUTED_BACKEND:-nccl}"
+        ;;
+    npu)
+        export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+        TRAIN_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}"
+        TRAIN_DEVICE_VARIABLE=ASCEND_RT_VISIBLE_DEVICES
+        export NPROC_PER_NODE="${NPROC_PER_NODE:-16}"
+        export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
+        export SPARSE_BACKEND="${SPARSE_BACKEND:-${SLA_BACKEND:-ascend_triton}}"
+        export MODEL_LOAD_DTYPE="${MODEL_LOAD_DTYPE:-float32}"
+        export LLV2_DISTRIBUTED_BACKEND="${LLV2_DISTRIBUTED_BACKEND:-hccl}"
+        export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
+        export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
+        ;;
+    *) echo "[error] LLV2_DEVICE must be npu or cuda" >&2; exit 2 ;;
+esac
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-${SP_SIZE:-4}}"
 export SP_SIZE="${LONGLIVE_SP_SIZE}"
-export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 export SHARDING_STRATEGY="${SHARDING_STRATEGY:-}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 unset MASTER_PORT
@@ -17,22 +46,22 @@ export SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 export VIS_INTERVAL="${VIS_INTERVAL:-100}"
 export MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-20}"
 export SPARSE_METHOD="${SPARSE_METHOD:-sla_cag}"
-export SPARSE_BACKEND="${SPARSE_BACKEND:-${SLA_BACKEND:-ascend_triton}}"
 export SPARSE_QUERY_BLOCK_BATCH="${SPARSE_QUERY_BLOCK_BATCH:-${SLA_QUERY_BLOCK_BATCH:-1}}"
 export LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-1}"
 export GENERATOR_TRAIN_SCOPE="${GENERATOR_TRAIN_SCOPE:-}"
 export GENERATOR_LR="${GENERATOR_LR:-}"
 export LINEAR_LR="${LINEAR_LR:-}"
 export LLV2_TRAIN_PROGRESS="${LLV2_TRAIN_PROGRESS:-1}"
-export LLV2_DEVICE="npu"
-export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-1800}"
-export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 
 # ---------- 可覆盖的路径参数 ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export LONGLIVE_ROOT="${LONGLIVE_ROOT:-${REPO_ROOT}}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
+if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+    export GENERATION_ENV="${GENERATION_ENV:-${CONDA_PREFIX:-$(python -c 'import sys; print(sys.prefix)')}}"
+else
+    export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
+fi
 if [[ ! "${SPARSE_METHOD}" =~ ^(sla_cag|hsa_cag|hsa_sla_cag)$ ]]; then
     echo "[error] SPARSE_METHOD must be sla_cag, hsa_cag, or hsa_sla_cag" >&2
     exit 2
@@ -41,7 +70,7 @@ export CONFIG_PATH="${CONFIG_PATH:-configs/train/${SPARSE_METHOD}.yaml}"
 export MODEL_ROOT="${MODEL_ROOT:-/mnt/share/r50063443/Wan2.2-TI2V-5B}"
 export GENERATOR_CKPT="${GENERATOR_CKPT:-/mnt/share/r50063443/LongLive/checkpoints/longlive2_5b/longlive2_merged_generator.pt}"
 export TRAIN_PROMPTS="${TRAIN_PROMPTS:-data/train/vidprom_filtered_extended/prompts_train.txt}"
-export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_${SPARSE_METHOD}_npu_bf16}"
+export TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-$(date +%Y%m%d_%H%M%S)_longlive2_${SPARSE_METHOD}_${LLV2_DEVICE}_bf16}"
 export DISABLE_WANDB="${DISABLE_WANDB:-1}"
 export VALIDATE_LINEAR_CHECKPOINT="${VALIDATE_LINEAR_CHECKPOINT:-1}"
 
@@ -54,14 +83,33 @@ LOG_DIR="logs/training/${TRAIN_RUN_NAME}"
 WANDB_DIR="${ARTIFACT_DIR}/wandb"
 TEXT_LOG="${LOG_DIR}/node_${NODE_RANK}.log"
 METRICS_LOG="${LOG_DIR}/metrics.jsonl"
+if [[ "${DRY_RUN}" == "1" && -e "${ARTIFACT_DIR}" ]]; then
+    echo "[error] dry-run refuses to overwrite existing directory: ${ARTIFACT_DIR}" >&2
+    exit 2
+fi
+if [[ "${DRY_RUN}" != "1" && -e "${ARTIFACT_DIR}" ]] && (( NNODES == 1 )); then
+    resumable_checkpoint=false
+    for checkpoint in "${ARTIFACT_DIR}"/checkpoints/step_*/train_state.pt; do
+        if [[ -f "${checkpoint}" ]]; then
+            resumable_checkpoint=true
+            break
+        fi
+    done
+    if [[ "${resumable_checkpoint}" != "true" ]]; then
+        echo "[error] existing training directory has no train_state.pt; inspect it and use a new TRAIN_RUN_NAME: ${ARTIFACT_DIR}" >&2
+        exit 2
+    fi
+fi
 mkdir -p "${ARTIFACT_DIR}" "${LOG_DIR}" "${WANDB_DIR}"
-exec > >(tee -a "${TEXT_LOG}") 2>&1
+if [[ "${DRY_RUN}" != "1" ]]; then
+    exec > >(tee -a "${TEXT_LOG}") 2>&1
+fi
 printf '\n[launch] time=%s node=%s/%s run=%s\n' \
     "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${NODE_RANK}" "${NNODES}" "${TRAIN_RUN_NAME}"
 
-IFS=',' read -r -a visible_devices <<< "${ASCEND_RT_VISIBLE_DEVICES}"
+IFS=',' read -r -a visible_devices <<< "${TRAIN_VISIBLE_DEVICES}"
 if (( ${#visible_devices[@]} != NPROC_PER_NODE )); then
-    echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE}, but ASCEND_RT_VISIBLE_DEVICES has ${#visible_devices[@]} devices" >&2
+    echo "[error] NPROC_PER_NODE=${NPROC_PER_NODE}, but ${TRAIN_DEVICE_VARIABLE} has ${#visible_devices[@]} devices" >&2
     exit 2
 fi
 if (( NNODES <= 0 || NODE_RANK < 0 || NODE_RANK >= NNODES )); then
@@ -77,6 +125,10 @@ if [[ ! "${VALIDATE_LINEAR_CHECKPOINT}" =~ ^[01]$ ]]; then
     exit 2
 fi
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
+if (( SP_SIZE <= 0 || GRADIENT_ACCUMULATION_STEPS <= 0 )); then
+    echo "[error] LONGLIVE_SP_SIZE and GRADIENT_ACCUMULATION_STEPS must be positive" >&2
+    exit 2
+fi
 if (( WORLD_SIZE % SP_SIZE != 0 )); then
     echo "[error] WORLD_SIZE=${WORLD_SIZE} must be divisible by LONGLIVE_SP_SIZE=${SP_SIZE}" >&2
     exit 2
@@ -86,22 +138,22 @@ if (( 24 % SP_SIZE != 0 || 8 % SP_SIZE != 0 )); then
     exit 2
 fi
 DP_SIZE=$((WORLD_SIZE / SP_SIZE))
-for required in \
-    "${PYTHON}" \
-    "${TORCHRUN}" \
-    "${CONFIG_PATH}" \
-    "${GENERATOR_CKPT}" \
-    "${TRAIN_PROMPTS}" \
-    "${MODEL_ROOT}/models_t5_umt5-xxl-enc-bf16.pth" \
-    "${MODEL_ROOT}/google/umt5-xxl" \
-    "${MODEL_ROOT}/Wan2.2_VAE.pth"; do
+required_paths=("${PYTHON}" "${CONFIG_PATH}")
+if [[ "${DRY_RUN}" != "1" ]]; then
+    required_paths+=(
+        "${TORCHRUN}" "${GENERATOR_CKPT}" "${TRAIN_PROMPTS}"
+        "${MODEL_ROOT}/models_t5_umt5-xxl-enc-bf16.pth"
+        "${MODEL_ROOT}/google/umt5-xxl" "${MODEL_ROOT}/Wan2.2_VAE.pth"
+    )
+fi
+for required in "${required_paths[@]}"; do
     if [[ ! -e "${required}" ]]; then
         echo "[error] required path does not exist: ${required}" >&2
         exit 2
     fi
 done
 
-if [[ "${SPARSE_BACKEND}" == "ascend_triton" ]]; then
+if [[ "${DRY_RUN}" != "1" && "${SPARSE_BACKEND}" == "ascend_triton" ]]; then
     "${PYTHON}" - <<'PY'
 from wan_5b.modules.sla_attention_ascend import (
     ascend_triton_available,
@@ -117,10 +169,13 @@ print("[run] Ascend Triton sparse backend is available")
 PY
 fi
 
-PROMPT_COUNT="$(${PYTHON} -c 'import sys; print(sum(bool(x.strip()) for x in open(sys.argv[1], encoding="utf-8")))' "${TRAIN_PROMPTS}")"
+PROMPT_COUNT=unavailable
+if [[ -f "${TRAIN_PROMPTS}" ]]; then
+    PROMPT_COUNT="$(${PYTHON} -c 'import sys; print(sum(bool(x.strip()) for x in open(sys.argv[1], encoding="utf-8")))' "${TRAIN_PROMPTS}")"
+fi
 EFFECTIVE_BATCH=$((DP_SIZE * GRADIENT_ACCUMULATION_STEPS))
 echo "[run] config=${CONFIG_PATH}"
-echo "[run] node=${NODE_RANK}/${NNODES} devices=${ASCEND_RT_VISIBLE_DEVICES} local_nproc=${NPROC_PER_NODE} world=${WORLD_SIZE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}"
+echo "[run] device=${LLV2_DEVICE} node=${NODE_RANK}/${NNODES} devices=${TRAIN_VISIBLE_DEVICES} local_nproc=${NPROC_PER_NODE} world=${WORLD_SIZE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}"
 echo "[run] prompts=${PROMPT_COUNT} model_root=${MODEL_ROOT}"
 echo "[run] generator_ckpt=${GENERATOR_CKPT}"
 echo "[run] artifacts=${ARTIFACT_DIR}"
@@ -135,13 +190,14 @@ if (( NODE_RANK == 0 )); then
     if (( NNODES > 1 )); then
         rm -f "${RENDEZVOUS_READY}"
     fi
-    cp "${CONFIG_PATH}" "${ARTIFACT_DIR}/config.source.yaml"
-    "${PYTHON}" - "${CONFIG_PATH}" "${CONFIG_OVERRIDE}" <<'PY'
+    "${PYTHON}" - "${CONFIG_PATH}" "${CONFIG_OVERRIDE}" "${REPO_ROOT}" <<'PY'
 import os
 import sys
 from omegaconf import OmegaConf
 
-source, output = sys.argv[1:]
+source, output, code_root = sys.argv[1:]
+sys.path.insert(0, code_root)
+from utils.config import validate_training_resume_contract
 config = OmegaConf.load(source)
 config.model_kwargs.model_root = os.environ["MODEL_ROOT"]
 config.real_model_kwargs.model_root = os.environ["MODEL_ROOT"]
@@ -160,6 +216,15 @@ if os.environ["LINEAR_LR"]:
     config.training.lr_linear = float(os.environ["LINEAR_LR"])
 config.evaluation.interval = int(os.environ["VIS_INTERVAL"])
 config.infra.sequence_parallel_size = int(os.environ["SP_SIZE"])
+device_type = os.environ["LLV2_DEVICE"]
+load_dtype = os.environ["MODEL_LOAD_DTYPE"]
+if load_dtype not in {"float32", "bfloat16"}:
+    raise ValueError("MODEL_LOAD_DTYPE must be float32 or bfloat16")
+config.infra.device_type = device_type
+config.infra.distributed_backend = os.environ["LLV2_DISTRIBUTED_BACKEND"]
+config.infra.model_load_dtype = load_dtype
+config.infra.trainable_parameter_dtype = "float32"
+config.infra.compute_dtype = "bfloat16" if config.infra.mixed_precision else "float32"
 if os.environ["SHARDING_STRATEGY"]:
     config.infra.sharding_strategy = os.environ["SHARDING_STRATEGY"]
 config.model_kwargs.sparse_config.method = os.environ["SPARSE_METHOD"]
@@ -172,8 +237,13 @@ dense_prefix_chunks = int(os.environ["LONGLIVE_DENSE_PREFIX_CHUNKS"])
 if dense_prefix_chunks < 1:
     raise ValueError("LONGLIVE_DENSE_PREFIX_CHUNKS must be at least 1")
 config.model_kwargs.sparse_config.dense_prefix_chunks = dense_prefix_chunks
-OmegaConf.save(config, output)
+if os.path.exists(output):
+    validate_training_resume_contract(OmegaConf.load(output), config)
+temporary_output = f"{output}.tmp.{os.getpid()}"
+OmegaConf.save(config, temporary_output)
+os.replace(temporary_output, output)
 PY
+    cp "${CONFIG_PATH}" "${ARTIFACT_DIR}/config.source.yaml"
     touch "${CONFIG_READY}"
 else
     echo "[run] waiting for rank-0 config: ${CONFIG_READY}"
@@ -185,6 +255,12 @@ else
         echo "[error] timed out waiting for rank-0 config: ${CONFIG_READY}" >&2
         exit 2
     fi
+fi
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] resolved_config=${CONFIG_OVERRIDE} device=${LLV2_DEVICE} backend=${SPARSE_BACKEND} load_dtype=${MODEL_LOAD_DTYPE}"
+    echo "[dry-run] world=${WORLD_SIZE} SP=${SP_SIZE} DP=${DP_SIZE} effective_batch=${EFFECTIVE_BATCH}; torchrun not started"
+    exit 0
 fi
 
 torchrun_rendezvous_args=(--nnodes="${NNODES}")

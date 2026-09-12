@@ -16,6 +16,12 @@ VBENCH_CONFIG = ROOT / "configs" / "inference" / "vbench.yaml"
 MSPROF_CONFIG = ROOT / "configs" / "inference" / "msprof.yaml"
 
 
+@pytest.fixture(autouse=True)
+def isolated_runtime(monkeypatch):
+    monkeypatch.setenv("LLV2_DEVICE", "npu")
+    monkeypatch.delenv("LONGLIVE_DP_SIZE", raising=False)
+
+
 def _args(config, preset, output, *, seed=None):
     return SimpleNamespace(
         config=config,
@@ -28,6 +34,91 @@ def _args(config, preset, output, *, seed=None):
         save_latents_only=False,
         vae_mode=None,
     )
+
+
+@pytest.mark.parametrize("method", ["dense", "hsa_cag", "sla_cag", "hsa_sla_cag"])
+def test_cuda_benchmark_defaults_fit_four_cards(tmp_path, monkeypatch, method):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", method)
+    output = tmp_path / "cuda.yaml"
+    metadata = resolve_benchmark(_args(MSPROF_CONFIG, "5s", output))
+    config = OmegaConf.load(output)
+    assert (metadata["sp_size"], metadata["dp_size"], metadata["required_devices"]) == (4, 1, 4)
+    assert metadata["vae_mode"] == "sync_vae"
+    assert config.inference.vae_device is None
+    assert metadata["accelerator"] == config.accelerator == "cuda"
+    assert metadata["visible_devices"] == "4,5,6,7"
+    assert metadata["sparsity_backend"] == ("dense" if method == "dense" else "portable")
+    if method != "dense":
+        assert config.model_kwargs.sparse_config.backend == "portable"
+
+
+@pytest.mark.parametrize("preset", ["longlive2_standard_5pct", "wan22_standard_5pct"])
+def test_cuda_vbench_defaults_and_dp_override(tmp_path, monkeypatch, preset):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    args = _args(VBENCH_CONFIG, preset, tmp_path / "vbench_cuda.yaml")
+    metadata = resolve_vbench(args)
+    assert (metadata["sp_size"], metadata["dp_size"], metadata["required_devices"]) == (4, 1, 4)
+    monkeypatch.setenv("LONGLIVE_SP_SIZE", "2")
+    monkeypatch.setenv("LONGLIVE_DP_SIZE", "2")
+    metadata = resolve_vbench(args)
+    assert (metadata["sp_size"], metadata["dp_size"], metadata["required_devices"]) == (2, 2, 4)
+
+
+def test_cuda_dedicated_vae_uses_extra_cuda_device(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    monkeypatch.setenv("LONGLIVE_SP_SIZE", "2")
+    args = _args(MSPROF_CONFIG, "5s", tmp_path / "async.yaml")
+    args.vae_mode = "async_vae"
+    metadata = resolve_benchmark(args)
+    assert metadata["required_devices"] == 3
+    assert OmegaConf.load(args.output).inference.vae_device == "cuda:2"
+    monkeypatch.setenv("LONGLIVE_DP_SIZE", "2")
+    with pytest.raises(ValueError, match="requires dp_size=1"):
+        resolve_benchmark(args)
+
+
+@pytest.mark.parametrize("method", ["hsa_cag", "sla_cag", "hsa_sla_cag"])
+def test_cuda_flex_requires_explicit_selection(tmp_path, monkeypatch, method):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", method)
+    monkeypatch.setenv("LONGLIVE_SPARSE_BACKEND", "cuda_flex")
+    args = _args(MSPROF_CONFIG, "5s", tmp_path / "flex.yaml")
+    metadata = resolve_benchmark(args)
+    assert metadata["sparsity_backend"] == "cuda_flex"
+    assert OmegaConf.load(args.output).model_kwargs.sparse_config.backend == "cuda_flex"
+    monkeypatch.setenv("LONGLIVE_SPARSE_BACKEND", "mindiesd")
+    with pytest.raises(ValueError, match="unsupported sparse inference backend"):
+        resolve_benchmark(args)
+
+
+def test_cuda_flex_can_be_selected_explicitly_in_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    monkeypatch.setenv("LONGLIVE_SPARSE_METHOD", "sla_cag")
+    config = OmegaConf.load(MSPROF_CONFIG)
+    config.sparsity.profiles.sla_cag.backend = "cuda_flex"
+    path = tmp_path / "explicit_backend.yaml"
+    OmegaConf.save(config, path)
+    args = _args(path, "5s", tmp_path / "resolved.yaml")
+    metadata = resolve_benchmark(args)
+    assert metadata["sparsity_backend"] == "cuda_flex"
+    assert OmegaConf.load(args.output).model_kwargs.sparse_config.backend == "cuda_flex"
+
+
+def test_benchmark_dp_requires_enough_prompts_per_replica(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLV2_DEVICE", "cuda")
+    monkeypatch.setenv("LONGLIVE_SP_SIZE", "2")
+    monkeypatch.setenv("LONGLIVE_DP_SIZE", "2")
+    args = _args(MSPROF_CONFIG, "5s", tmp_path / "dp.yaml")
+    args.num_prompts = 4
+    metadata = resolve_benchmark(args)
+    assert metadata["num_prompts_per_replica"] == 4
+    assert metadata["total_prompts"] == 8
+    assert OmegaConf.load(args.output).inference_iter == 3
+    args.num_prompts = 6
+    with pytest.raises(ValueError, match="per DP replica requires 12"):
+        resolve_benchmark(args)
 
 
 def test_vbench_dense_does_not_inject_sparse_model_config(tmp_path, monkeypatch):

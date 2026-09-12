@@ -1,5 +1,6 @@
 # 昇腾 VBench 标准评测预设。VBench-Long 的评测器尚未完成昇腾适配，因此不在当前维护范围内。
 # 模型路径可通过 LONGLIVE_MODEL_ROOT 和 LONGLIVE_GENERATOR_CKPT 环境变量覆盖。
+# LLV2_DEVICE=cuda 时解析为4卡SP4/DP1与portable稀疏后端；LONGLIVE_SP_SIZE/DP_SIZE可覆盖，官方CUDA评估使用独立VBENCH_ENV。
 models:
   longlive2:
     entrypoint: inference_sp.py

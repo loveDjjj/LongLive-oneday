@@ -192,3 +192,26 @@ def test_performance_suite_uses_matching_sp_dense_reference(tmp_path):
     sparse = {row["sp_size"]: row for row in rows if row["method"] == "sla_cag"}
     assert sparse[1]["dense_speedup"] == 80 / 60
     assert sparse[4]["dense_speedup"] == 48 / 36
+
+
+def test_suite_does_not_compare_different_accelerators_or_devices(tmp_path):
+    root = tmp_path / "runs"
+    for method, accelerator, devices in (
+        ("dense", "npu", "0,1,2,3"),
+        ("sla_cag", "cuda", "0,1,2,3"),
+        ("hsa_cag", "npu", "4,5,6,7"),
+    ):
+        run = root / f"suite-{method}"
+        run.mkdir(parents=True)
+        (run / "manifest.json").write_text(json.dumps({
+            "task": "benchmark", "preset": "5s", "sparsity_method": method,
+            "sparsity_backend": "portable", "vae_mode": "dit_only",
+            "sp_size": 4, "dp_size": 1, "accelerator": accelerator,
+            "visible_devices": devices,
+        }))
+        (run / "summary.json").write_text(json.dumps({"generation_seconds_mean": 1.0}))
+    output = tmp_path / "out"
+    _run("summarize_suite.py", "benchmark", "--suite-id", "suite",
+         "--runs-root", str(root), "--output-dir", str(output))
+    rows = json.loads((output / "results.json").read_text())["rows"]
+    assert all(row["dense_speedup"] is None for row in rows if row["method"] != "dense")

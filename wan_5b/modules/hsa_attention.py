@@ -81,7 +81,7 @@ class HSAAttentionConfig:
         return config
 
     def validate(self) -> None:
-        if self.backend not in {"portable", "ascend_triton", "mindiesd", "auto"}:
+        if self.backend not in {"portable", "ascend_triton", "mindiesd", "cuda_flex", "auto"}:
             raise ValueError(f"unsupported HSA backend: {self.backend}")
         for name in ("sparsity", "sparsity_base"):
             value = float(getattr(self, name))
@@ -109,10 +109,10 @@ class HSAAttentionConfig:
             raise ValueError("HSA budget_reference must be full_resident_kv.")
         if self.query_block_batch <= 0:
             raise ValueError("query_block_batch must be positive.")
-        if self.enabled and self.backend == "mindiesd" and (
+        if self.enabled and self.backend in {"mindiesd", "cuda_flex"} and (
             self.block_q != 128 or self.block_k != 128
         ):
-            raise ValueError("MindIE-SD sparse execution requires 128-token blocks.")
+            raise ValueError("MindIE-SD/cuda_flex sparse execution requires 128-token blocks.")
 
 
 def build_hsa_block_lut(

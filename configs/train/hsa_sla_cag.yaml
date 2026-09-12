@@ -1,5 +1,6 @@
 # LongLive2.0-5B 在昇腾上的 HSA+SLA+CAG 主训练配置。
 # Generator 主干使用 LoRA，同时直接训练 30 层 sla_linear；Fake Critic 使用 LoRA。
+# 此处保留 NPU 默认。LLV2_DEVICE=cuda 时启动器解析为4卡SP4、累积8、portable后端与BF16底座加载；可训练参数保留FP32。
 infra:
   # SP 组共同计算一个视频；DP 数为 world_size / sequence_parallel_size。
   # 16 卡正式训练使用 SP8 x DP2；每个 SP rank 处理 3 个 attention head。

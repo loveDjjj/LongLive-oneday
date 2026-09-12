@@ -6,6 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+if [[ "${LLV2_DEVICE:-npu}" == "cuda" ]]; then
+  echo "[error] msprof only supports Ascend NPU. Use run_benchmark.sh for CUDA latency measurements." >&2
+  exit 2
+fi
+
 # 部署参数。SP、DP 和专用 VAE 设备由 YAML 管理。
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4}"
 export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"

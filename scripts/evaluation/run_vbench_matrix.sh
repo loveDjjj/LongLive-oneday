@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+# shellcheck source=scripts/evaluation/runtime.sh
+source "${SCRIPT_DIR}/runtime.sh"
+evaluation_runtime_init "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
 if [[ "$#" -gt 1 ]]; then
   echo "Usage: $0 [merged_generator_checkpoint]" >&2
   exit 2
@@ -49,6 +53,10 @@ for preset in "${presets[@]}"; do
     echo "[suite] checkpoint=${checkpoint} preset=${preset} method=${method}"
     run_id="${SUITE_ID}-${preset}-${method}"
     if [[ "${DRY_RUN}" == "1" ]]; then
+      if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+        LONGLIVE_GENERATOR_CKPT="${checkpoint}" LONGLIVE_SPARSE_METHOD="${method}" \
+          bash scripts/evaluation/run_vbench.sh "${preset}"
+      fi
       continue
     fi
     run_dir="runs/vbench/${run_id}"
@@ -58,6 +66,7 @@ for preset in "${presets[@]}"; do
     fi
     LONGLIVE_GENERATOR_CKPT="${checkpoint}" \
     LONGLIVE_SPARSE_METHOD="${method}" \
+    RESUME_RUN="${RESUME_SUITE}" \
     RUN_ID="${run_id}" \
       bash scripts/evaluation/run_vbench.sh "${preset}"
   done

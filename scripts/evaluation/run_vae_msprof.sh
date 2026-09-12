@@ -6,6 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+if [[ "${LLV2_DEVICE:-npu}" == "cuda" ]]; then
+  echo "[error] msprof only supports Ascend NPU. Use run_benchmark.sh for CUDA latency measurements." >&2
+  exit 2
+fi
+
 if [[ "$#" -ne 1 ]]; then
   echo "usage: $0 path/to/latent.pt" >&2
   exit 2

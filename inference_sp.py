@@ -16,7 +16,7 @@ from tqdm import tqdm
 from pipeline.causal_diffusion_inference_sp import CausalDiffusionInferencePipelineSP
 from utils.config import normalize_config, section_get
 from utils.dataset import PromptDataset, prompt_collate_fn
-from utils.device import distributed_backend, empty_cache, is_npu, set_device
+from utils.device import distributed_backend, empty_cache, set_device
 from utils.inference_utils import (
     load_generator_checkpoint,
     load_generator_linear_checkpoint,
@@ -331,21 +331,23 @@ if use_dedicated_vae_device and total_dp_groups != 1:
         "A single inference.vae_device cannot serve multiple DP groups safely. "
         "Use dp_size=1, or launch one independent SP+VAE process per replica."
     )
-if use_dedicated_vae_device and is_npu():
+if use_dedicated_vae_device:
     requested_vae_device = torch.device(vae_device_str)
-    if requested_vae_device.type != "npu" or requested_vae_device.index is None:
+    if requested_vae_device.type != device.type or requested_vae_device.index is None:
         raise ValueError(
-            "Ascend asynchronous VAE requires an explicit device such as vae_device: npu:4."
+            f"Asynchronous VAE requires an explicit {device.type} device, "
+            f"for example vae_device: {device.type}:{world_size}."
         )
     if requested_vae_device.index < world_size:
         raise ValueError(
             f"vae_device={requested_vae_device} overlaps the {world_size} torchrun worker "
-            "devices. Expose one extra NPU and use its logical index."
+            "devices. Expose one extra accelerator and use its logical index."
         )
-    if requested_vae_device.index >= torch.npu.device_count():
+    visible_device_count = getattr(torch, device.type).device_count()
+    if requested_vae_device.index >= visible_device_count:
         raise ValueError(
             f"vae_device={requested_vae_device} is unavailable; "
-            f"ASCEND_RT_VISIBLE_DEVICES exposes {torch.npu.device_count()} logical NPUs."
+            f"the runtime exposes {visible_device_count} logical {device.type} devices."
         )
 if save_latents_only:
     pipeline.vae.to(device="cpu")

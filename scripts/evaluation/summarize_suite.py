@@ -51,6 +51,8 @@ def _common(run_dir: Path, manifest: dict) -> dict:
         "run_id": run_dir.name,
         "task": manifest["task"],
         "profiled": manifest["task"] == "msprof",
+        "accelerator": manifest.get("accelerator", "npu"),
+        "visible_devices": manifest.get("visible_devices", ""),
         "preset": manifest["preset"],
         "method": manifest["sparsity_method"],
         "backend": manifest["sparsity_backend"],
@@ -79,13 +81,13 @@ def _performance_rows(run_dirs: list[Path]) -> list[dict]:
     for row in rows:
         if row["method"] != "dense":
             continue
-        key = (row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
+        key = (row["accelerator"], row["visible_devices"], row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
         if key in dense:
             raise RuntimeError(f"duplicate dense reference for {key}")
         dense[key] = row
     for row in rows:
         reference = dense.get(
-            (row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
+            (row["accelerator"], row["visible_devices"], row["preset"], row["vae_mode"], row["sp_size"], row["dp_size"])
         )
         row["dense_speedup"] = (
             reference["generation_seconds_mean"] / row["generation_seconds_mean"]

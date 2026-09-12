@@ -6,9 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4}"
-export GENERATION_ENV="${GENERATION_ENV:-/mnt/share/r50063443/conda_envs/longlive}"
-export CANN_ENV_SCRIPT="${CANN_ENV_SCRIPT:-/mnt/share/r50063443/conda_envs/cann-8.5/Ascend/cann-8.5.0/set_env.sh}"
+# shellcheck source=scripts/evaluation/runtime.sh
+source "${SCRIPT_DIR}/runtime.sh"
+evaluation_runtime_init "0,1,2,3,4"
+DRY_RUN="${DRY_RUN:-0}"
 unset MASTER_PORT
 
 # ---------- 可覆盖参数 ----------
@@ -17,7 +18,11 @@ PRESET="${1:-32s}"
 BENCHMARK_REPEATS="${BENCHMARK_REPEATS:-3}"
 BENCHMARK_WARMUP="${BENCHMARK_WARMUP:-1}"
 BENCHMARK_LATENTS_ONLY="${BENCHMARK_LATENTS_ONLY:-0}"
-BENCHMARK_MODE="${BENCHMARK_MODE:-async_vae}"
+if [[ "${LLV2_DEVICE}" == "cuda" ]]; then
+  BENCHMARK_MODE="${BENCHMARK_MODE:-sync_vae}"
+else
+  BENCHMARK_MODE="${BENCHMARK_MODE:-async_vae}"
+fi
 LONGLIVE_SP_SIZE="${LONGLIVE_SP_SIZE:-}"
 LONGLIVE_DENSE_PREFIX_CHUNKS="${LONGLIVE_DENSE_PREFIX_CHUNKS:-}"
 
@@ -40,22 +45,15 @@ fi
 if [[ "${BENCHMARK_LATENTS_ONLY}" == "1" ]]; then
   BENCHMARK_MODE="dit_only"
 fi
-if [[ ! -f "${CONFIG_PATH}" || ! -f "${CANN_ENV_SCRIPT}" ]]; then
-  echo "[error] missing config or CANN environment: ${CONFIG_PATH}, ${CANN_ENV_SCRIPT}" >&2
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "[error] missing config: ${CONFIG_PATH}" >&2
   exit 1
 fi
-if [[ ! -x "${GENERATION_ENV}/bin/python" || ! -x "${GENERATION_ENV}/bin/torchrun" ]]; then
-  echo "[error] incomplete generation environment: ${GENERATION_ENV}" >&2
-  exit 1
+if [[ "${DRY_RUN}" != "0" && "${DRY_RUN}" != "1" ]]; then
+  echo "[error] DRY_RUN must be 0 or 1" >&2
+  exit 2
 fi
-
-set +u
-# shellcheck disable=SC1090
-source "${CANN_ENV_SCRIPT}"
-set -u
-export CONDA_PREFIX="${GENERATION_ENV}"
-export PATH="${GENERATION_ENV}/bin:${PATH}"
-export LD_LIBRARY_PATH="${GENERATION_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+evaluation_prepare_runtime
 
 total_prompts=$((BENCHMARK_REPEATS + BENCHMARK_WARMUP))
 metadata_tmp="$(mktemp "${TMPDIR:-/tmp}/longlive_benchmark.XXXXXX.json")"
@@ -85,11 +83,22 @@ dp_size="$(json_field dp_size)"
 nproc="$(json_field nproc_per_node)"
 required_devices="$(json_field required_devices)"
 
-visible_count="$(awk -F, '{print NF}' <<<"${ASCEND_RT_VISIBLE_DEVICES}")"
+visible_count="$(awk -F, '{print NF}' <<<"${VISIBLE_DEVICES}")"
 if [[ "${visible_count}" -ne "${required_devices}" ]]; then
-  echo "[error] preset ${PRESET} requires ${required_devices} visible NPUs, " \
-       "got ${ASCEND_RT_VISIBLE_DEVICES}" >&2
+  echo "[error] preset ${PRESET} requires ${required_devices} visible ${LLV2_DEVICE} devices, " \
+       "got ${VISIBLE_DEVICES}" >&2
   exit 1
+fi
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+  preview_dir="$(mktemp -d "${TMPDIR:-/tmp}/longlive_benchmark_preview.XXXXXX")"
+  cp "${metadata_tmp}" "${preview_dir}/manifest.json"
+  "${GENERATION_ENV}/bin/python" scripts/evaluation/resolve_config.py \
+    "${resolve_args[@]}" --output "${preview_dir}/resolved.yaml" \
+    --output-folder "${preview_dir}/videos" >/dev/null
+  echo "[dry-run] accelerator=${LLV2_DEVICE} devices=${VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size} mode=${BENCHMARK_MODE} backend=${sparsity_backend}"
+  echo "[dry-run] preview=${preview_dir} nproc=${nproc}"
+  exit 0
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
@@ -117,7 +126,7 @@ cp "${metadata_tmp}" "${run_dir}/manifest.json"
   --output-folder "${video_dir}" >/dev/null
 
 echo "[run] task=benchmark preset=${PRESET} run_id=${run_id}"
-echo "[run] devices=${ASCEND_RT_VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
+echo "[run] accelerator=${LLV2_DEVICE} devices=${VISIBLE_DEVICES} layout=SP${sp_size}xDP${dp_size}"
 echo "[run] sparsity=${sparsity_method} backend=${sparsity_backend}"
 echo "[run] warmup=${BENCHMARK_WARMUP} measured=${BENCHMARK_REPEATS}"
 echo "[run] mode=${BENCHMARK_MODE}"
@@ -125,7 +134,7 @@ echo "[run] rendezvous=standalone"
 echo "[run] config=${resolved_config}"
 
 set +e
-LLV2_DEVICE=npu "${GENERATION_ENV}/bin/torchrun" \
+"${GENERATION_ENV}/bin/torchrun" \
   --standalone \
   --nnodes=1 \
   --nproc_per_node="${nproc}" \

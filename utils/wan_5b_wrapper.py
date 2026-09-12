@@ -18,15 +18,26 @@ def _resolve_wan_model_root(model_name="Wan2.2-TI2V-5B", model_root=None):
     return model_root or os.path.join("wan_models", model_name)
 
 
+def resolve_model_load_dtype(load_dtype=None):
+    """Resolve an explicit storage dtype without changing legacy loading defaults."""
+    if load_dtype is None:
+        return None
+    if load_dtype in ("float32", torch.float32):
+        return torch.float32
+    if load_dtype in ("bfloat16", torch.bfloat16):
+        return torch.bfloat16
+    raise ValueError("model load_dtype must be float32 or bfloat16")
+
+
 class WanTextEncoder(torch.nn.Module):
-    def __init__(self, model_name="Wan2.2-TI2V-5B", model_root=None, device=None) -> None:
+    def __init__(self, model_name="Wan2.2-TI2V-5B", model_root=None, device=None, load_dtype=None) -> None:
         super().__init__()
         self.model_root = _resolve_wan_model_root(model_name, model_root)
 
         self.text_encoder = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
-            dtype=torch.float32,
+            dtype=resolve_model_load_dtype(load_dtype) or torch.float32,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
@@ -296,9 +307,12 @@ class WanDiffusionWrapper(torch.nn.Module):
             model_root=None,
             sparse_config=None,
             use_ulysses_sp=False,
+            load_dtype=None,
     ):
         super().__init__()
         self.model_root = _resolve_wan_model_root(model_name, model_root)
+        load_dtype = resolve_model_load_dtype(load_dtype)
+        load_kwargs = {"torch_dtype": load_dtype} if load_dtype is not None else {}
 
         if is_causal:
             model_cls = CausalWanModel
@@ -308,14 +322,18 @@ class WanDiffusionWrapper(torch.nn.Module):
             self.model = model_cls.from_pretrained(
                 self.model_root, local_attn_size=local_attn_size, sink_size=sink_size,
                 num_frame_per_block=num_frame_per_block,
-                sparse_config=sparse_config, defer_sla_linear_init=True)
+                sparse_config=sparse_config, defer_sla_linear_init=True, **load_kwargs)
             # Native Wan checkpoints do not contain SLA compensation weights.
             # Create them after Diffusers leaves its low-memory meta context,
             # then persist the normal construction contract for future saves.
             self.model.initialize_sla_linear()
+            if load_dtype is not None:
+                # Compensation layers are materialized after from_pretrained and
+                # must match the backbone before trainable parameters are promoted.
+                self.model.to(dtype=load_dtype)
             self.model.register_to_config(defer_sla_linear_init=False)
         else:
-            self.model = WanModel.from_pretrained(self.model_root)
+            self.model = WanModel.from_pretrained(self.model_root, **load_kwargs)
         self.model.eval()
         self.model.t_scale = t_scale
         self.model.rope_method = rope_method

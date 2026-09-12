@@ -1,6 +1,8 @@
-# LongLive2.0 昇腾稀疏训练指南
+# LongLive2.0 稀疏训练指南
 
 本文是当前训练流程的统一说明，覆盖 `hsa_cag`、`sla_cag` 和 `hsa_sla_cag` 三种方法。环境和算子准入见[环境安装与测试](setup_and_validation.md)，推理、性能与质量评测见[推理与评测指南](inference_and_evaluation.md)。
+
+本文既有命令默认面向昇腾；新增 4 张 H100 的 CUDA 适配见第 11 节。CUDA 完整训练仍**待服务器验证**。
 
 ## 1. 训练目标与边界
 
@@ -21,7 +23,7 @@
 | `hsa_sla_cag` 主方案 | 主干 LoRA + 原始 `sla_linear` | 0.85 / 0.95 | 共享 history-only HSA router，再执行 SLA global block Top-K |
 | `hsa_sla_cag` 对照 | 仅原始 `sla_linear` | 0.85 / 0.95 | 路由与主方案相同，隔离补偿层自身能力 |
 
-Fake Critic 在三种方法中均使用 LoRA。SLA+CAG 与混合主方案的 `sla_linear` 都不包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；其余 attention 线性层使用 rank 128 LoRA。两种方法的主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率，只比较路由差异。linear-only 对照冻结 Generator 主干，仅训练混合方法相同的 60 个补偿层张量。
+Fake Critic 在三种方法中均使用 LoRA。SLA+CAG 与混合主方案的 `sla_linear` 都不包装 LoRA，而是直接训练每层 weight/bias，共 60 个原始张量；Transformer block 内的其余 Linear（包括 self/cross attention 和 FFN）使用 rank 128 LoRA。两种方法的主干 LoRA 与补偿层分别使用 `2e-6` 和 `2e-5` 学习率，只比较路由差异。linear-only 对照冻结 Generator 主干，仅训练混合方法相同的 60 个补偿层张量。
 
 三种方法统一使用 `0.85/0.95` CAG 预算；SLA+CAG 与 HSA+SLA+CAG 主方案统一使用 `lora_plus_linear` 参数化，HSA+CAG 维持 LoRA。SLA+CAG 尚无需要兼容的旧训练产物，正式训练只维护该统一契约。
 
@@ -50,7 +52,7 @@ LongLive2.0 最多保留 32 个 latent 帧的滚动 KV。每帧在 patch embeddi
 - CAG 控制每个 AR chunk 的最终 block 预算，线性补偿仍使用完整 KV。
 - SP4、32 秒尾部形状为 `Q=7040`、`KV=28160`，当前配置通常选择约 20 至 22 个/220 个 KV blocks，即约 90% 的有效稀疏率；最终值以运行日志为准。
 
-路由索引本身不可微，但选中 block 的 Q/K/V 必须保持梯度。训练只支持通过完整反向测试的 `ascend_triton` 后端；MindIE-SD RainFusion/BSA 是推理前向算子。
+路由索引本身不可微，但选中 block 的 Q/K/V 必须保持梯度。昇腾正式训练使用通过完整反向测试的 `ascend_triton`；CUDA 新增 `portable` 参考后端和显式 `cuda_flex` 后端，均需完成目标 GPU 准入。MindIE-SD RainFusion/BSA 是 NPU 推理前向算子。
 
 ## 3. 训练数据
 
@@ -296,3 +298,24 @@ python scripts/checkpoints/merge_lora.py \
 ```
 
 导出后先运行同 checkpoint 的 dense 与对应 sparse DiT-only 对照，再运行 VBench。完整流程见[推理与评测指南](inference_and_evaluation.md)。
+
+## 11. 单机 4 张 H100
+
+CUDA 共用上述四个训练入口和三份 YAML，通过环境变量生成独立 resolved 配置，不复制模型或改变路由预算。安装见[环境安装与测试](setup_and_validation.md)；本轮 dry-run、四卡小模型、完整 step 与恢复命令见[当前测试清单](current_test.md)。
+
+| 变量 | CUDA 默认值与作用 |
+| --- | --- |
+| `LLV2_DEVICE` | 显式设为 `cuda`；未设置时启动器仍选择 NPU。 |
+| `CUDA_VISIBLE_DEVICES` | `0,1,2,3`；`NPROC_PER_NODE=4`，数量必须匹配。 |
+| `LONGLIVE_SP_SIZE` | 4，形成 SP4×DP1；SP2×DP2 需显式设为 2。 |
+| `GRADIENT_ACCUMULATION_STEPS` | 8；SP4×DP1、batch1 时有效 batch8。SP2×DP2 要保持 batch8 则设为 4。 |
+| `SPARSE_BACKEND` | `portable`；完成算子准入后可显式设为 `cuda_flex`。 |
+| `MODEL_LOAD_DTYPE` | `bfloat16`，减少底座加载内存；可设 `float32` 排查加载差异。 |
+| `GENERATION_ENV` | 当前激活环境根目录；可显式覆盖。 |
+| `DRY_RUN` | 1 时无需真实模型/提示词，保存 resolved 后退出；拒绝覆盖已有 run。 |
+
+CUDA 与 NPU 保持相同 32 latent 帧、每 chunk8 帧、四步采样、128-token block、`0.85/0.95` CAG 与训练范围。Generator 和 Critic 实际 LoRA 各包含约 3.22 亿参数；`sla_linear` 共约 49.5 万参数。CUDA 的冻结底座可保存为 BF16，但可训练参数在恢复 checkpoint 前就提升为 FP32，避免小学习率更新和恢复值被 BF16 舍入。FSDP 将 FP32 adapter/补偿叶模块与 BF16 底座分别包装；此包装可能增加通信，必须实测。
+
+只有 Generator 启用 Ulysses SP；Teacher/Critic 仍处理完整序列。四卡单节点 FSDP 对模型权重分片不等于 Teacher/Critic 激活也缩小四倍。`portable` 会重复 gather KV，不能承诺默认配置一定不 OOM。先以累积1完成完整 Generator+Critic 更新，再增加累积保持正式有效 batch；不要以缩短32帧窗口替代显存问题定位。
+
+恢复使用同一训练方法、scope、加载 dtype 与并行配置，以 `MAX_ITERS` 指定最终目标 step。启动器在覆盖 resolved 前核对设备、加载精度、方法/后端、SP、训练范围、窗口、数据形状和基础 checkpoint 路径；不一致时保留原证据并拒绝恢复。单机已有目录但没有完整 `train_state.pt` 时也会拒绝重新启动。首次迁移优先使用基础合并 Generator 开始新 run；跨 NPU/CUDA 的 optimizer、RNG 和数据游标恢复不在当前验收承诺内。权重导出仍用现有 `scripts/checkpoints/merge_lora.py`，CUDA 设备为 `cuda:0`。

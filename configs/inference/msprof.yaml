@@ -1,5 +1,6 @@
 # 昇腾 msprof 推理预设。性能结果只能在相同 profiler 参数下横向比较。
 # 模型路径可通过 LONGLIVE_MODEL_ROOT 和 LONGLIVE_GENERATOR_CKPT 环境变量覆盖。
+# LLV2_DEVICE=cuda 时 benchmark 默认解析为SP4/DP1、同步VAE与portable稀疏后端；cuda_flex显式启用，msprof本身仍仅用于NPU。
 model:
   name: Wan2.2-TI2V-5B
   root: /mnt/share/r50063443/Wan2.2-TI2V-5B

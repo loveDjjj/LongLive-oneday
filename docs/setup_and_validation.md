@@ -1,6 +1,8 @@
-# 昇腾环境安装与测试
+# 环境安装与测试
 
 本文是当前环境与测试的统一入口。训练参数见[训练指南](training.md)，推理、性能和质量评测见[推理与评测指南](inference_and_evaluation.md)。
+
+第 1–8 节维护现有昇腾环境，第 9 节说明新增 CUDA/H100 候选环境。H100 的实际数值、完整反向、分布式训练和性能仍**待服务器验证**；本轮命令集中在[当前测试清单](current_test.md)。
 
 ## 1. 环境基线
 
@@ -240,3 +242,44 @@ WORLD_SIZE % LONGLIVE_SP_SIZE == 0
 ```
 
 当前支持 `LONGLIVE_SP_SIZE=1/2/4/8`。多节点必须共享代码、模型、数据和运行目录，并使用一致的 `MASTER_ADDR` 与 `TRAIN_RUN_NAME`。先启动 rank 0，由系统动态分配 rendezvous 端口并写入共享 run 目录；其他节点自动读取，不设置 `MASTER_PORT`。
+
+## 9. CUDA / 4 张 H100 候选环境
+
+使用独立 Linux 环境，建议单机 4 张完整的 H100 80GB；核对 GPU 互联和系统 RAM。NPU 环境不要混装 CUDA 包。以下 PyTorch/torchvision/cu128 组合来自 [PyTorch 官方版本表](https://pytorch.org/get-started/previous-versions/)，属于本仓库的候选基线，不表示已完成 H100 验收：
+
+```bash
+conda create -n longlive_cuda python=3.11 -y
+conda activate longlive_cuda
+python -m pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements_cuda_bf16.txt
+```
+
+`requirements_common.txt` 是两种平台共用的模型与训练依赖。GPU Triton 随 CUDA PyTorch 安装，不安装 `torch_npu`、`triton-ascend` 或 MindIE-SD。驱动必须支持所选 CUDA runtime；编译 CUDA 扩展还需要匹配的系统 toolkit。Dense 默认可使用 PyTorch SDPA，FlashAttention-2 为可选项；FA3 需要显式启用，当前同时兼容旧 `flash_attn_interface` 与新 `flash_attn_3` 命名空间。
+
+所有既有入口通过 `LLV2_DEVICE=cuda` 选择 CUDA，使用 `CUDA_VISIBLE_DEVICES`；不加载 CANN，不要求指定 rendezvous 端口。`GENERATION_ENV` 在 CUDA 下默认使用当前激活环境，也可显式设置为该环境根目录。模型文件包括原始 Wan DiT、UMT5 权重及 tokenizer、VAE 和 LongLive2.0 合并 Generator；训练增量 checkpoint 必须先合并后用于推理。即使 `dit_only`，当前构造流程仍需要 VAE 权重。
+
+| CUDA 稀疏后端 | 用途与约束 |
+| --- | --- |
+| `portable` | 默认可微参考实现，按 LUT gather 选中 KV 后使用 4D SDPA；可验证功能，但不能据此承诺稀疏加速或训练显存。 |
+| `cuda_flex` | 显式启用的 CUDA FlexAttention 后端；PyTorch ≥ 2.9，BF16/FP16，128-token block；直接由 block LUT 构建前向与反向索引，不构造完整 token mask。强制使用 Triton，避免其他 lowering 忽略仅由元数据表达的稀疏 mask。 |
+
+先做小形状独立数值及梯度对照、未选 KV 扰动审计，再做真实 `Q=7040, KV=28160, H=6, D=128` 形状、四卡 NCCL/Ulysses/FSDP 烟测和完整训练 step。首次 FlexAttention 编译耗时不能计入正式性能。详细临时命令见[当前测试清单](current_test.md)。
+
+CUDA 训练默认以 BF16 加载冻结底座，并将实际可训练 LoRA/原始 `sla_linear` 提升为 FP32。FSDP 单独包装这些 FP32 叶模块，避免与 BF16 底座混合 flatten。`MODEL_LOAD_DTYPE=float32` 可恢复原始加载方式以排查差异，但主机内存和设备内存占用更高。四卡需要实测加载峰值、完整 Generator/Critic 更新与恢复；Teacher/Critic 当前没有 Ulysses 激活切分。
+
+### 9.1 独立 CUDA VBench 环境
+
+CUDA 生成和评估使用两个环境。官方 VBench 的 `transformers==4.33.2` 与本仓库生成依赖冲突，其安装脚本还限制 CUDA runtime 版本；不要安装进 `longlive_cuda`。以下建立独立评估环境，并保留官方源码供聚合使用：
+
+```bash
+conda create -n longlive_vbench_cuda python=3.10 -y
+conda activate longlive_vbench_cuda
+python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+python -m pip install setuptools wheel packaging
+git clone https://github.com/Vchitect/VBench.git /path/to/VBench
+export VBENCH_SOURCE_DIR=/path/to/VBench
+python -m pip install --no-build-isolation -e "${VBENCH_SOURCE_DIR}"
+python -m pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+```
+
+将 `/path/to/VBench` 替换为服务器实际目录；Detectron2 编译需要与评估环境匹配的 CUDA toolkit。安装及模型缓存仍需在目标 Linux 服务器验证。准备官方 16 维模型缓存后，生成入口通过 `VBENCH_ENV` 指向该评估环境、`VBENCH_SOURCE_DIR` 指向官方源码根目录、`VBENCH_CACHE_DIR` 指向缓存。评估调用官方 `VBench.evaluate(..., local=True)` 和官方聚合脚本，不修改维度权重。当前 CUDA 评估逐维使用 `cuda:0`，四卡用于视频生成；不将其描述为四卡并行 evaluator。
